@@ -44,6 +44,8 @@ export interface ControlResult {
   commands?: McSlashCommand[] | undefined;
   queued?: McQueuedMessage[] | undefined;
   settings?: McSessionSettings | undefined;
+  /** `rewindPreview`の応答（Issue #2160）。 */
+  rewindFiles?: string[] | undefined;
 }
 
 /** `launchOptions`・`pickFolder`・`launch`の応答（Issue #2137）。 */
@@ -133,6 +135,12 @@ const LONG_ACTIONS: ReadonlySet<McControlAction['action']> = new Set([
   'commandCandidates',
   // 全承認の同意ダイアログを人が閉じるまで返らない（Issue #2159）
   'changeSetting',
+  // 名前の保存・分岐・タブの作り直し・CLIへの巻き戻しの問い合わせ（Issue #2160）
+  'rename',
+  'fork',
+  'clear',
+  'rewindPreview',
+  'rewind',
 ]);
 
 function timeoutFor(action: McControlAction): number {
@@ -233,6 +241,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           commands: message.commands,
           queued: message.queued,
           settings: message.settings,
+          rewindFiles: message.rewindFiles,
         });
       }
     }

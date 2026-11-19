@@ -257,6 +257,8 @@ export interface McSnapshotInput {
   reviews?: ReadonlyMap<string, McReview> | undefined;
   /** Reloadで切れたこのウィンドウの会話（Issue #2138の3）。 */
   resumable?: readonly RunningTurnEntry[] | undefined;
+  /** 履歴でピン留めしているか（Issue #2160）。印は全ウィンドウ共通。 */
+  isPinned?: ((provider: 'codex' | 'claude', threadId: string) => boolean) | undefined;
 }
 
 export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot {
@@ -313,6 +315,7 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
       tokens: session.tokens,
       costUsd: session.costUsd,
       review: input.reviews?.get(key),
+      pinned: input.isPinned?.(session.provider, session.threadId) === true ? true : undefined,
     });
     for (const item of items) {
       addPending(item);

@@ -77,6 +77,8 @@ export interface McSession {
    * 「確認済み」にしていないときだけ載る。
    */
   review?: McReview | undefined;
+  /** 履歴でピン留めしているか（Issue #2160）。古い版の拡張ホストは返さない。 */
+  pinned?: boolean | undefined;
 }
 
 /** レビュー待ちの変更1ファイル。 */
@@ -405,6 +407,8 @@ export interface McTurn {
   truncated: boolean;
   /** `tool` / `diff`の見出し（コマンド行・ツール名・変更したファイル）。 */
   title?: string | undefined;
+  /** 人の発言の固定のid（Issue #2160）。巻き戻しの起点の指定に使う。 */
+  id?: string | undefined;
 }
 
 /** 拡張ホスト → webview。 */
@@ -432,6 +436,8 @@ export type McHostMessage =
       queued?: McQueuedMessage[] | undefined;
       /** `sessionSettings`・`changeSetting`の応答（Issue #2159）。 */
       settings?: McSessionSettings | undefined;
+      /** `rewindPreview`の応答（Issue #2160）。戻すと変わるファイル。 */
+      rewindFiles?: string[] | undefined;
     }
   | {
       /** `launchOptions`・`pickFolder`・`launch`への応答（Issue #2137）。 */
@@ -515,7 +521,17 @@ export type McControlAction =
   | { action: 'cancelQueued'; index: number; queuedId: string }
   // Issue #2159: 実行中セッションの設定
   | { action: 'sessionSettings' }
-  | McSettingChangeAction;
+  | McSettingChangeAction
+  // Issue #2160: 選んだセッションへの操作。clear・巻き戻しはwebviewで確認してから送る
+  | { action: 'rename'; name: string }
+  | { action: 'fork' }
+  | { action: 'pin' }
+  | { action: 'unpin' }
+  | { action: 'clear' }
+  | { action: 'handoff' }
+  /** `messageId`は`McTurn.id`（人の発言の固定のid）。表示テキストや位置では指さない。 */
+  | { action: 'rewindPreview'; messageId: string }
+  | { action: 'rewind'; messageId: string };
 
 /** 設定の変更1件（Issue #2159）。形は`sessionHub.ts`の`parseSessionSettingChange`が確かめる。 */
 export type McSettingChangeAction =

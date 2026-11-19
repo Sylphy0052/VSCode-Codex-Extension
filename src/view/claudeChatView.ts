@@ -3982,14 +3982,19 @@ export class ClaudeChatViewManager
     }
 
     try {
-      // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない。要約を待っている
-      // 付け直しが保存の直前に印を見るため、保存より先に付ける
-      await this.autoName?.marks.add(pinKeyFor({ provider: 'claude', id: sessionId }));
-      await this.store.rename(sessionId, name.trim());
-      entry.session.setName(name.trim());
+      await this.applyName(entry, sessionId, name.trim());
     } catch (e) {
       this.reportError(e);
     }
+  }
+
+  /** 名前を保存する。コマンドとMission Controlの名前の変更（Issue #2160）が通る。 */
+  private async applyName(entry: ClaudePanel, sessionId: string, name: string): Promise<void> {
+    // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない。要約を待っている
+    // 付け直しが保存の直前に印を見るため、保存より先に付ける
+    await this.autoName?.marks.add(pinKeyFor({ provider: 'claude', id: sessionId }));
+    await this.store.rename(sessionId, name);
+    entry.session.setName(name);
   }
 
   /**
@@ -4033,11 +4038,94 @@ export class ClaudeChatViewManager
       }
     }
 
+    await this.resetEntry(entry);
+  }
+
+  /** タブを閉じて同じフォルダで開き直す（`clearEntry`とMission Controlのクリアの実処理）。 */
+  private async resetEntry(entry: ClaudePanel): Promise<void> {
     const cwd = entry.cwd;
     // 会話を消しても、このタブで選んだ承認方法は持ち越す（Issue #1888）
     const permissionMode = entry.permissionMode;
     this.teardown(entry);
     await this.openNew(cwd, undefined, undefined, false, undefined, permissionMode);
+  }
+
+  /**
+   * Mission Controlからのクリア（Issue #2160）。確認は要求元が出し済みなので、ここでは
+   * ダイアログを出さず、断る理由を返す（別ウィンドウから操作した人にも見えるように）。
+   */
+  protected override async clearFromHub(entry: ClaudePanel): Promise<string | undefined> {
+    if (entry.taskManaged) {
+      return 'タスクが動かしている画面はクリアできません';
+    }
+    await this.resetEntry(entry);
+    return undefined;
+  }
+
+  /** Mission Controlからの名前の変更（Issue #2160）。 */
+  protected override async renameEntry(
+    entry: ClaudePanel,
+    name: string,
+  ): Promise<string | undefined> {
+    const sessionId = entry.session.threadId;
+    if (sessionId === undefined) {
+      return 'まだ始まっていない会話には名前を付けられません';
+    }
+    await this.applyName(entry, sessionId, name);
+    return undefined;
+  }
+
+  /** Mission Controlからの分岐（Issue #2160）。`-r <id> --fork-session`で会話全体を分岐する。 */
+  protected override async forkEntry(entry: ClaudePanel): Promise<string | undefined> {
+    const sessionId = entry.session.threadId;
+    if (sessionId === undefined) {
+      return 'まだ始まっていない会話は分岐できません';
+    }
+    const name =
+      entry.session.getState().name ?? this.store.getName(sessionId) ?? sessionId.slice(0, 8);
+    await this.openFork(sessionId, `${name} (fork)`, entry.cwd);
+    return undefined;
+  }
+
+  /** Mission Controlからの引き継ぎ（Issue #2160）。押下元のentryを固定して渡す。 */
+  protected override startHandoffFromHub(entry: ClaudePanel): string | undefined {
+    if (this.handoffPreparing.has(entry)) {
+      return '引き継ぎを準備しています。終わるまでお待ちください';
+    }
+    void this.requestHandoff(entry, { kind: 'manual' });
+    return undefined;
+  }
+
+  /**
+   * 巻き戻しで戻るファイル（Issue #2160）。会話の画面の巻き戻し（`rewindFiles`）と同じdry_runを
+   * 使い、確認は要求元のMission Controlが出す。
+   */
+  protected override async previewRewind(
+    entry: ClaudePanel,
+    messageId: string,
+  ): Promise<{ files: string[] } | { error: string }> {
+    const preview = await entry.session.previewRewindFiles(messageId);
+    return preview.ok
+      ? { files: preview.filesChanged }
+      : {
+          error: `この発言まで戻せません: ${preview.error}（CLIのバージョンや実行環境によって使えないことがあります）`,
+        };
+  }
+
+  /** ファイルを発言の直前まで戻す（Issue #2160。会話の履歴には触れない）。 */
+  protected override async applyRewind(
+    entry: ClaudePanel,
+    messageId: string,
+  ): Promise<string | undefined> {
+    const result = await entry.session.applyRewindFiles(messageId);
+    if (!result.ok) {
+      return `ファイルを戻せませんでした: ${result.error}`;
+    }
+    entry.session.noteLocalEvent(
+      `rewind:${randomUUID()}`,
+      `Mission Controlからファイルを発言の直前まで戻しました（会話の履歴は変わりません）`,
+    );
+    return undefined;
   }
 
   /** セッションとループだけを組み立てる。パネルはまだ作らない。 */

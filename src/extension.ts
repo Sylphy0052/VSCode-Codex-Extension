@@ -326,6 +326,36 @@ const LONG_REPLY_KINDS: ReadonlySet<SessionControlAction['kind']> = new Set([
   'commandCandidates',
   // 全承認へ上げるときは宛先のウィンドウで同意のダイアログを待つ（Issue #2159）
   'changeSetting',
+  // 名前の保存・分岐・タブの作り直し・CLIへの巻き戻しの問い合わせ（Issue #2160）
+  'rename',
+  'fork',
+  'clear',
+  'rewindPreview',
+  'rewind',
+]);
+
+/** Mission Controlから選んだセッションを変える操作（Issue #2160）。受け付けたら1行残す。 */
+const SESSION_OP_KINDS: ReadonlySet<SessionControlAction['kind']> = new Set([
+  'rename',
+  'fork',
+  'pin',
+  'unpin',
+  'clear',
+  'handoff',
+  'rewind',
+]);
+
+/** 受信側で`controlSessionAsync`を待つ操作（Issue #2158、#2159、#2160）。 */
+const ASYNC_CONTROL_KINDS: ReadonlySet<SessionControlAction['kind']> = new Set([
+  'fileCandidates',
+  'commandCandidates',
+  'changeSetting',
+  'rename',
+  'fork',
+  'clear',
+  'handoff',
+  'rewindPreview',
+  'rewind',
 ]);
 
 /**
@@ -1624,6 +1654,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   };
   // 回答済みの待ち項目（Issue #2135）。同じ項目に2箇所から答えても二重に送らない
   const answeredPending = new AnsweredPendingIds();
+  /**
+   * 履歴のピン留め / 解除（Issue #2160）。印は全ウィンドウ共通の`globalState`にあり会話に
+   * 属さないため、会話が開いているかを問わずこのウィンドウで済ませる。
+   */
+  const setSessionPinned = async (
+    provider: 'codex' | 'claude',
+    threadId: string,
+    pinned: boolean,
+  ): Promise<SessionControlResult> => {
+    const session = { provider, id: threadId };
+    await (pinned ? tree.pin(session) : tree.unpin(session));
+    return { ok: true };
+  };
   const controlSession = async (
     provider: 'codex' | 'claude',
     threadId: string,
@@ -1646,16 +1689,28 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
             ((action.kind === 'answerQuestion' || action.kind === 'answerPrompt') &&
               !approvalDisclosure.consume(target, action.pendingRequestId))
           ? { ok: false, error: '承認の内容を表示してから操作してください' }
-          : // 候補の取り寄せと設定の変更（Issue #2159）だけ待つ。回答は待ちを挟まず、二重送信の
-            // 判定（answeredPending）から記録までを同期で済ませる
-            action.kind === 'fileCandidates' ||
-              action.kind === 'commandCandidates' ||
-              action.kind === 'changeSetting'
-            ? await (provider === 'claude' ? claudeChat : chat).controlSessionAsync(
-                threadId,
-                action,
-              )
-            : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+          : action.kind === 'pin' || action.kind === 'unpin'
+            ? await setSessionPinned(provider, threadId, action.kind === 'pin')
+            : // 候補の取り寄せ・設定の変更（Issue #2159）・セッション操作（Issue #2160）だけ待つ。
+              // 回答は待ちを挟まず、二重送信の判定（answeredPending）から記録までを同期で済ませる
+              ASYNC_CONTROL_KINDS.has(action.kind)
+              ? await (provider === 'claude' ? claudeChat : chat).controlSessionAsync(
+                  threadId,
+                  action,
+                )
+              : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+    // Claudeの名前は拡張機能側の保存が正。履歴の一覧へすぐ出す（`claude.renameChat`と同じ）
+    if (action.kind === 'rename' && provider === 'claude' && result.ok) {
+      tree.refresh();
+    }
+    // 会話を変える操作（Issue #2160）は1行残す。どのウィンドウから変えたかを後から追えるように
+    if (SESSION_OP_KINDS.has(action.kind)) {
+      log.info(
+        `セッション統括: ${action.kind}を受け付けました` +
+          `（要求元 ${from}、${provider}/${threadId}、` +
+          `結果 ${result.ok ? '実行' : (result.error ?? '失敗')}）`,
+      );
+    }
     if (pendingId !== undefined && result.ok) {
       answeredPending.add(pendingId);
     }
@@ -1807,7 +1862,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     if (action.kind === 'answerTaskRunQuestion' && target.windowId === windowId) {
       return answerTaskRunPending(action.pendingId, action.text, windowId);
     }
-    if (target.windowId === windowId) {
+    // ピン留めは全ウィンドウ共通の印（Issue #2160）。宛先へ回さずこのウィンドウで済ませると、
+    // Mission Controlの表示（このウィンドウの`globalState`から読む）にもすぐ効く
+    if (target.windowId === windowId || action.kind === 'pin' || action.kind === 'unpin') {
       return controlSession(target.provider, target.threadId, action, windowId);
     }
     const reply = await sessionHubRequestPort.request(
@@ -1829,6 +1886,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         queuedId: action.kind === 'cancelQueued' ? action.queuedId : undefined,
         setting: action.kind === 'changeSetting' ? action.change.setting : undefined,
         settingValue: action.kind === 'changeSetting' ? action.change.value : undefined,
+        name: action.kind === 'rename' ? action.name : undefined,
+        messageId:
+          action.kind === 'rewindPreview' || action.kind === 'rewind'
+            ? action.messageId
+            : undefined,
         pendingId: action.kind === 'answerTaskRunQuestion' ? action.pendingId : undefined,
         sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
         approvalRequestId:
@@ -1864,6 +1926,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       commands: reply.payload?.commands,
       queued: reply.payload?.queued,
       settings: reply.payload?.settings,
+      rewindFiles: reply.payload?.rewindFiles,
     };
   };
   // エージェント向けの口（design.md §16.21「宛先解決の統合」、Issue #1274）。
@@ -2075,6 +2138,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         activitySince: missionControlActivitySince,
         now: Date.now(),
         stallMs: readMissionControlStallMs(),
+        // ピン留めの印は全ウィンドウ共通（Issue #2160）。他ウィンドウのセッションもここで引く
+        isPinned: (provider, threadId) =>
+          pinnedSessions.isPinned(pinKeyFor({ provider, id: threadId })),
       });
       const runsPort = missionControlRunsHolder.current;
       return runsPort === undefined

@@ -5,7 +5,9 @@ import {
   isSharedApprovalDecision,
   isSharedHandoffDecision,
   isWindowIdShape,
+  parseSessionName,
   parseSessionSettingChange,
+  parseTurnId,
   type SessionHubReplyPayload,
   type SessionHubRequest,
 } from './sessionHub';
@@ -165,6 +167,26 @@ export function parseAction(message: Record<string, unknown>): SessionControlAct
       const change = parseSessionSettingChange(message.setting, message.value);
       return change === undefined ? undefined : { kind: 'changeSetting', change };
     }
+    // Issue #2160: 選んだセッションへのrename・fork・pin・clear・引き継ぎ・巻き戻し
+    case 'rename': {
+      const name = parseSessionName(message.name);
+      return name === undefined ? undefined : { kind: 'rename', name };
+    }
+    case 'fork':
+      return { kind: 'fork' };
+    case 'pin':
+      return { kind: 'pin' };
+    case 'unpin':
+      return { kind: 'unpin' };
+    case 'clear':
+      return { kind: 'clear' };
+    case 'handoff':
+      return { kind: 'handoff' };
+    case 'rewindPreview':
+    case 'rewind': {
+      const messageId = parseTurnId(message.messageId);
+      return messageId === undefined ? undefined : { kind: message.action, messageId };
+    }
     default:
       return undefined;
   }
@@ -201,6 +223,9 @@ export function toReplyPayload(result: SessionControlResult): SessionHubReplyPay
   if (result.settings !== undefined) {
     return { settings: result.settings };
   }
+  if (result.rewindFiles !== undefined) {
+    return { rewindFiles: result.rewindFiles };
+  }
   return undefined;
 }
 
@@ -235,6 +260,8 @@ export function toSessionControlAction(
     | 'queuedId'
     | 'setting'
     | 'settingValue'
+    | 'name'
+    | 'messageId'
   >,
 ): SessionControlAction | undefined {
   const { text, approvalRequestId, decision, limit, sideQuestionId } = request;
@@ -325,6 +352,18 @@ export function toSessionControlAction(
         setting: request.setting,
         value: request.settingValue,
       });
+    // Issue #2160: 形は`parseAction`（webviewの入口）と同じ規則で確かめる
+    case 'rename':
+      return parseAction({ action: 'rename', name: request.name });
+    case 'fork':
+    case 'pin':
+    case 'unpin':
+    case 'clear':
+    case 'handoff':
+      return parseAction({ action: request.kind });
+    case 'rewindPreview':
+    case 'rewind':
+      return parseAction({ action: request.kind, messageId: request.messageId });
     default:
       return undefined;
   }
