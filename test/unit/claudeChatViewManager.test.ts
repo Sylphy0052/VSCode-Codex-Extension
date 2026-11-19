@@ -554,7 +554,7 @@ describe('ClaudeChatViewManager', () => {
         'workflowMenu',
         'teamWorkflow',
         'workflowView',
-        'sessionKanban',
+        'missionControl',
         'openProgress',
       ]) {
         expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
@@ -1917,15 +1917,15 @@ describe('ワークフローの導線（issue #250）', () => {
     expect(__mock.executedCommands).toContain('agent.workflows.view');
   });
 
-  it('三点メニューのセッションカンバンからagent.sessionKanbanを実行する', async () => {
+  it('三点メニューのMission Controlからagent.missionControl.openを実行する', async () => {
     stubStart();
     const { manager } = createManager();
     await manager.openNew();
 
-    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'sessionKanban' });
+    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'missionControl' });
     await flush();
 
-    expect(__mock.executedCommands).toContain('agent.sessionKanban');
+    expect(__mock.executedCommands).toContain('agent.missionControl.open');
   });
 
   it('セッションが起動していなくてもエラーにしない（会話と独立した操作のため）', async () => {

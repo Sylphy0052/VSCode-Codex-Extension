@@ -491,7 +491,7 @@ describe('chatView.ts の補完カバレッジ', () => {
       ['workflowMenu', 'agent.workflows.menu'],
       ['teamWorkflow', 'agent.workflows.team'],
       ['workflowView', 'agent.workflows.view'],
-      ['sessionKanban', 'agent.sessionKanban'],
+      ['missionControl', 'agent.missionControl.open'],
       ['forgeHub', 'agent.forgeHub'],
       ['orchestratorMode', 'agent.taskRun.start'],
       ['openProgress', 'agent.openProgress'],

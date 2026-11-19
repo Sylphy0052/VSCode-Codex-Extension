@@ -66,6 +66,48 @@ export interface McSession {
   lastOutput?: string | undefined;
   /** 出力が最後に変わった時刻（ms）。停滞の判定に使う。古い版のウィンドウでは無い。 */
   lastOutputAt?: number | undefined;
+  /**
+   * レビュー待ち（Issue #2138の1）。ターンが終わって作業ツリーに変更が残っていて、まだ
+   * 「確認済み」にしていないときだけ載る。
+   */
+  review?: McReview | undefined;
+}
+
+/** レビュー待ちの変更1ファイル。 */
+export interface McReviewFile {
+  /** gitのtoplevelからの相対パス（`/`区切り）。 */
+  path: string;
+  /** 追加行数。バイナリ・未追跡は`undefined`。 */
+  added?: number | undefined;
+  /** 削除行数。バイナリ・未追跡は`undefined`。 */
+  deleted?: number | undefined;
+  /** 未追跡（新規）のファイル。 */
+  untracked: boolean;
+}
+
+/** セッションの作業ツリーの変更（未commitと、比較元からの差分）。 */
+export interface McReview {
+  /** 比較元の表示名（`origin/main`か`HEAD`）。 */
+  baseLabel: string;
+  files: McReviewFile[];
+  added: number;
+  deleted: number;
+  /** ファイルが多すぎて`files`を途中で切ったか。 */
+  truncated: boolean;
+}
+
+/** Reloadで切れたセッション（Issue #2138の3）。Inboxに「再開待ち」として出す。 */
+export interface McResumeItem {
+  /** 一覧の中で一意（`resume:<provider>:<threadId>`）。 */
+  id: string;
+  windowId: string;
+  provider: McProvider;
+  threadId: string;
+  title: string;
+  repoKey: string;
+  cwdLabel: string;
+  /** Reloadの前に実行中だと最初に見た時刻（ms）。 */
+  since: number;
 }
 
 /** 左のrepoレールの1行。 */
@@ -88,6 +130,8 @@ export interface McSnapshot {
   pending: McPendingItem[];
   /** 実行中のまま出力がこの時間（ms）動かなければ「停滞」とする（Issue #2137の5）。 */
   stallMs: number;
+  /** Reloadで切れたセッション（このウィンドウの分だけ）。古い版の拡張ホストでは無い。 */
+  resumable?: McResumeItem[] | undefined;
 }
 
 /** 新規セッションの起動先の候補（Issue #2137の1）。 */
@@ -143,6 +187,28 @@ export interface McApprovalDetail {
   answerBlockedReason?: string | undefined;
 }
 
+/** 引き継ぎ確認の中身（`SessionHandoffDetail`と同じ形）。 */
+export interface McHandoffDetail {
+  requestId: string;
+  model: string;
+  effort: string;
+  reasons: string[];
+  trigger: string;
+  canReclassify: boolean;
+  models: Array<{ slug: string; label: string; efforts: string[] }>;
+}
+
+export type McHandoffDecision = 'proceed' | 'repick' | 'reclassify' | 'cancel';
+
+/** 脇道の質問1件の進み具合（`SessionSideQuestion`と同じ形）。 */
+export interface McSideQuestion {
+  id: string;
+  status: 'running' | 'done' | 'failed';
+  question: string;
+  answer?: string | undefined;
+  error?: string | undefined;
+}
+
 export interface McTurn {
   role: 'user' | 'agent';
   text: string;
@@ -159,6 +225,10 @@ export type McHostMessage =
       error?: string | undefined;
       approvals?: McApprovalDetail[] | undefined;
       turns?: McTurn[] | undefined;
+      /** `handoffDetail`の応答。保留が無ければ無い。 */
+      handoff?: McHandoffDetail | undefined;
+      /** `sideQuestion`・`sideQuestionResult`の応答。 */
+      sideQuestion?: McSideQuestion | undefined;
     }
   | {
       /** `launchOptions`・`pickFolder`・`launch`への応答（Issue #2137）。 */
@@ -188,7 +258,7 @@ export interface McTarget {
 }
 
 /**
- * webview → 拡張ホストの操作。`action`以降の形は`sessionKanbanView.ts`の`parseAction`が
+ * webview → 拡張ホストの操作。`action`以降の形は`sessionControlMessage.ts`の`parseAction`が
  * 受け付けるものと同じにし、拡張ホスト側は同じ関数で確かめる。
  */
 export type McControlAction =
@@ -206,7 +276,17 @@ export type McControlAction =
       pendingRequestId: string;
       submission: { action: 'submit' | 'decline'; values: Record<string, string[]> };
     }
-  | { action: 'answerTaskRunQuestion'; pendingId: string; text: string };
+  | { action: 'answerTaskRunQuestion'; pendingId: string; text: string }
+  | { action: 'handoffDetail' }
+  | {
+      action: 'handoffDecision';
+      handoffRequestId: string;
+      decision: McHandoffDecision;
+      model?: string | undefined;
+      effort?: string | undefined;
+    }
+  | { action: 'sideQuestion'; text: string }
+  | { action: 'sideQuestionResult'; sideQuestionId: string };
 
 export type McWebviewMessage =
   | { type: 'ready' }
@@ -215,4 +295,14 @@ export type McWebviewMessage =
   | { type: 'pickFolder'; seq: number }
   | ({ type: 'launch'; seq: number } & McLaunchRequest)
   /** ライブtailの対象。`target`が無ければ止める。 */
-  | { type: 'watch'; target?: McTarget | undefined };
+  | { type: 'watch'; target?: McTarget | undefined }
+  /** レビュー待ちの1ファイルをdiffエディタで開く（Issue #2138の1）。 */
+  | ({ type: 'openDiff'; seq: number; path: string } & McTarget)
+  /** レビュー待ちを「確認済み」にする。 */
+  | ({ type: 'reviewAck'; seq: number } & McTarget)
+  /** 再開待ちの会話を開き直す（Issue #2138の3）。 */
+  | ({ type: 'resume'; seq: number } & McTarget)
+  /** 再開待ちを一覧から外す。 */
+  | ({ type: 'resumeDismiss'; seq: number } & McTarget)
+  /** ウィンドウのReload。実行中のターンがあれば拡張ホストが件数を出して確かめる。 */
+  | { type: 'reloadWindow'; seq: number };

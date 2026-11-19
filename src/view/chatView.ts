@@ -3721,8 +3721,8 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         await vscode.commands.executeCommand('agent.workflows.view');
         return;
       }
-      if (type === 'sessionKanban') {
-        await vscode.commands.executeCommand('agent.sessionKanban');
+      if (type === 'missionControl') {
+        await vscode.commands.executeCommand('agent.missionControl.open');
         return;
       }
       if (type === 'forgeHub') {

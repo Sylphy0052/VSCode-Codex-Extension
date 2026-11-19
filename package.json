@@ -114,7 +114,7 @@
           "group": "navigation@5.1"
         },
         {
-          "command": "agent.sessionKanban",
+          "command": "agent.missionControl.open",
           "when": "view == codex.sessions",
           "group": "navigation@5.2"
         },
@@ -276,6 +276,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "agent.sessionKanban",
+          "when": "false"
+        },
         {
           "command": "codex.openSession",
           "when": "false"
@@ -535,7 +539,7 @@
       },
       {
         "command": "agent.sessionKanban",
-        "title": "セッション統括を開く",
+        "title": "Mission Controlを開く（旧: セッション統括）",
         "category": "Agent",
         "icon": "$(project)"
       },
@@ -847,7 +851,7 @@
           ],
           "default": "cyber",
           "scope": "window",
-          "markdownDescription": "チャット画面とセッション統括画面の外装（Codex/Claude Code両画面共通）。`cyber`は枠・左のバー・見出し・背景の方眼にネオン色を使う。本文の文字色・行間・1行の長さは外装によらず同じで、`#agent.chat.density#`の設定もそのまま効く。高コントラストテーマでは装飾を自動で無効にする。変更を反映するには該当するタブを開き直す。"
+          "markdownDescription": "チャット画面の外装（Codex/Claude Code両画面共通）。`cyber`は枠・左のバー・見出し・背景の方眼にネオン色を使う。本文の文字色・行間・1行の長さは外装によらず同じで、`#agent.chat.density#`の設定もそのまま効く。高コントラストテーマでは装飾を自動で無効にする。変更を反映するには該当するタブを開き直す。"
         },
         "agent.chat.sendOn": {
           "type": "string",
@@ -881,7 +885,7 @@
               "workflowMenu",
               "teamWorkflow",
               "workflowView",
-              "sessionKanban",
+              "missionControl",
               "forgeHub",
               "orchestratorMode",
               "openProgress",
@@ -905,7 +909,7 @@
               "ワークフローの実行・View・生成・停止を選ぶ",
               "チームモードのワークフローを作成する",
               "ワークフローViewを開く",
-              "このワークスペースで開いている会話を状態別に表示する",
+              "Mission Control（全ウィンドウの会話と回答待ちの一覧）を開く",
               "Forge Hubを開く",
               "オーケストレータモードを開始する",
               "このセッションの進捗を別タブで表示する",
@@ -938,7 +942,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "引き継ぎ（自動で発火したもの（Issue #1350）と、手動の引き継ぎボタン（Issue #1510）の両方）で、確認ダイアログとセッション統括ページの保留カードを出さず、分類器（またはその既定値）の提案したmodel/effortでそのまま引き継ぐ。この設定が決めるのは新規セッションの初期値だけで、会話ごとの切り替えは入力欄の「…」メニューの「自動引き継ぎの自動承認」で行う（その操作はこの設定を書き換えない）。引き継ぎ先のセッションは引き継ぎ元の値をそのまま継ぐ。既定はON（Issue #1585）。確認を挟みたい場合はOFFにする。Codex/Claude Code両画面共通。"
+          "markdownDescription": "引き継ぎ（自動で発火したもの（Issue #1350）と、手動の引き継ぎボタン（Issue #1510）の両方）で、確認ダイアログとMission ControlのInboxの引き継ぎ確認を出さず、分類器（またはその既定値）の提案したmodel/effortでそのまま引き継ぐ。この設定が決めるのは新規セッションの初期値だけで、会話ごとの切り替えは入力欄の「…」メニューの「自動引き継ぎの自動承認」で行う（その操作はこの設定を書き換えない）。引き継ぎ先のセッションは引き継ぎ元の値をそのまま継ぐ。既定はON（Issue #1585）。確認を挟みたい場合はOFFにする。Codex/Claude Code両画面共通。"
         },
         "agent.claude.idleShutdownMinutes": {
           "type": "number",
@@ -1691,7 +1695,7 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "markdownDescription": "会話どうしが直接メッセージをやり取りできるようにする。有効にすると、会話を開くたびにメッセージング用のMCPサーバ（`task-messaging`）がその会話にだけ渡り、エージェントは`list_sessions`で他の会話（別のVS Codeウィンドウのものを含む）を一覧し、`send_message` / `ask_session`で話しかけられるようになる。Codexの会話とClaude Codeの会話のどちらからどちらへでも送れる。\n\n宛先は統括ページの各カードに出るセッションIDを使う。サーバは`127.0.0.1`のエフェメラルポートで待ち受け、会話ごとに発行した推測不能なトークン付きURLでしか到達できない。\n\n無効にすると、会話にはMCPサーバが渡らず、その分ツール定義がターンに載らない。ワークフローのタスク間メッセージング（run単位のサーバ）はこの設定とは無関係に動く。"
+          "markdownDescription": "会話どうしが直接メッセージをやり取りできるようにする。有効にすると、会話を開くたびにメッセージング用のMCPサーバ（`task-messaging`）がその会話にだけ渡り、エージェントは`list_sessions`で他の会話（別のVS Codeウィンドウのものを含む）を一覧し、`send_message` / `ask_session`で話しかけられるようになる。Codexの会話とClaude Codeの会話のどちらからどちらへでも送れる。\n\n宛先は`list_sessions`が返すセッションIDを使う。サーバは`127.0.0.1`のエフェメラルポートで待ち受け、会話ごとに発行した推測不能なトークン付きURLでしか到達できない。\n\n無効にすると、会話にはMCPサーバが渡らず、その分ツール定義がターンに載らない。ワークフローのタスク間メッセージング（run単位のサーバ）はこの設定とは無関係に動く。"
         },
         "agent.orchestrator.promptMetrics.enabled": {
           "type": "boolean",

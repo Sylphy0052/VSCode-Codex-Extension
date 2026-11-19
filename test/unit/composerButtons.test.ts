@@ -23,7 +23,7 @@ describe('COMPOSER_BUTTON_IDS（issue #296、入力欄アイコン列の正準�
       'workflowMenu',
       'teamWorkflow',
       'workflowView',
-      'sessionKanban',
+      'missionControl',
       'forgeHub',
       'orchestratorMode',
       'openProgress',
@@ -70,6 +70,12 @@ describe('isComposerButtonId', () => {
 describe('normalizeComposerButtons（設定 agent.chat.composerButtons の検証）', () => {
   it('未設定（undefined）は既定へ落ちる', () => {
     expect(normalizeComposerButtons(undefined)).toEqual({ buttons: DEFAULT_COMPOSER_BUTTONS });
+  });
+
+  it('旧統括ページのID（sessionKanban）はmissionControlへ読み替える（Issue #2138）', () => {
+    expect(normalizeComposerButtons(['attach', 'sessionKanban'])).toEqual({
+      buttons: ['attach', 'missionControl'],
+    });
   });
 
   it('配列でない値は既定へ落ちる', () => {
@@ -123,7 +129,7 @@ describe('overflowComposerButtons（「…」メニューへ畳むボタンの�
       'workflowMenu',
       'teamWorkflow',
       'workflowView',
-      'sessionKanban',
+      'missionControl',
       'forgeHub',
       'orchestratorMode',
       'openProgress',

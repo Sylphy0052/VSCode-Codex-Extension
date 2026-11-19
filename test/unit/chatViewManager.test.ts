@@ -921,7 +921,7 @@ describe('ChatViewManager', () => {
         'workflowMenu',
         'teamWorkflow',
         'workflowView',
-        'sessionKanban',
+        'missionControl',
         'openProgress',
       ]) {
         expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
@@ -1801,17 +1801,17 @@ describe('ChatViewManager', () => {
     });
   });
 
-  it('三点メニューのセッションカンバンからagent.sessionKanbanを実行する', async () => {
+  it('三点メニューのMission Controlからagent.missionControl.openを実行する', async () => {
     const { manager, connection } = createManager();
     const opened = manager.openNew();
     await tick();
     connection.resolveFirst('thread/start', threadStartResult('thread-session-kanban'));
     await opened;
 
-    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'sessionKanban' });
+    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'missionControl' });
     await tick();
 
-    expect(__mock.executedCommands).toContain('agent.sessionKanban');
+    expect(__mock.executedCommands).toContain('agent.missionControl.open');
   });
 
   describe('タブ名の状態表示（issue #286、design.md §14.55）', () => {

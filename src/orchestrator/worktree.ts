@@ -378,6 +378,18 @@ export function isWorkflowBranchName(branch: string): boolean {
   return WF_BRANCH_PATTERN.test(branch) || CONVENTIONAL_BRANCH_PATTERN.test(branch);
 }
 
+/**
+ * Mission Controlの手動セッション用worktreeのブランチ名（Issue #2138）。`mc/<taskId>`の形で、
+ * オーケストレータの`wf/`とは別の名前空間に置く。不要になったら`git branch --list 'mc/*'`で
+ * まとめて見つけられる。
+ */
+export function sessionBranchName(taskId: string, retry?: number): string {
+  return `mc/${withRetrySuffix(taskId, retry)}`;
+}
+
+/** `sessionBranchName()`の生成形。先頭が英数字であることを崩さない（`WF_BRANCH_PATTERN`と同じ理由）。 */
+export const SESSION_BRANCH_PATTERN = /^mc\/[A-Za-z0-9_][A-Za-z0-9_-]{0,60}$/u;
+
 /** ワークスペースがgitの作業ツリーかどうか（ベアリポジトリを除く）。 */
 export async function isGitWorkingTree(repoRoot: string, git: GitCommandRunner): Promise<boolean> {
   const result = await git.run(['rev-parse', '--is-inside-work-tree'], repoRoot);
@@ -670,13 +682,22 @@ async function createWorktree(
     };
   }
 
-  const branch = branchName(request.runId, request.taskId, request.retry, request.branchNaming);
+  // Mission Controlの手動セッション（`location: 'claude'`）は、オーケストレータの名前空間（`wf/`）
+  // を使わない。`wf/`のままだとオーケストレータの実行のブランチと見分けられない（Issue #2138）
+  const branch =
+    request.location === 'claude'
+      ? sessionBranchName(request.taskId, request.retry)
+      : branchName(request.runId, request.taskId, request.retry, request.branchNaming);
   // `branchName()`が生成した値を無検証で`git worktree add -b <branch>`（`-b`の直後はオプション値
   // として消費されるため現時点で実害は無い）へ渡さず、ここでも`isWorkflowBranchName`で自己検証
   // する（多層防御。レビュー指摘）。`pushBranch`（`forge.ts`）や`mergeTaskBranch`（`integration.ts`）
   // はgitへ渡す直前に同種の再検証を行っており、防御が生成ロジックの正しさだけに依存する
   // 一枚防御になっていた
-  if (!isWorkflowBranchName(branch)) {
+  if (
+    request.location === 'claude'
+      ? !SESSION_BRANCH_PATTERN.test(branch)
+      : !isWorkflowBranchName(branch)
+  ) {
     return {
       ok: false,
       reason: 'invalidIdentifier',

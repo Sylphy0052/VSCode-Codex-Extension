@@ -9,16 +9,27 @@ import {
   type Submit,
 } from './answerForms';
 import type { Bridge, ControlResult } from './bridge';
+import {
+  HandoffForm,
+  ResumeDetail,
+  ResumeRow,
+  ReviewList,
+  ReviewSection,
+  SideQuestionForm,
+} from './extras';
 import { KindIcon, ProviderIcon } from './icons';
 import {
   ACTIVITY_LABELS,
   countSessionsInRepo,
   EMPTY_FILTER,
+  countByActivity,
   filterPending,
+  filterResumable,
   filterSessions,
   formatElapsed,
   groupSessionsByRepo,
   isStalled,
+  stalledSince,
   KEY_HELP,
   mapKey,
   moveSelection,
@@ -29,12 +40,14 @@ import {
   type McProviderFilter,
 } from './logic';
 import type {
+  McActivity,
   McApprovalDetail,
   McControlAction,
   McLaunchRepo,
   McPendingItem,
   McProvider,
   McRepo,
+  McResumeItem,
   McSession,
   McSnapshot,
   McTarget,
@@ -67,6 +80,14 @@ function sessionRowId(session: McSession): string {
   return `s:${session.key}`;
 }
 
+function isActivity(value: unknown): value is McActivity {
+  return typeof value === 'string' && Object.hasOwn(ACTIVITY_LABELS, value);
+}
+
+function resumeRowId(item: McResumeItem): string {
+  return `r:${item.id}`;
+}
+
 function readPersisted(raw: unknown): PersistedState {
   const fallback: PersistedState = { filter: EMPTY_FILTER, selected: undefined, viewMode: 'list' };
   if (typeof raw !== 'object' || raw === null) {
@@ -83,6 +104,7 @@ function readPersisted(raw: unknown): PersistedState {
               filter.provider === 'codex' || filter.provider === 'claude' ? filter.provider : 'all',
             currentWindowOnly: filter.currentWindowOnly === true,
             query: typeof filter.query === 'string' ? filter.query : '',
+            activity: isActivity(filter.activity) ? filter.activity : undefined,
           }
         : EMPTY_FILTER,
     selected: typeof v.selected === 'string' ? v.selected : undefined,
@@ -188,9 +210,19 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     [snapshot, repos, filter],
   );
   const groups = useMemo(() => groupSessionsByRepo(sessions, repos), [sessions, repos]);
+  // Issue #2138: 再開待ちとレビュー待ち
+  const resumable = useMemo(
+    () => filterResumable(snapshot?.resumable ?? [], repos, filter),
+    [snapshot, repos, filter],
+  );
+  const reviewSessions = useMemo(() => sessions.filter((s) => s.review !== undefined), [sessions]);
   const rowIds = useMemo(
-    () => [...pending.map(pendingRowId), ...groups.flatMap((g) => g.sessions.map(sessionRowId))],
-    [pending, groups],
+    () => [
+      ...pending.map(pendingRowId),
+      ...resumable.map(resumeRowId),
+      ...groups.flatMap((g) => g.sessions.map(sessionRowId)),
+    ],
+    [pending, resumable, groups],
   );
 
   // 選択中の行が消えた（回答済み・絞り込み）ら選択を外す。同じ位置の別の行へ移すと、遅れて
@@ -207,6 +239,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   }, [snapshot, rowIds, selected]);
 
   const selectedPending = pending.find((item) => pendingRowId(item) === selected);
+  const selectedResume = resumable.find((item) => resumeRowId(item) === selected);
   const selectedSession =
     selectedPending === undefined
       ? sessions.find((session) => sessionRowId(session) === selected)
@@ -488,13 +521,27 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           >
             ＋ 新規
           </button>
+          <button
+            type="button"
+            class="btn"
+            title="ウィンドウをReloadする"
+            onClick={() =>
+              void bridge.reloadWindow().then((result) => {
+                if (!result.ok) {
+                  setToast(result.error ?? 'Reloadを取りやめました');
+                }
+              })
+            }
+          >
+            Reload
+          </button>
           <button type="button" class="btn" onClick={() => setHelpOpen(true)} title="キー操作">
             ?
           </button>
         </div>
         <section class="section" aria-label="Inbox">
-          <h2 class="pane-title">Inbox（{String(pending.length)}）</h2>
-          {pending.length === 0 ? (
+          <h2 class="pane-title">Inbox（{String(pending.length + resumable.length)}）</h2>
+          {pending.length === 0 && resumable.length === 0 ? (
             <p class="empty">回答待ちの項目はありません。</p>
           ) : (
             pending.map((item) => (
@@ -510,7 +557,23 @@ export function App(props: { bridge: Bridge }): JSX.Element {
               />
             ))
           )}
+          {resumable.map((item) => (
+            <ResumeRow
+              key={item.id}
+              item={item}
+              repos={repos}
+              now={now}
+              selected={selected === resumeRowId(item)}
+              onSelect={() => setSelected(resumeRowId(item))}
+            />
+          ))}
         </section>
+        <ReviewSection
+          sessions={reviewSessions}
+          selected={selected}
+          rowId={sessionRowId}
+          onSelect={setSelected}
+        />
         <section class="section" aria-label="セッション一覧">
           <h2 class="pane-title">セッション（{String(sessions.length)}）</h2>
           {groups.length === 0 ? (
@@ -544,6 +607,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           <PendingDetail
             key={selectedPending.id}
             item={selectedPending}
+            bridge={bridge}
             repos={repos}
             session={sessionOf(selectedPending)}
             now={now}
@@ -561,6 +625,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           <SessionDetail
             key={selectedSession.key}
             session={selectedSession}
+            bridge={bridge}
+            onToast={setToast}
             now={now}
             stallMs={snapshot.stallMs}
             onSend={(text) => sendTo(selectedSession, text)}
@@ -574,6 +640,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
             onSelectPending={(item) => setSelected(pendingRowId(item))}
             onReloadTurns={() => loadTurns(selectedSession)}
             onSessionAction={sessionAction}
+          />
+        ) : selectedResume !== undefined ? (
+          <ResumeDetail
+            key={selectedResume.id}
+            item={selectedResume}
+            now={now}
+            bridge={bridge}
+            onToast={setToast}
           />
         ) : (
           <p class="empty">項目を選ぶと詳細が出ます（j / kで移動）。</p>
@@ -610,6 +684,7 @@ function Rail(props: {
     ['codex', 'Codex'],
     ['claude', 'Claude'],
   ];
+  const activityCounts = countByActivity(props.snapshot.sessions, props.repos, filter);
   return (
     <nav class="pane" aria-label="repo">
       <h2 class="pane-title">Repo</h2>
@@ -635,6 +710,25 @@ function Rail(props: {
           <span class="rail-label">{repo.label}</span>
           <span class="count">{String(repo.sessionCount)}</span>
           {repo.pendingCount > 0 ? <span class="badge">{String(repo.pendingCount)}</span> : null}
+        </button>
+      ))}
+      <h2 class="pane-title">状態</h2>
+      <button
+        type="button"
+        class={filter.activity === undefined ? 'rail-item active' : 'rail-item'}
+        onClick={() => onFilter({ ...filter, activity: undefined })}
+      >
+        <span class="rail-label">すべて</span>
+      </button>
+      {(Object.keys(ACTIVITY_LABELS) as McActivity[]).map((activity) => (
+        <button
+          key={activity}
+          type="button"
+          class={filter.activity === activity ? 'rail-item active' : 'rail-item'}
+          onClick={() => onFilter({ ...filter, activity })}
+        >
+          <span class="rail-label">{ACTIVITY_LABELS[activity]}</span>
+          <span class="count">{String(activityCounts[activity])}</span>
         </button>
       ))}
       <div class="filters">
@@ -703,10 +797,11 @@ function PendingRow(props: {
 /** 状態のピル。実行中で出力が止まっていれば「停滞」にする（Issue #2137の5）。 */
 function ActivityPill(props: { session: McSession; now: number; stallMs: number }): JSX.Element {
   const { session, now, stallMs } = props;
-  if (isStalled(session, now, stallMs) && session.lastOutputAt !== undefined) {
+  const since = stalledSince(session);
+  if (isStalled(session, now, stallMs) && since !== undefined) {
     return (
       <span class="pill stalled" title="実行中ですが、出力が止まっています">
-        停滞 {formatElapsed(now - session.lastOutputAt)}
+        停滞 {formatElapsed(now - since)}
       </span>
     );
   }
@@ -837,6 +932,7 @@ function Turns(props: {
 
 function PendingDetail(props: {
   item: McPendingItem;
+  bridge: Bridge;
   repos: readonly McRepo[];
   session: McSession | undefined;
   now: number;
@@ -859,6 +955,8 @@ function PendingDetail(props: {
     form = <p class="notice">回答を送りました。一覧から消えるまでお待ちください。</p>;
   } else if (item.kind === 'taskRunQuestion') {
     form = <TaskRunForm {...formProps} />;
+  } else if (item.kind === 'handoff') {
+    form = <HandoffForm item={item} bridge={props.bridge} submit={props.submit} />;
   } else if (!needsApprovalDetail(item.kind)) {
     form = <p class="notice">この項目はチャットタブで答えてください。</p>;
   } else if (approvals === undefined || approvals.status === 'loading') {
@@ -918,6 +1016,8 @@ function PendingDetail(props: {
 
 function SessionDetail(props: {
   session: McSession;
+  bridge: Bridge;
+  onToast: (message: string) => void;
   now: number;
   stallMs: number;
   pending: readonly McPendingItem[];
@@ -958,8 +1058,10 @@ function SessionDetail(props: {
           </div>
         </div>
       )}
+      <ReviewList session={session} bridge={props.bridge} onToast={props.onToast} />
       <Turns turns={props.turns} onReload={props.onReloadTurns} />
       <Composer onSend={props.onSend} />
+      <SideQuestionForm session={session} bridge={props.bridge} />
     </div>
   );
 }

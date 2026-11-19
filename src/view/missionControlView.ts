@@ -11,7 +11,7 @@ import { MISSION_CONTROL_STYLES } from '../webview/missionControl/styles';
 import type { SessionControlResult } from './chatManagerBase';
 import { parseLaunchRequest, type McLaunchResult } from './missionControlLaunch';
 import { missionControlTitle } from './missionControlModel';
-import { parseAction, parseTarget, type SessionKanbanControl } from './sessionKanbanView';
+import { parseAction, parseTarget, type SessionControl } from './sessionControlMessage';
 
 export const MISSION_CONTROL_OPEN_COMMAND = 'agent.missionControl.open';
 
@@ -19,7 +19,7 @@ export const MISSION_CONTROL_OPEN_COMMAND = 'agent.missionControl.open';
 const SCRIPT_PATH = ['dist', 'missionControl.js'] as const;
 
 /**
- * スナップショットを送る間隔（`sessionKanbanView.ts`の`POST_INTERVAL_MS`と同じ流儀）。
+ * スナップショットを送る間隔（旧統括ページと同じ流儀）。
  * 最初の1件はすぐ送り、以降は間隔ごとにまとめ、最後の1回は必ず送る。
  */
 const POST_INTERVAL_MS = 250;
@@ -35,6 +35,20 @@ export interface McLaunchPort {
   /** フォルダ選択のダイアログを出す。選ばれなければ`undefined`。 */
   pickFolder(): Promise<McLaunchRepo | undefined>;
   launch(request: McLaunchRequest): Promise<McLaunchResult>;
+}
+
+/**
+ * レビュー待ち・再開待ち・Reload（Issue #2138）。vscodeに依る部分は`extension.ts`が組む。
+ * 失敗したときは理由の文を返し、成功なら`undefined`を返す。
+ */
+export interface McHostPort {
+  openDiff(target: McTarget, file: string): Promise<string | undefined>;
+  reviewAck(target: McTarget): string | undefined;
+  resume(target: McTarget): Promise<string | undefined>;
+  resumeDismiss(target: McTarget): string | undefined;
+  reloadWindow(): Promise<string | undefined>;
+  /** スナップショットを作るたびに呼ぶ（通知のまとめ）。`foreground`はMCが前面にあるか。 */
+  observe?(snapshot: McSnapshot, foreground: boolean): void;
 }
 
 /**
@@ -60,10 +74,11 @@ export class MissionControlViewManager implements vscode.Disposable {
 
   constructor(
     private readonly read: () => McSnapshot,
-    private readonly control: SessionKanbanControl,
+    private readonly control: SessionControl,
     private readonly extensionUri: vscode.Uri,
     private readonly log: Logger,
     private readonly launcher?: McLaunchPort,
+    private readonly host?: McHostPort,
   ) {}
 
   /** webviewの設定。`createWebviewPanel`と、Reload後の復元の両方で使う。 */
@@ -179,6 +194,7 @@ export class MissionControlViewManager implements vscode.Disposable {
     // タブ名の件数は非表示の間も合わせる（タブ自体は見えている）
     panel.title = missionControlTitle(snapshot.pending.length);
     this.windowId = snapshot.windowId;
+    this.host?.observe?.(snapshot, panel.active && vscode.window.state.focused);
     this.dirty = !panel.visible;
     if (this.dirty) {
       return;
@@ -209,6 +225,13 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'pickFolder':
       case 'launch':
         this.handleLaunch(m);
+        return;
+      case 'openDiff':
+      case 'reviewAck':
+      case 'resume':
+      case 'resumeDismiss':
+      case 'reloadWindow':
+        this.handleHost(m);
         return;
       default:
         return;
@@ -315,6 +338,51 @@ export class MissionControlViewManager implements vscode.Disposable {
       });
   }
 
+  /** レビュー待ち・再開待ち・Reloadの要求（Issue #2138）。応答は`reply`で返す。 */
+  private handleHost(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const host = this.host;
+    if (host === undefined) {
+      this.postReply(seq, { ok: false, error: 'この操作はこの画面では使えません' });
+      return;
+    }
+    const run = async (): Promise<string | undefined> => {
+      if (message.type === 'reloadWindow') {
+        return host.reloadWindow();
+      }
+      const target = parseTarget(message);
+      if (target === undefined) {
+        return '宛先が正しくありません';
+      }
+      switch (message.type) {
+        case 'openDiff':
+          return typeof message.path === 'string'
+            ? host.openDiff(target, message.path)
+            : 'ファイルが正しくありません';
+        case 'reviewAck':
+          return host.reviewAck(target);
+        case 'resume':
+          return host.resume(target);
+        default:
+          return host.resumeDismiss(target);
+      }
+    };
+    void run()
+      .then((error) => {
+        this.postReply(seq, error === undefined ? { ok: true } : { ok: false, error });
+        this.refresh();
+      })
+      .catch((e: unknown) => {
+        this.log.warn(
+          `Mission Control: 操作に失敗しました（${String(message.type)}）: ${String(e)}`,
+        );
+        this.postReply(seq, { ok: false, error: '操作に失敗しました' });
+      });
+  }
+
   private postReply(seq: number, reply: Record<string, unknown>): void {
     void this.panel?.webview.postMessage({ ...reply, type: 'reply', seq });
   }
@@ -350,6 +418,8 @@ export class MissionControlViewManager implements vscode.Disposable {
       error: result.error,
       approvals: result.approvals,
       turns: result.turns,
+      handoff: result.handoff,
+      sideQuestion: result.sideQuestion,
     });
   }
 }

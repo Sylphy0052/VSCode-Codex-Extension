@@ -6,9 +6,12 @@ import type {
   McActivity,
   McPendingItem,
   McRepo,
+  McResumeItem,
+  McReview,
   McSession,
   McSnapshot,
 } from '../webview/missionControl/protocol';
+import type { RunningTurnEntry } from './missionControlResume';
 import type { PendingItem } from './pendingItem';
 import type { SharedSession } from './sessionHub';
 
@@ -250,6 +253,10 @@ export interface McSnapshotInput {
   now: number;
   /** 停滞とみなすまでの時間（ms）。設定`agent.missionControl.stallMinutes`から作る。 */
   stallMs: number;
+  /** レビュー待ち（セッションのkey → 変更）。Issue #2138の1。 */
+  reviews?: ReadonlyMap<string, McReview> | undefined;
+  /** Reloadで切れたこのウィンドウの会話（Issue #2138の3）。 */
+  resumable?: readonly RunningTurnEntry[] | undefined;
 }
 
 export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot {
@@ -302,6 +309,7 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
       pendingCount: items.length,
       lastOutput: session.lastOutput,
       lastOutputAt: session.lastOutputAt,
+      review: input.reviews?.get(key),
     });
     for (const item of items) {
       addPending(item);
@@ -310,6 +318,19 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
   for (const item of input.windowPending) {
     addPending(item);
   }
+  const resumable: McResumeItem[] = (input.resumable ?? []).map((entry) => {
+    const repo = touchRepo(entry.cwd);
+    return {
+      id: `resume:${entry.provider}:${entry.threadId}`,
+      windowId: input.currentWindowId,
+      provider: entry.provider,
+      threadId: entry.threadId,
+      title: entry.title,
+      repoKey: repo.key,
+      cwdLabel: entry.cwd === undefined ? '(不明)' : path.basename(entry.cwd),
+      since: entry.since,
+    };
+  });
   input.activitySince.retain(new Set(sessions.map((s) => s.key)));
   pending.sort((a, b) => a.createdAt - b.createdAt);
   const repoList = [...repos.values()].sort(
@@ -322,6 +343,7 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
     sessions,
     pending,
     stallMs: input.stallMs,
+    resumable,
   };
 }
 
