@@ -5,7 +5,6 @@
 ## mergeの条件
 
 - CIのworkflowは2026-11-20から無効にしてある。CIの成功は待たず、手元で `npm run format:check`・`npm run typecheck`・`npm run lint`・変更に関わるテストが通ったらmergeする（`--admin`で迂回してよい）
-- 通常PRの「CI完了を待たず自己merge」はこのラベルのPRには適用しない
 
 ## 配布の条件
 
