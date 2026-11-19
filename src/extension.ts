@@ -232,6 +232,12 @@ import type { SessionControlAction, SessionControlResult } from './view/chatMana
 import { ApprovalDisclosureLog } from './view/approvalDisclosure';
 import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager, type SessionKanbanTarget } from './view/sessionKanbanView';
+import {
+  ActivitySince,
+  buildMissionControlSnapshot,
+  createRepoResolver,
+} from './view/missionControlModel';
+import { MISSION_CONTROL_OPEN_COMMAND, MissionControlViewManager } from './view/missionControlView';
 import { setupTaskRun } from './view/taskRunSetup';
 import type { TaskRunPendingPort } from './view/taskRunPending';
 import {
@@ -1856,6 +1862,34 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     controlSessionAnywhere,
     log,
   );
+  // Mission Control（Issue #2136）。統括ページと同じ材料（全ウィンドウのセッションと待ち項目）
+  // から1画面を作り、操作も同じ`controlSessionAnywhere`を通す
+  const missionControlRepoResolver = createRepoResolver();
+  const missionControlActivitySince = new ActivitySince();
+  const missionControl = new MissionControlViewManager(
+    () =>
+      buildMissionControlSnapshot({
+        sessions: [
+          ...currentWindowSessions().map((session) => ({ ...session, windowId })),
+          ...sessionHubReader
+            .getOthers()
+            .flatMap((window) =>
+              window.sessions.map((session) => ({ ...session, windowId: window.windowId })),
+            ),
+        ],
+        windowPending: [
+          ...currentWindowPending(),
+          ...sessionHubReader.getOthers().flatMap((window) => window.pending ?? []),
+        ],
+        currentWindowId: windowId,
+        resolveRepo: missionControlRepoResolver,
+        activitySince: missionControlActivitySince,
+        now: Date.now(),
+      }),
+    controlSessionAnywhere,
+    context.extensionUri,
+    log,
+  );
   const forgeHub = new ForgeHubViewManager(
     new ForgeHubService({
       git: nodeGitCommandRunner,
@@ -1880,6 +1914,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   );
   const onSessionKanbanRelevantChange = (): void => {
     sessionKanban.refresh();
+    missionControl.refresh();
     // heartbeat（15秒）を待たず、状態が変わった時点で他ウィンドウへも反映させる
     // （実際の書き込みはWriter側でまとめる）
     sessionHubWriter.requestWrite();
@@ -1894,7 +1929,19 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     claudeChat.onDidChangeState(onSessionKanbanRelevantChange),
     chat.onDidChangePanels(onSessionKanbanRelevantChange),
     claudeChat.onDidChangePanels(onSessionKanbanRelevantChange),
-    sessionHubReader.onDidChange(() => sessionKanban.refresh()),
+    sessionHubReader.onDidChange(() => {
+      sessionKanban.refresh();
+      missionControl.refresh();
+    }),
+    missionControl,
+    vscode.commands.registerCommand(MISSION_CONTROL_OPEN_COMMAND, () => missionControl.show()),
+    // Reload後にタブを復元する（Issue #2136）
+    vscode.window.registerWebviewPanelSerializer(MissionControlViewManager.viewType, {
+      deserializeWebviewPanel: (panel: vscode.WebviewPanel) => {
+        missionControl.restore(panel);
+        return Promise.resolve();
+      },
+    }),
   );
   // task runの質問が出た・答えられた（Issue #2135）。会話の状態変化とは別に届くため、ここで
   // 統括ページと共有ファイルへ反映する。runの変化は頻繁なので、待ち項目のidが変わったときだけ

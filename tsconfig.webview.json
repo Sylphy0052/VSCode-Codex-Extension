@@ -1,0 +1,16 @@
+{
+  // webview（Preact、Issue #2136）だけの型検査。DOMの型はここでだけ入れる。
+  // tsconfig.jsonへDOMを足すと、拡張ホスト側のコードで`document`が型として通ってしまう
+  // （test/unit/progressDom.test.tsの説明を参照）
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": []
+  },
+  "include": ["src/webview/**/*.ts", "src/webview/**/*.tsx"],
+  "exclude": []
+}

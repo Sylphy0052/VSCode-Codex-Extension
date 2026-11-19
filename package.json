@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.1119.2",
+  "version": "2026.1119.4",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -21,7 +21,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:agent.missionControl"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -67,6 +68,11 @@
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "agent.missionControl.open",
+          "when": "view == agent.attention",
+          "group": "navigation@1"
+        },
         {
           "command": "agent.webGpt.discuss",
           "when": "view == codex.sessions",
@@ -532,6 +538,12 @@
         "title": "セッション統括を開く",
         "category": "Agent",
         "icon": "$(project)"
+      },
+      {
+        "command": "agent.missionControl.open",
+        "title": "Mission Controlを開く",
+        "category": "Agent",
+        "icon": "$(dashboard)"
       },
       {
         "command": "agent.taskRun.start",
@@ -2255,9 +2267,10 @@
     ]
   },
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 && npm run build:webview",
+    "build:webview": "esbuild src/webview/missionControl/main.tsx --bundle --outfile=dist/missionControl.js --format=iife --platform=browser --target=es2022 --jsx=automatic --jsx-import-source=preact --minify",
     "watch": "npm run build -- --sourcemap --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -2287,6 +2300,7 @@
     "eslint": "^9.17.0",
     "jsdom": "^30.0.1",
     "mocha": "^11.8.0",
+    "preact": "^11.2.0",
     "prettier": "^3.4.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.2",
