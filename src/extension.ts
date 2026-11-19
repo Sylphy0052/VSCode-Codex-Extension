@@ -1805,6 +1805,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       approvalRequestId: action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
       decision: action.kind === 'approvalDecision' ? action.decision : undefined,
       limit: action.kind === 'recentTurns' ? action.limit : undefined,
+      before: action.kind === 'recentTurns' ? action.before : undefined,
       handoffRequestId: action.kind === 'handoffDecision' ? action.handoffRequestId : undefined,
       handoffDecision: action.kind === 'handoffDecision' ? action.decision : undefined,
       handoffModel: action.kind === 'handoffDecision' ? action.model : undefined,
@@ -1822,6 +1823,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       approvals: reply.payload?.approvals,
       turns: reply.payload?.turns,
       capturedAt: reply.payload?.capturedAt,
+      turnStart: reply.payload?.turnStart,
+      turnTotal: reply.payload?.turnTotal,
       handoff: reply.payload?.handoff,
       sideQuestion: reply.payload?.sideQuestion,
     };
@@ -5391,7 +5394,12 @@ function toReplyPayload(result: SessionControlResult): SessionHubReplyPayload | 
     return { approvals: result.approvals };
   }
   if (result.turns !== undefined) {
-    return { turns: result.turns, capturedAt: result.capturedAt };
+    return {
+      turns: result.turns,
+      capturedAt: result.capturedAt,
+      turnStart: result.turnStart,
+      turnTotal: result.turnTotal,
+    };
   }
   if (result.handoff !== undefined) {
     return { handoff: result.handoff };
@@ -5418,6 +5426,7 @@ function toSessionControlAction(
     | 'approvalRequestId'
     | 'decision'
     | 'limit'
+    | 'before'
     | 'sideQuestionId'
     | 'handoffRequestId'
     | 'handoffDecision'
@@ -5444,7 +5453,11 @@ function toSessionControlAction(
       return { kind: 'approvalDetail' };
     case 'recentTurns':
       // 件数は受信側（`controlSession`）が範囲へ丸める。ここでは形だけ確かめる
-      return { kind: 'recentTurns', limit: typeof limit === 'number' ? limit : 1 };
+      return {
+        kind: 'recentTurns',
+        limit: typeof limit === 'number' ? limit : 1,
+        before: typeof request.before === 'number' ? request.before : undefined,
+      };
     case 'sideQuestion':
       // 質問文の空・長さは受信側（`controlSession`）が確かめる
       return text === undefined ? undefined : { kind: 'sideQuestion', text };

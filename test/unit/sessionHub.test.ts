@@ -953,11 +953,11 @@ describe('SessionHubRequestPort', () => {
       'str',
       { role: 'system', text: 'x' },
       { role: 'user', text: 5 },
-      { role: 'user', text: 'u'.repeat(2500) },
+      { role: 'user', text: 'u'.repeat(10_500) },
       { role: 'agent', text: 'short', truncated: true },
       { role: 'agent', text: 'plain' },
     ];
-    for (let i = 0; i < 50; i += 1) {
+    for (let i = 0; i < 70; i += 1) {
       entries.push({ role: 'user', text: `n${i}` });
     }
     respondWith(target, (requestId) =>
@@ -970,11 +970,59 @@ describe('SessionHubRequestPort', () => {
       limit: 10,
     });
     const turns = reply.payload?.turns ?? [];
-    expect(turns).toHaveLength(40);
-    expect(turns[0]).toEqual({ role: 'user', text: 'u'.repeat(2000), truncated: true });
+    expect(turns).toHaveLength(60);
+    expect(turns[0]).toEqual({ role: 'user', text: 'u'.repeat(10_000), truncated: true });
     expect(turns[1]).toEqual({ role: 'agent', text: 'short', truncated: true });
     expect(turns[2]).toEqual({ role: 'agent', text: 'plain', truncated: false });
     expect(reply.payload?.capturedAt).toBe(123);
+  });
+
+  it('ツール呼び出し・diffと範囲を読む（Issue #2157）', async () => {
+    const turns = [
+      { role: 'user', text: 'q' },
+      { role: 'tool', text: 'out', title: '$ ls', truncated: false },
+      { role: 'diff', text: '+a', title: 'update a.ts', truncated: false },
+    ];
+    respondWith(target, (requestId) =>
+      JSON.stringify({ requestId, ok: true, payload: { turns, turnStart: 7, turnTotal: 10 } }),
+    );
+    const reply = await makePort().request(target, {
+      kind: 'recentTurns',
+      provider: 'codex',
+      threadId: 't',
+      limit: 3,
+      before: 10,
+    });
+    expect(reply.payload?.turns?.map((t) => [t.role, t.title])).toEqual([
+      ['user', undefined],
+      ['tool', '$ ls'],
+      ['diff', 'update a.ts'],
+    ]);
+    expect([reply.payload?.turnStart, reply.payload?.turnTotal]).toEqual([7, 10]);
+  });
+
+  it('要素を落とした応答では範囲を捨てる（Issue #2157）', async () => {
+    const turns = [
+      { role: 'user', text: 'q' },
+      { role: 'tool', text: 'out', title: '$ ls', truncated: false },
+      { role: 'diff', text: '+a', title: 'update a.ts', truncated: false },
+    ];
+    respondWith(target, (requestId) =>
+      JSON.stringify({
+        requestId,
+        ok: true,
+        payload: { turns: [...turns, { role: 'system', text: 'x' }], turnStart: 6, turnTotal: 10 },
+      }),
+    );
+    const broken = await makePort().request(target, {
+      kind: 'recentTurns',
+      provider: 'codex',
+      threadId: 't',
+      limit: 4,
+    });
+    expect(broken.payload?.turns).toHaveLength(3);
+    expect(broken.payload?.turnStart).toBeUndefined();
+    expect(broken.payload?.turnTotal).toBeUndefined();
   });
 
   it('turnsのcapturedAtが数値でなければ省く', async () => {

@@ -37,7 +37,13 @@ export type McKeyCommand =
   | { kind: 'submit' }
   // Issue #2151: 一覧 / カードの切り替え・密度の切り替え
   | { kind: 'view' }
-  | { kind: 'density' };
+  | { kind: 'density' }
+  // Issue #2157: 詳細ペインの会話（検索・一致の移動・ツール / diffの開閉・古いやり取り）
+  | { kind: 'turnSearch' }
+  | { kind: 'turnMatch' }
+  | { kind: 'turnMatchPrev' }
+  | { kind: 'turnFolds' }
+  | { kind: 'turnOlder' };
 
 export interface McKeyInput {
   key: string;
@@ -223,6 +229,37 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     command: { kind: 'density' },
   },
   { keys: ['/'], label: '検索', command: { kind: 'search' } },
+  // 会話の操作はShift付きにする（詳細ペインのアクセスキーに使う英字を減らさない。Issue #2157）
+  {
+    keys: ['Shift+s'],
+    label: '会話内を検索（入力欄ではEnter / Shift+Enterで一致を移動）',
+    contextual: true,
+    command: { kind: 'turnSearch' },
+  },
+  {
+    keys: ['Shift+n'],
+    label: '会話内の次の一致へ',
+    contextual: true,
+    command: { kind: 'turnMatch' },
+  },
+  {
+    keys: ['Shift+p'],
+    label: '会話内の前の一致へ',
+    contextual: true,
+    command: { kind: 'turnMatchPrev' },
+  },
+  {
+    keys: ['Shift+e'],
+    label: '会話のツール呼び出し・diffをまとめて開く / 閉じる',
+    contextual: true,
+    command: { kind: 'turnFolds' },
+  },
+  {
+    keys: ['Shift+o'],
+    label: '会話の古いやり取りを読み足す（上端までスクロールしても読み足す）',
+    contextual: true,
+    command: { kind: 'turnOlder' },
+  },
   {
     keys: [':'],
     label: 'コマンドパレット（操作を名前で選ぶ）',

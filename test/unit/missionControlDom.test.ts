@@ -512,4 +512,84 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
     await tick();
     expect(posted.filter((m) => m.action === 'send')).toHaveLength(1);
   });
+
+  it('詳細の会話を先頭まで遡り、会話内を検索して一致へ移り、ツール / diffをキーで開閉する（Issue #2157）', async () => {
+    const { window, posted, deliver } = boot();
+    // JSDOMにはscrollIntoViewが無い
+    window.HTMLElement.prototype.scrollIntoView = () => undefined;
+    const shiftKey = (k: string): void => {
+      window.document.dispatchEvent(
+        new window.KeyboardEvent('keydown', { key: k, shiftKey: true, bubbles: true }),
+      );
+    };
+    const page = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, i) =>
+        from + i === 100
+          ? { role: 'tool', text: '出力に needle', title: '$ npm test', truncated: false }
+          : {
+              role: 'user',
+              text: `発言${from + i}${from + i === 5 ? ' needle' : ''}`,
+              truncated: false,
+            },
+      );
+    const answer = (before: number | undefined, from: number) => {
+      const request = posted.filter((m) => m.action === 'recentTurns').at(-1);
+      expect(request?.before).toBe(before);
+      deliver({
+        type: 'controlResult',
+        seq: request?.seq,
+        ok: true,
+        turns: page(from, before ?? 130),
+        turnStart: from,
+        turnTotal: 130,
+      });
+    };
+    await tick();
+    deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+    await tick();
+    answer(undefined, 80);
+    await tick();
+    const doc = window.document;
+    expect(doc.querySelectorAll('.turn-log .turn')).toHaveLength(50);
+    expect(doc.body.textContent).toContain('あと80件');
+    // ツール呼び出しは閉じて出し、Shift+Eで開く・もう一度で閉じる
+    expect(doc.querySelector('.turn.tool .turn-output')).toBeNull();
+    shiftKey('E');
+    await tick();
+    expect(doc.querySelector('.turn.tool .turn-output')?.textContent).toContain('出力に needle');
+    shiftKey('E');
+    await tick();
+    expect(doc.querySelector('.turn.tool .turn-output')).toBeNull();
+    // Shift+Oで古いやり取りを読み足す
+    shiftKey('O');
+    await tick();
+    answer(80, 30);
+    await tick();
+    expect(doc.querySelectorAll('.turn-log .turn')).toHaveLength(100);
+    // Shift+Sで検索欄へ移り、語を入れると先頭まで読み込んでから探す
+    shiftKey('S');
+    await tick();
+    const search = doc.querySelector('.turn-search-input') as HTMLInputElement;
+    expect(doc.activeElement).toBe(search);
+    search.value = 'needle';
+    search.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await tick();
+    answer(30, 0);
+    await tick();
+    expect(doc.querySelectorAll('.turn-log .turn')).toHaveLength(130);
+    expect(doc.body.textContent).toContain('会話の先頭');
+    expect(doc.querySelector('.turn-search-count')?.textContent).toBe('1 / 2件');
+    expect(doc.querySelector('.turn-match.current')?.closest('.turn')?.textContent).toContain(
+      '発言5',
+    );
+    // 入力欄から出て、Shift+Nで次の一致へ。閉じていたツールの出力は開いて見せる
+    search.blur();
+    shiftKey('N');
+    await tick();
+    expect(doc.querySelector('.turn-search-count')?.textContent).toBe('2 / 2件');
+    expect(doc.querySelector('.turn-match.current')?.closest('.turn-output')).not.toBeNull();
+    shiftKey('P');
+    await tick();
+    expect(doc.querySelector('.turn-search-count')?.textContent).toBe('1 / 2件');
+  });
 });

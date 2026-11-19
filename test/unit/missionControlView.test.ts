@@ -154,7 +154,7 @@ describe('MissionControlViewManager（Issue #2136）', () => {
         expect(control).toHaveBeenCalledTimes(1);
         expect(control).toHaveBeenLastCalledWith(
           { windowId: '22222222-2222-4222-8222-222222222222', provider: 'codex', threadId: 't' },
-          { kind: 'recentTurns', limit: 6 },
+          { kind: 'recentTurns', limit: 20 },
         );
         await vi.advanceTimersByTimeAsync(4_000);
         expect(control).toHaveBeenCalledTimes(3);

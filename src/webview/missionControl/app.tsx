@@ -65,6 +65,8 @@ import {
 } from './accessKeys';
 import { KEY_BINDINGS, bindingDisplay, keyLabelFor, resolveKey, type McKeyCommand } from './keys';
 import { CommandPalette, type McPaletteEntry } from './palette';
+import { Conversation, type ConversationKeysRef, type TurnLogState } from './conversation';
+import { hasOlderTurns, logFromPage, mergeTurnPage, TURN_PAGE_SIZE, type TurnLog } from './turnLog';
 import type {
   McActivity,
   McApprovalDetail,
@@ -81,7 +83,6 @@ import type {
   McSession,
   McSnapshot,
   McTarget,
-  McTurn,
 } from './protocol';
 
 /** Reload後に戻す画面の状態（`vscode.setState`）。 */
@@ -99,7 +100,6 @@ interface PersistedState {
 /** フォーカスを置けるペイン（Issue #2152の2）。Runsタブは`list`がrunの画面。 */
 type McPane = 'rail' | 'list' | 'detail';
 
-const RECENT_TURNS = 6;
 /** 経過時間の表示を描き直す間隔。 */
 const TICK_MS = 5_000;
 
@@ -113,6 +113,12 @@ const SESSION_ONLY_COMMANDS: ReadonlySet<McKeyCommand['kind']> = new Set([
   'lifecycle',
   // 一覧 / カードはセッションの一覧だけの表示（Runsタブには効かない）
   'view',
+  // 詳細ペインの会話（Issue #2157）
+  'turnSearch',
+  'turnMatch',
+  'turnMatchPrev',
+  'turnFolds',
+  'turnOlder',
 ]);
 
 const PROVIDER_FILTERS: ReadonlyArray<[McProviderFilter, string]> = [
@@ -240,7 +246,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const [viewMode, setViewMode] = useState<'list' | 'grid'>(initial.viewMode);
   const [helpOpen, setHelpOpen] = useState(false);
   const [approvals, setApprovals] = useState<Record<string, Loadable<McApprovalDetail[]>>>({});
-  const [turns, setTurns] = useState<Record<string, Loadable<McTurn[]>>>({});
+  const [turns, setTurns] = useState<Record<string, TurnLogState>>({});
   /** 回答を送った項目。共有ファイルから消えるまで、Inboxで送信済みとして薄く出す。 */
   const [sent, setSent] = useState<ReadonlySet<string>>(new Set());
   /**
@@ -252,6 +258,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const searchRef = useRef<HTMLInputElement | null>(null);
   const detailRef = useRef<HTMLDivElement | null>(null);
   const formKeys: FormKeysRef = useRef(null);
+  const conversationKeys: ConversationKeysRef = useRef(null);
   /** 最初のスナップショットを受けるまでは先頭を自動で選ぶ。 */
   const autoSelect = useRef(true);
   const [launchOpen, setLaunchOpen] = useState(false);
@@ -384,15 +391,80 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const loadTurns = (target: McTarget): void => {
     const key = targetKey(target);
     setTurns((prev) => ({ ...prev, [key]: { status: 'loading' } }));
-    void bridge.request(target, { action: 'recentTurns', limit: RECENT_TURNS }).then((result) => {
+    void bridge.request(target, { action: 'recentTurns', limit: TURN_PAGE_SIZE }).then((result) => {
       setTurns((prev) => ({
         ...prev,
         [key]: result.ok
-          ? { status: 'ok', value: result.turns ?? [] }
+          ? {
+              status: 'ok',
+              value: logFromPage({
+                turns: result.turns ?? [],
+                start: result.turnStart,
+                total: result.turnTotal,
+              }),
+            }
           : { status: 'error', error: result.error ?? 'やり取りを取り寄せられませんでした' },
       }));
     });
   };
+  /**
+   * 古いやり取りを読み足す（Issue #2157）。`all`なら会話の先頭まで続けて取る（検索のとき）。
+   * 次の位置は応答の`turnStart`から決めるので、途中で状態を読み直さない。
+   */
+  const loadOlderTurns = (target: McTarget, all: boolean): void => {
+    const key = targetKey(target);
+    const now = turns[key];
+    if (now?.status !== 'ok' || now.value.olderLoading || !hasOlderTurns(now.value)) {
+      return;
+    }
+    const setOlder = (update: (log: TurnLog) => TurnLog): void => {
+      setTurns((prev) => {
+        const entry = prev[key];
+        return entry?.status === 'ok'
+          ? { ...prev, [key]: { status: 'ok', value: update(entry.value) } }
+          : prev;
+      });
+    };
+    setOlder((log) => ({ ...log, olderLoading: true, olderError: undefined }));
+    const fetchBefore = (before: number): void => {
+      void bridge
+        .request(target, { action: 'recentTurns', limit: TURN_PAGE_SIZE, before })
+        .then((result) => {
+          if (!result.ok) {
+            setOlder((log) => ({
+              ...log,
+              olderLoading: false,
+              olderError: result.error ?? '古いやり取りを取り寄せられませんでした',
+            }));
+            return;
+          }
+          const page = {
+            turns: result.turns ?? [],
+            start: result.turnStart,
+            total: result.turnTotal,
+          };
+          // 範囲を返さない相手（古い版）や、進まない応答では止める（同じ位置を取り続けない）
+          const next = page.start !== undefined && page.start < before ? page.start : undefined;
+          const more = all && next !== undefined && next > 0;
+          setOlder((log) => ({ ...mergeTurnPage(log, page), olderLoading: more }));
+          if (more) {
+            fetchBefore(next);
+          }
+        });
+    };
+    fetchBefore(now.value.start ?? 0);
+  };
+
+  const conversationFor = (target: McTarget): JSX.Element => (
+    <Conversation
+      key={targetKey(target)}
+      log={turns[targetKey(target)]}
+      keysRef={conversationKeys}
+      onReload={() => loadTurns(target)}
+      onLoadOlder={() => loadOlderTurns(target, false)}
+      onLoadAll={() => loadOlderTurns(target, true)}
+    />
+  );
 
   // 選んだ項目の全文と直近のやり取りを取り寄せる。回答には全文の取り寄せが先に要る
   // （拡張ホストは中身を見せていない要求への回答を断る。Issue #1259）
@@ -420,7 +492,16 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       const key = targetKey(live.target);
       setTurns((prev) => {
         if (live.ok) {
-          return { ...prev, [key]: { status: 'ok', value: live.turns ?? [] } };
+          // 読み足した古いやり取りは残し、届いた末尾の範囲だけを差し替える（Issue #2157）
+          const entry = prev[key];
+          const page = { turns: live.turns ?? [], start: live.turnStart, total: live.turnTotal };
+          return {
+            ...prev,
+            [key]: {
+              status: 'ok',
+              value: mergeTurnPage(entry?.status === 'ok' ? entry.value : undefined, page),
+            },
+          };
         }
         // 一時的な失敗では、取れていたやり取りを消さない
         return prev[key]?.status === 'ok'
@@ -706,6 +787,28 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       case 'search':
         searchRef.current?.focus();
         return;
+      case 'turnSearch':
+      case 'turnMatch':
+      case 'turnMatchPrev':
+      case 'turnFolds':
+      case 'turnOlder': {
+        const keys = conversationKeys.current;
+        if (keys === null) {
+          setToast('会話を出している項目を選んでください');
+          return;
+        }
+        if (command.kind === 'turnSearch') {
+          setPaneFocus('detail');
+          keys.search();
+        } else if (command.kind === 'turnMatch' || command.kind === 'turnMatchPrev') {
+          keys.step(command.kind === 'turnMatch' ? 1 : -1);
+        } else if (command.kind === 'turnFolds') {
+          keys.toggleFolds();
+        } else {
+          keys.loadOlder();
+        }
+        return;
+      }
       case 'help':
         setHelpOpen((open) => !open);
         return;
@@ -1307,11 +1410,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                 sent={sent.has(selectedPending.id)}
                 answerError={answerErrors.get(selectedPending.id)}
                 approvals={approvals[targetKey(selectedPending)]}
-                turns={turns[targetKey(selectedPending)]}
+                conversation={conversationFor(selectedPending)}
                 formKeys={formKeys}
                 submit={submitFor(selectedPending)}
                 onReload={() => loadApprovals(selectedPending)}
-                onReloadTurns={() => loadTurns(selectedPending)}
                 onSessionAction={sessionAction}
               />
             ) : selectedSession !== undefined ? (
@@ -1329,9 +1431,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                     p.threadId === selectedSession.threadId &&
                     p.provider === selectedSession.provider,
                 )}
-                turns={turns[targetKey(selectedSession)]}
+                conversation={conversationFor(selectedSession)}
                 onSelectPending={(item) => setSelected(pendingRowId(item))}
-                onReloadTurns={() => loadTurns(selectedSession)}
                 onSessionAction={sessionAction}
                 marked={marks.has(selectedSession.key)}
                 // 詳細のボタンは、複数選択があってもこのセッションだけに効かせる
@@ -1714,40 +1815,6 @@ function SessionActions(props: {
   );
 }
 
-function Turns(props: {
-  turns: Loadable<McTurn[]> | undefined;
-  onReload: () => void;
-}): JSX.Element {
-  const { turns } = props;
-  return (
-    <div>
-      <h3>
-        直近のやり取り{' '}
-        <button type="button" class="btn" onClick={props.onReload}>
-          再読込
-        </button>
-      </h3>
-      {turns === undefined || turns.status === 'loading' ? (
-        <p class="notice">取り寄せ中…</p>
-      ) : turns.status === 'error' ? (
-        <p class="error">{turns.error}</p>
-      ) : turns.value.length === 0 ? (
-        <p class="notice">やり取りはまだありません。</p>
-      ) : (
-        turns.value.map((turn, index) => (
-          <div key={String(index)} class={`turn ${turn.role}`}>
-            <p class="turn-role">{turn.role === 'user' ? 'あなた' : 'エージェント'}</p>
-            <p class="turn-text">
-              {turn.text}
-              {turn.truncated ? '…（続きはチャットタブで）' : ''}
-            </p>
-          </div>
-        ))
-      )}
-    </div>
-  );
-}
-
 function PendingDetail(props: {
   item: McPendingItem;
   bridge: Bridge;
@@ -1758,11 +1825,11 @@ function PendingDetail(props: {
   /** 直前の回答が断られた理由。 */
   answerError: string | undefined;
   approvals: Loadable<McApprovalDetail[]> | undefined;
-  turns: Loadable<McTurn[]> | undefined;
+  /** 会話（Issue #2157）。宛先ごとの取り寄せは`App`が持つ。 */
+  conversation: JSX.Element;
   formKeys: FormKeysRef;
   submit: Submit;
   onReload: () => void;
-  onReloadTurns: () => void;
   onSessionAction: (session: McSession, action: McControlAction, done: string) => void;
 }): JSX.Element {
   const { item, approvals } = props;
@@ -1825,9 +1892,7 @@ function PendingDetail(props: {
       {props.session !== undefined ? (
         <SessionActions session={props.session} onSessionAction={props.onSessionAction} />
       ) : null}
-      {item.kind === 'taskRunQuestion' ? null : (
-        <Turns turns={props.turns} onReload={props.onReloadTurns} />
-      )}
+      {item.kind === 'taskRunQuestion' ? null : props.conversation}
     </div>
   );
 }
@@ -1839,9 +1904,9 @@ function SessionDetail(props: {
   now: number;
   stallMs: number;
   pending: readonly McPendingItem[];
-  turns: Loadable<McTurn[]> | undefined;
+  /** 会話（Issue #2157）。宛先ごとの取り寄せは`App`が持つ。 */
+  conversation: JSX.Element;
   onSelectPending: (item: McPendingItem) => void;
-  onReloadTurns: () => void;
   onSessionAction: (session: McSession, action: McControlAction, done: string) => void;
   onSend: (text: string) => Promise<string | undefined>;
   marked: boolean;
@@ -1898,7 +1963,7 @@ function SessionDetail(props: {
         </div>
       )}
       <ReviewList session={session} bridge={props.bridge} onToast={props.onToast} />
-      <Turns turns={props.turns} onReload={props.onReloadTurns} />
+      {props.conversation}
       <Composer onSend={props.onSend} />
       <SideQuestionForm session={session} bridge={props.bridge} />
     </div>

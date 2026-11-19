@@ -42,8 +42,14 @@ const POST_INTERVAL_MS = 250;
 
 /** ライブtailで他ウィンドウのセッションの直近のやり取りを取り直す間隔（Issue #2137の3）。 */
 export const LIVE_POLL_MS = 2_000;
-/** ライブtailで送る直近のやり取りの件数。 */
-export const LIVE_TURNS = 6;
+/**
+ * ライブtailで送る直近のやり取りの件数。
+ *
+ * webviewは届いた末尾の範囲を、読み足した古いやり取りへ位置で継ぎ足す（Issue #2157）。取り直しの
+ * 間にこれより多く増えると範囲が離れて継ぎ足せず、末尾だけに戻るため、ツール呼び出しも数える
+ * ようになった分だけ多めにとる。
+ */
+export const LIVE_TURNS = 20;
 
 /** 新規セッションの起動（Issue #2137の1）。vscodeに依る部分は`extension.ts`が組む。 */
 export interface McLaunchPort {
@@ -349,6 +355,8 @@ export class MissionControlViewManager implements vscode.Disposable {
           ok: result.ok,
           error: result.error,
           turns: result.turns,
+          turnStart: result.turnStart,
+          turnTotal: result.turnTotal,
         });
       })
       .catch((e: unknown) => {
@@ -623,6 +631,8 @@ export class MissionControlViewManager implements vscode.Disposable {
       error: result.error,
       approvals: result.approvals,
       turns: result.turns,
+      turnStart: result.turnStart,
+      turnTotal: result.turnTotal,
       handoff: result.handoff,
       sideQuestion: result.sideQuestion,
     });

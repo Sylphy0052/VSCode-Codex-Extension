@@ -79,6 +79,22 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .turn.user { border-left-color: var(--vscode-charts-blue); }
 .turn-role { margin: 0; font-size: 11px; font-weight: 700; color: var(--vscode-descriptionForeground); }
 .turn-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.conversation { display: grid; gap: 6px; min-width: 0; }
+.turn-search { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.turn-search-input { flex: 1 1 160px; min-width: 0; padding: 2px 6px; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); }
+.turn-search-count { font-size: 11px; }
+.turn-log { display: grid; gap: 8px; align-content: start; max-height: 60vh; overflow-y: auto; padding-right: 4px; }
+.turn-older { margin: 0; text-align: center; font-size: 11px; }
+.turn.agent { border-left-color: var(--vscode-charts-green, var(--vscode-panel-border)); }
+.turn.tool, .turn.diff { border-left-style: dashed; }
+.turn-fold { display: flex; gap: 4px; align-items: baseline; width: 100%; padding: 0; text-align: left; color: inherit; background: none; border: none; cursor: pointer; font-size: 12px; min-width: 0; }
+.turn-fold:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
+.turn-fold .turn-role { flex: none; }
+.turn-title { font-family: var(--vscode-editor-font-family, monospace); overflow-wrap: anywhere; color: var(--vscode-descriptionForeground); }
+.turn-output { margin: 4px 0 0; max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); background: var(--vscode-textCodeBlock-background, transparent); padding: 4px 6px; }
+.turn-hidden-match { font-size: 11px; }
+.turn-match { color: inherit; background: var(--vscode-editor-findMatchHighlightBackground, var(--vscode-editor-selectionHighlightBackground)); }
+.turn-match.current { background: var(--vscode-editor-findMatchBackground, var(--vscode-editor-selectionBackground)); outline: 1px solid var(--vscode-editor-findMatchBorder, var(--vscode-focusBorder)); }
 .help { position: fixed; inset: 0; display: grid; place-items: center; background: color-mix(in srgb, var(--vscode-editor-background) 70%, transparent); }
 .help-box { min-width: 280px; padding: 12px 16px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); border-radius: 6px; }
 .help-box table { border-collapse: collapse; }

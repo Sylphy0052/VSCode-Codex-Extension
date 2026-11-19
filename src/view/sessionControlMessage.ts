@@ -69,7 +69,11 @@ export function parseAction(message: Record<string, unknown>): SessionControlAct
       return { kind: 'approvalDetail' };
     case 'recentTurns':
       return typeof message.limit === 'number'
-        ? { kind: 'recentTurns', limit: message.limit }
+        ? {
+            kind: 'recentTurns',
+            limit: message.limit,
+            before: typeof message.before === 'number' ? message.before : undefined,
+          }
         : undefined;
     case 'sideQuestion':
       return typeof message.text === 'string'

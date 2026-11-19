@@ -895,17 +895,20 @@ export function isSharedHandoffDecision(value: unknown): value is SharedHandoffD
 }
 
 /**
- * 会話の直近のやり取り1件（Issue #1260）。
+ * 会話のやり取り1件（Issue #1260、#2157）。
  *
- * 載せるのは人の発言とエージェントの応答だけで、コマンド実行・思考・ファイル変更は
- * 含めない。カードは会話の流れを掴むためのもので、詳細はタブ側で読む。
+ * 人の発言とエージェントの応答に加え、ツール呼び出し（`tool`）とファイル変更（`diff`）も
+ * 載せる（Issue #2157。Mission Controlの詳細ペインで折りたたんで出す）。思考は含めない。
+ * 古い版の読み手は`tool` / `diff`を知らないので、形の合わない要素として落とす。
  */
 export interface SessionRecentTurn {
-  role: 'user' | 'agent';
-  /** 本文。長いものは送る前に切り詰める（`truncated`が立つ）。 */
+  role: 'user' | 'agent' | 'tool' | 'diff';
+  /** 本文。`tool`は出力、`diff`はunified diff。長いものは送る前に切り詰める（`truncated`が立つ）。 */
   text: string;
   /** 本文を切り詰めたか。画面は全文をタブ側で読むよう促す。 */
   truncated: boolean;
+  /** `tool` / `diff`の見出し（コマンド行・ツール名・変更したファイル）。 */
+  title?: string | undefined;
 }
 
 /**
@@ -938,6 +941,13 @@ export interface SessionHubReplyPayload {
    * 代わりに「いつ時点の内容か」をこれで示す（何秒前の状態を見ているかが判る）。
    */
   capturedAt?: number | undefined;
+  /**
+   * `turns`の先頭が会話の何件目か（0始まり）と、会話全体の件数（Issue #2157）。
+   *
+   * 古い版の書き手は返さない。読み手は無ければ「これ以上遡れない」として扱う。
+   */
+  turnStart?: number | undefined;
+  turnTotal?: number | undefined;
   /** `kind === 'sideQuestion'` / `'sideQuestionResult'`の応答（Issue #1261）。 */
   sideQuestion?: SessionSideQuestion | undefined;
   /** `kind === 'handoffDetail'`の応答（Issue #1280）。保留が無ければ`undefined`。 */
@@ -965,6 +975,12 @@ export interface SessionHubRequest {
   decision?: string | undefined;
   /** `kind === 'recentTurns'`のときに欲しい件数（Issue #1260）。受信側が範囲へ丸める。 */
   limit?: number | undefined;
+  /**
+   * `kind === 'recentTurns'`のとき、この件数目より前を取る（Issue #2157。0始まり・含まない）。
+   * 省くと末尾から取る。古い版の受信側は無視して末尾を返すが、そのときは応答に
+   * `turnStart`が無いので、要求側はそれ以上遡らない。
+   */
+  before?: number | undefined;
   /**
    * `kind === 'sideQuestionResult'`のときの、進み具合を知りたい質問のid（Issue #1261）。
    *
@@ -1077,6 +1093,7 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     approvalRequestId: typeof v.approvalRequestId === 'string' ? v.approvalRequestId : undefined,
     decision: typeof v.decision === 'string' ? v.decision : undefined,
     limit: typeof v.limit === 'number' ? v.limit : undefined,
+    before: typeof v.before === 'number' ? v.before : undefined,
     sideQuestionId: typeof v.sideQuestionId === 'string' ? v.sideQuestionId : undefined,
     handoffRequestId: typeof v.handoffRequestId === 'string' ? v.handoffRequestId : undefined,
     handoffDecision: typeof v.handoffDecision === 'string' ? v.handoffDecision : undefined,
@@ -1113,9 +1130,16 @@ function parseReply(raw: string): SessionHubReply | undefined {
  * とは別に、読み手側でも持つ。共有ディレクトリへ書くのは別プロセスで、その版が同じ
  * 上限で絞っている保証は無い。書き手側より少しだけ緩くして、正しい相手からの応答を
  * 切り落とさないようにする。
+ *
+ * Issue #2157で会話を範囲指定で遡れるようにしたため、書き手の1回分（50件・本文8,000字）に
+ * 合わせて引き上げた。
  */
-const MAX_REPLY_TURNS = 40;
+const MAX_REPLY_TURNS = 60;
 const MAX_REPLY_TEXT_CHARS = 2_000;
+/** やり取り1件の本文の上限（Issue #2157。書き手の8,000字より少しだけ緩くする）。 */
+const MAX_REPLY_TURN_TEXT_CHARS = 10_000;
+/** `tool` / `diff`の見出しの上限（Issue #2157）。 */
+const MAX_REPLY_TITLE_CHARS = 1_000;
 
 /**
  * 脇道の質問の回答として読み取る上限（Issue #1261）。
@@ -1143,9 +1167,13 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
     return { sideQuestion };
   }
   if (Array.isArray(v.turns)) {
+    const turns = parseRecentTurns(v.turns);
+    const range = parseTurnRange(v.turnStart, v.turnTotal, v.turns.length, turns.length);
     return {
-      turns: parseRecentTurns(v.turns),
+      turns,
       capturedAt: typeof v.capturedAt === 'number' ? v.capturedAt : undefined,
+      turnStart: range?.start,
+      turnTotal: range?.total,
     };
   }
   if (v.handoff !== undefined) {
@@ -1314,18 +1342,45 @@ function parseRecentTurns(raw: readonly unknown[]): SessionRecentTurn[] {
       continue;
     }
     const v = entry as Record<string, unknown>;
-    if ((v.role !== 'user' && v.role !== 'agent') || typeof v.text !== 'string') {
+    if (
+      (v.role !== 'user' && v.role !== 'agent' && v.role !== 'tool' && v.role !== 'diff') ||
+      typeof v.text !== 'string'
+    ) {
       continue;
     }
-    const capped = v.text.length > MAX_REPLY_TEXT_CHARS;
+    const capped = v.text.length > MAX_REPLY_TURN_TEXT_CHARS;
     turns.push({
       role: v.role,
-      text: capped ? v.text.slice(0, MAX_REPLY_TEXT_CHARS) : v.text,
+      text: capped ? v.text.slice(0, MAX_REPLY_TURN_TEXT_CHARS) : v.text,
       // こちらで切った分も「続きがある」ものとして扱う
       truncated: capped || v.truncated === true,
+      title: typeof v.title === 'string' ? cap(v.title, MAX_REPLY_TITLE_CHARS) : undefined,
     });
   }
   return turns;
+}
+
+/**
+ * 応答の範囲（`turnStart` / `turnTotal`）を読み解く（Issue #2157）。
+ *
+ * 形の合わない要素を落とした・件数の上限で切ったときは、位置が実際の会話とずれるため
+ * 範囲を捨てる（要求側はそれ以上遡らない。ずれた位置で継ぎ足して会話を壊すよりよい）。
+ */
+function parseTurnRange(
+  rawStart: unknown,
+  rawTotal: unknown,
+  rawCount: number,
+  parsedCount: number,
+): { start: number; total: number } | undefined {
+  if (!Number.isSafeInteger(rawStart) || !Number.isSafeInteger(rawTotal)) {
+    return undefined;
+  }
+  const start = rawStart as number;
+  const total = rawTotal as number;
+  if (rawCount !== parsedCount || start < 0 || start + parsedCount > total) {
+    return undefined;
+  }
+  return { start, total };
 }
 
 /** 選び直しの候補の上限（Issue #1280）。モデル一覧がこの数を超えることは実際には無い。 */
@@ -1463,6 +1518,7 @@ export class SessionHubRequestPort {
       approvalRequestId?: string | undefined;
       decision?: string | undefined;
       limit?: number | undefined;
+      before?: number | undefined;
       sideQuestionId?: string | undefined;
       handoffRequestId?: string | undefined;
       handoffDecision?: string | undefined;
