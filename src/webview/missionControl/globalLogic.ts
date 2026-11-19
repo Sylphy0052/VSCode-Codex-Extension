@@ -1,6 +1,8 @@
 import { formatCost, formatElapsed, formatTokens, type McFilter } from './logic';
 import type {
   McFilterSpec,
+  McRunTask,
+  McRunTaskOp,
   McSavedFilter,
   McSession,
   McUsageSource,
@@ -188,4 +190,37 @@ export function cycleSavedFilter(
     return delta === 1 ? saved[0] : saved[saved.length - 1];
   }
   return saved[(current + delta + saved.length) % saved.length];
+}
+
+/**
+ * 選んでいるタスク（runのタスク単位の操作の対象）。選んだidが今のrunに無ければ`undefined`で、
+ * 先頭のタスクを選んだ扱いにはしない（別のタスクをやり直す・止めることを防ぐ）。
+ */
+export function findSelectedTask(
+  tasks: readonly McRunTask[],
+  selectedTask: string | undefined,
+): McRunTask | undefined {
+  return selectedTask === undefined ? undefined : tasks.find((t) => t.taskId === selectedTask);
+}
+
+/**
+ * タスク単位の操作を送れない理由。送れるなら`undefined`。`taskId`はタスクの固定idで、
+ * 今のrunに無いidは選んでいない扱いにする。
+ */
+export function taskOpBlockReason(
+  tasks: readonly McRunTask[],
+  taskId: string | undefined,
+  op: McRunTaskOp,
+): string | undefined {
+  const task = findSelectedTask(tasks, taskId);
+  if (task === undefined) {
+    return 'タスクを選んでください（Shift+J / Shift+K）';
+  }
+  if (op === 'retry' && task.canRetry !== true) {
+    return `${task.taskId}は今やり直せません`;
+  }
+  if (op === 'stop' && task.canStop !== true) {
+    return `${task.taskId}は今止められる工程がありません`;
+  }
+  return undefined;
 }

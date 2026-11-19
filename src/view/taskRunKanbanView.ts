@@ -445,6 +445,15 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     if (card === undefined || !card.canRetry) {
       return 'やり直せる工程ではありません';
     }
+    // MCではキー1つ（Shift+G）で届くので、押し間違いで工程を始め直さないよう確認を出す
+    const choice = await vscode.window.showWarningMessage(
+      `${taskId}の工程をやり直しますか？`,
+      { modal: true },
+      'やり直す',
+    );
+    if (choice !== 'やり直す') {
+      return CANCELLED;
+    }
     const result = await this.deps.controller.retryStage(runId, taskId);
     this.schedulePost();
     return result.ok ? undefined : result.message;

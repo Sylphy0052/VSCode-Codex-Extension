@@ -20,7 +20,14 @@ import {
 import { KindIcon, ProviderIcon, StatusIcon } from './icons';
 import { IssueStartDialog, orderRuns, RunsPane } from './runs';
 import { McHeader, PrefsDialog, SaveFilterDialog, UsageDialog } from './globalPanels';
-import { activeSavedFilter, cycleSavedFilter, fromFilterSpec, toFilterSpec } from './globalLogic';
+import {
+  activeSavedFilter,
+  cycleSavedFilter,
+  findSelectedTask,
+  fromFilterSpec,
+  taskOpBlockReason,
+  toFilterSpec,
+} from './globalLogic';
 import {
   HistoryDialog,
   LaunchSettingsFields,
@@ -757,9 +764,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const runStart = (): void => {
     void bridge.runStart().then(reportRunResult);
   };
-  // runのタスク単位の操作（Issue #2162）。選んだタスクが今のrunに無ければ先頭を選んだ扱いにする
+  // runのタスク単位の操作（Issue #2162）。選んだタスクが今のrunに無ければ選んでいない扱いにし、
+  // runが変わったら選択を解く（別のrunの同じidのタスクへ操作が飛ばないように）
   const runTasks = effectiveRun?.tasks ?? [];
-  const effectiveTask = runTasks.find((t) => t.taskId === selectedTask) ?? runTasks[0];
+  const effectiveTask = findSelectedTask(runTasks, selectedTask);
+  const effectiveRunId = effectiveRun?.runId;
+  useEffect(() => {
+    setSelectedTask(undefined);
+  }, [effectiveRunId]);
   const moveTask = (delta: 1 | -1): void => {
     const next = moveSelection(
       runTasks.map((t) => t.taskId),
@@ -774,21 +786,15 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     }
   };
   const runTaskOp = (op: McRunTaskOp, taskId: string | undefined = effectiveTask?.taskId): void => {
-    const task = runTasks.find((t) => t.taskId === taskId);
-    if (effectiveRun === undefined || task === undefined) {
-      setToast('タスクを選んでください（Shift+J / Shift+K）');
+    const blocked =
+      effectiveRun === undefined ? 'runを選んでください' : taskOpBlockReason(runTasks, taskId, op);
+    if (effectiveRun === undefined || taskId === undefined || blocked !== undefined) {
+      setToast(blocked ?? 'タスクを選んでください（Shift+J / Shift+K）');
       return;
     }
-    if (op === 'retry' ? task.canRetry !== true : task.canStop !== true) {
-      setToast(
-        op === 'retry'
-          ? `${task.taskId}は今やり直せません`
-          : `${task.taskId}は今止められる工程がありません`,
-      );
-      return;
-    }
-    setSelectedTask(task.taskId);
-    void bridge.runTaskOp(op, effectiveRun.runId, task.taskId).then(reportRunResult);
+    setSelectedTask(taskId);
+    // 確認（やり直し・停止とも）は拡張ホストのモーダルで出す。ホストもidが今のrunにあるかを確かめる
+    void bridge.runTaskOp(op, effectiveRun.runId, taskId).then(reportRunResult);
   };
   // 保存した絞り込み（Issue #2162）
   const savedFilters = snapshot?.savedFilters ?? [];
