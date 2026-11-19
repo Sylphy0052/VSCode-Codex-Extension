@@ -10,6 +10,8 @@ import type { ChatState } from '../appserver/chatState';
  * ユニットテストでも実VSCode無しで検証できる（CONTRIBUTINGのレイヤ制約に合わせた
  * 置き場ではないが、`src/view`配下の他の純粋ヘルパー（`relativeTime.ts`）と同じ流儀）。
  *
+ * 「承認待ち」には、Codexの問い合わせ（`prompts`）への回答待ちも含める（Issue #2135）。
+ *
  * 優先順位は「承認待ち」＞「引き継ぎ確認待ち」＞「実行中」＞「バックグラウンド実行中」
  * ＞「待機中」。承認要求が出ている間も`busy`は`true`のまま（`turn/started`〜
  * `turn/completed`の間はターンが終わっていないため）なので、`busy`だけを見ると
@@ -33,10 +35,13 @@ export type SessionActivityState =
  *   （Issue #1280）。`ChatState`には現れない状態なので、呼び出し側が渡す
  */
 export function deriveSessionActivityState(
-  state: Pick<ChatState, 'busy' | 'approvals' | 'backgroundTerminals'>,
+  state: Pick<ChatState, 'busy' | 'approvals' | 'backgroundTerminals'> &
+    Partial<Pick<ChatState, 'prompts'>>,
   handoffPending = false,
 ): SessionActivityState {
-  if (state.approvals.length > 0) {
+  // Codexの`requestUserInput`/elicitation（`prompts`）も人の回答を待って止まっている。
+  // 承認要求と同じ「承認待ち」にしないと、要対応にも統括ページにも出ない（Issue #2135）
+  if (state.approvals.length > 0 || (state.prompts?.length ?? 0) > 0) {
     return 'approvalPending';
   }
   if (handoffPending) {

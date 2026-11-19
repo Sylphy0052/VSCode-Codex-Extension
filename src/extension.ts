@@ -233,6 +233,17 @@ import { ApprovalDisclosureLog } from './view/approvalDisclosure';
 import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
 import { SessionKanbanViewManager, type SessionKanbanTarget } from './view/sessionKanbanView';
 import { setupTaskRun } from './view/taskRunSetup';
+import type { TaskRunPendingPort } from './view/taskRunPending';
+import {
+  ALREADY_ANSWERED_MESSAGE,
+  AnsweredPendingIds,
+  buildChatPendingItems,
+  chatPendingId,
+  parsePromptSubmission,
+  PendingFirstSeen,
+  type PendingItem,
+} from './view/pendingItem';
+import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from './orchestrator/roadmapQuestionMcp';
 import {
   generateWindowId,
   sessionHubRoot,
@@ -965,12 +976,15 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   // このウィンドウ（拡張ホストの起動）の識別子。セッション統括（下の`sessionHubRootDir`）で使うため先に作る
   const windowId = generateWindowId();
+  // task runの質問をsession-hubへ公開する口（Issue #2135）。実体は`setupTaskRun`が入れる
+  const taskRunPendingHolder: { current?: TaskRunPendingPort | undefined } = {};
 
   // オーケストレータモード（Issue #1505）
   context.subscriptions.push(
     ...setupTaskRun({
       store: taskRunStore,
       windowId,
+      pendingPort: taskRunPendingHolder,
       globalStorageDir: context.globalStorageUri.fsPath,
       extensionVersion:
         (context.extension.packageJSON as { version?: string }).version ?? 'unknown',
@@ -1435,24 +1449,51 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const sessionHubRootDir = sessionHubRoot(context.globalStorageUri.fsPath);
   // 共有ファイルへ出す項目はここで明示的に選ぶ。`...session`のままだと
   // `ManagedChatSession`へ項目が増えるたびに、意図しない値が共有ファイルへ流れ出す
-  const toSharedSessions = (provider: 'codex' | 'claude'): SharedSession[] =>
-    (provider === 'codex' ? chat : claudeChat).managedSessions().map((session) => ({
-      threadId: session.threadId,
-      title: session.title,
-      cwd: session.cwd,
-      activity: session.activity,
-      loop: session.loop,
-      provider,
-    }));
-  const currentWindowSessions = (): SharedSession[] => [
-    ...toSharedSessions('codex'),
-    ...toSharedSessions('claude'),
-  ];
+  // 待ち項目（Issue #2135）を最初に見た時刻。状態側に発生時刻が無いため、ここで覚える
+  const pendingFirstSeen = new PendingFirstSeen();
+  const toSharedSessions = (provider: 'codex' | 'claude'): SharedSession[] => {
+    const manager = provider === 'codex' ? chat : claudeChat;
+    return manager.managedSessions().map((session) => {
+      const state = manager.getChatState(session.threadId);
+      return {
+        threadId: session.threadId,
+        title: session.title,
+        cwd: session.cwd,
+        activity: session.activity,
+        loop: session.loop,
+        provider,
+        pending:
+          state === undefined
+            ? []
+            : buildChatPendingItems(
+                state,
+                {
+                  windowId,
+                  threadId: session.threadId,
+                  provider,
+                  cwd: session.cwd,
+                  handoffPending: session.activity === 'handoffPending',
+                },
+                pendingFirstSeen,
+              ),
+      };
+    });
+  };
+  const currentWindowSessions = (): SharedSession[] => {
+    const sessions = [...toSharedSessions('codex'), ...toSharedSessions('claude')];
+    pendingFirstSeen.retain(
+      new Set(sessions.flatMap((session) => (session.pending ?? []).map((item) => item.id))),
+    );
+    return sessions;
+  };
+  const currentWindowPending = (): PendingItem[] =>
+    taskRunPendingHolder.current?.list(windowId) ?? [];
   const sessionHubWriter = new SessionHubWriter(
     sessionHubRootDir,
     windowId,
     currentWindowSessions,
     log,
+    currentWindowPending,
   );
   sessionHubWriter.start();
   const sessionHubReader = new SessionHubReader(sessionHubRootDir, windowId, log);
@@ -1463,6 +1504,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 中身を渡した相手と要求を覚えておき、取り寄せていない要求への決定を受信側でも弾く
   // （Issue #1259）。画面側だけの約束にすると、統括ページを経由しない経路で素通りする
   const approvalDisclosure = new ApprovalDisclosureLog();
+  // 回答済みの待ち項目（Issue #2135）。同じ項目に2箇所から答えても二重に送らない
+  const answeredPending = new AnsweredPendingIds();
   const controlSession = (
     provider: 'codex' | 'claude',
     threadId: string,
@@ -1471,11 +1514,32 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     from: string,
   ): SessionControlResult => {
     const target = { from, provider, threadId };
-    const result =
-      action.kind === 'approvalDecision' &&
-      !approvalDisclosure.consume(target, action.approvalRequestId)
-        ? { ok: false, error: '承認の内容を表示してから操作してください' }
-        : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+    const pendingId =
+      action.kind === 'answerQuestion'
+        ? chatPendingId(provider, threadId, 'askUserQuestion', action.pendingRequestId)
+        : action.kind === 'answerPrompt'
+          ? chatPendingId(provider, threadId, 'codexPrompt', action.pendingRequestId)
+          : undefined;
+    const result: SessionControlResult =
+      pendingId !== undefined && answeredPending.has(pendingId)
+        ? { ok: false, error: ALREADY_ANSWERED_MESSAGE }
+        : (action.kind === 'approvalDecision' &&
+              !approvalDisclosure.consume(target, action.approvalRequestId)) ||
+            ((action.kind === 'answerQuestion' || action.kind === 'answerPrompt') &&
+              !approvalDisclosure.consume(target, action.pendingRequestId))
+          ? { ok: false, error: '承認の内容を表示してから操作してください' }
+          : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+    if (pendingId !== undefined && result.ok) {
+      answeredPending.add(pendingId);
+    }
+    if (pendingId !== undefined) {
+      // 回答の中身は残さない（伏せ字の欄・会話本文に準じる内容を含みうる）
+      log.info(
+        `セッション統括: 質問への回答を受け付けました` +
+          `（要求元 ${from}、${provider}/${threadId}、項目 ${pendingId}、` +
+          `結果 ${result.ok ? '送信' : (result.error ?? '失敗')}）`,
+      );
+    }
     if (action.kind === 'approvalDetail' && result.approvals !== undefined) {
       approvalDisclosure.record(
         target,
@@ -1502,10 +1566,61 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }
     return result;
   };
+  /**
+   * task runの質問への回答（Issue #2135）。自ウィンドウが公開している項目だけを受け付け、
+   * 既存の回答経路（`TaskRunController.answerQuestion`）へ渡す。
+   */
+  const answerTaskRunPending = async (
+    pendingId: string,
+    text: string | undefined,
+    from: string,
+  ): Promise<SessionControlResult> => {
+    const port = taskRunPendingHolder.current;
+    const item = port?.list(windowId).find((candidate) => candidate.id === pendingId);
+    const { runId, taskId, questionId } = item?.payload ?? {};
+    let result: SessionControlResult;
+    if (answeredPending.has(pendingId)) {
+      result = { ok: false, error: ALREADY_ANSWERED_MESSAGE };
+    } else if (
+      port === undefined ||
+      runId === undefined ||
+      taskId === undefined ||
+      questionId === undefined
+    ) {
+      result = { ok: false, error: ALREADY_ANSWERED_MESSAGE };
+    } else {
+      const answer = parseUserAnswer(text);
+      if (answer === undefined) {
+        result = {
+          ok: false,
+          error: `回答は1〜${String(MAX_USER_ANSWER_LENGTH)}文字で入力してください`,
+        };
+      } else {
+        const outcome = await port.answer(runId, taskId, questionId, answer);
+        result = outcome.ok ? { ok: true } : { ok: false, error: outcome.message };
+      }
+    }
+    if (result.ok) {
+      answeredPending.add(pendingId);
+    }
+    log.info(
+      `セッション統括: task runの質問への回答を受け付けました` +
+        `（要求元 ${from}、項目 ${pendingId}、結果 ${result.ok ? '送信' : (result.error ?? '失敗')}）`,
+    );
+    return result;
+  };
   const sessionHubRequestWatcher = new SessionHubRequestWatcher(
     sessionHubRootDir,
     windowId,
-    (request) => {
+    async (request) => {
+      if (request.kind === 'answerTaskRunQuestion') {
+        const answered = await answerTaskRunPending(
+          request.pendingId ?? '',
+          request.text,
+          request.from,
+        );
+        return { ok: answered.ok, error: answered.error };
+      }
       const action = toSessionControlAction(request);
       if (action === undefined) {
         // 版が違うウィンドウから知らない操作が届いた。黙って捨てると相手が待つ
@@ -1536,6 +1651,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     target: SessionKanbanTarget,
     action: SessionControlAction,
   ): Promise<SessionControlResult> => {
+    // task runの質問は会話に属さないため、会話への操作（`controlSession`）を通さない（Issue #2135）
+    if (action.kind === 'answerTaskRunQuestion' && target.windowId === windowId) {
+      return answerTaskRunPending(action.pendingId, action.text, windowId);
+    }
     if (target.windowId === windowId) {
       return controlSession(target.provider, target.threadId, action, windowId);
     }
@@ -1543,7 +1662,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       kind: action.kind,
       provider: target.provider,
       threadId: target.threadId,
-      text: action.kind === 'send' || action.kind === 'sideQuestion' ? action.text : undefined,
+      text:
+        action.kind === 'send' ||
+        action.kind === 'sideQuestion' ||
+        action.kind === 'answerTaskRunQuestion'
+          ? action.text
+          : undefined,
+      pendingId: action.kind === 'answerTaskRunQuestion' ? action.pendingId : undefined,
       sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
       approvalRequestId: action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
       decision: action.kind === 'approvalDecision' ? action.decision : undefined,
@@ -1552,6 +1677,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       handoffDecision: action.kind === 'handoffDecision' ? action.decision : undefined,
       handoffModel: action.kind === 'handoffDecision' ? action.model : undefined,
       handoffEffort: action.kind === 'handoffDecision' ? action.effort : undefined,
+      pendingRequestId:
+        action.kind === 'answerQuestion' || action.kind === 'answerPrompt'
+          ? action.pendingRequestId
+          : undefined,
+      answers: action.kind === 'answerQuestion' ? action.answers : undefined,
+      submission: action.kind === 'answerPrompt' ? action.submission : undefined,
     });
     return {
       ok: reply.ok,
@@ -1714,7 +1845,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         .flatMap((window) =>
           window.sessions.map((session) => ({ ...session, windowId: window.windowId })),
         );
-      return buildSessionKanban([...selfSessions, ...otherSessions], roots, windowId);
+      return {
+        ...buildSessionKanban([...selfSessions, ...otherSessions], roots, windowId),
+        taskRunPending: [
+          ...currentWindowPending(),
+          ...sessionHubReader.getOthers().flatMap((window) => window.pending ?? []),
+        ],
+      };
     },
     controlSessionAnywhere,
     log,
@@ -4910,6 +5047,9 @@ function toSessionControlAction(
     | 'handoffDecision'
     | 'handoffModel'
     | 'handoffEffort'
+    | 'pendingRequestId'
+    | 'answers'
+    | 'submission'
   >,
 ): SessionControlAction | undefined {
   const { text, approvalRequestId, decision, limit, sideQuestionId } = request;
@@ -4955,6 +5095,21 @@ function toSessionControlAction(
             model: request.handoffModel,
             effort: request.handoffEffort,
           };
+    case 'answerQuestion':
+      // 質問との突き合わせは受信側（`controlSession`）が行う。ここは形だけ確かめる
+      return request.pendingRequestId === undefined || request.answers === undefined
+        ? undefined
+        : {
+            kind: 'answerQuestion',
+            pendingRequestId: request.pendingRequestId,
+            answers: request.answers,
+          };
+    case 'answerPrompt': {
+      const submission = parsePromptSubmission(request.submission);
+      return request.pendingRequestId === undefined || submission === undefined
+        ? undefined
+        : { kind: 'answerPrompt', pendingRequestId: request.pendingRequestId, submission };
+    }
     default:
       return undefined;
   }

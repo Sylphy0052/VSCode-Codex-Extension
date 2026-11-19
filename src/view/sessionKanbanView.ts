@@ -5,6 +5,7 @@ import type { Logger } from '../log';
 import { chatCsp } from './chatCsp';
 import type { SessionControlAction, SessionControlResult } from './chatManagerBase';
 import { parseSessionTarget } from '../orchestrator/sessionBridge';
+import { parseAskUserQuestionAnswers, parsePromptSubmission } from './pendingItem';
 import { isSharedApprovalDecision, isSharedHandoffDecision } from './sessionHub';
 import type { SessionKanbanBoard } from './sessionKanbanModel';
 import { KANBAN_CYBER_BASE_STYLES } from './kanbanCyberStyles';
@@ -302,6 +303,23 @@ function parseAction(message: Record<string, unknown>): SessionControlAction | u
             effort: typeof message.effort === 'string' ? message.effort : undefined,
           }
         : undefined;
+    // 質問への回答（Issue #2135）。中身は受け取った側が質問・入力欄と突き合わせて確かめる
+    case 'answerQuestion': {
+      const answers = parseAskUserQuestionAnswers(message.answers);
+      return typeof message.pendingRequestId === 'string' && answers !== undefined
+        ? { kind: 'answerQuestion', pendingRequestId: message.pendingRequestId, answers }
+        : undefined;
+    }
+    case 'answerPrompt': {
+      const submission = parsePromptSubmission(message.submission);
+      return typeof message.pendingRequestId === 'string' && submission !== undefined
+        ? { kind: 'answerPrompt', pendingRequestId: message.pendingRequestId, submission }
+        : undefined;
+    }
+    case 'answerTaskRunQuestion':
+      return typeof message.pendingId === 'string' && typeof message.text === 'string'
+        ? { kind: 'answerTaskRunQuestion', pendingId: message.pendingId, text: message.text }
+        : undefined;
     default:
       return undefined;
   }
@@ -314,7 +332,7 @@ function render(webview: vscode.Webview): string {
   // 外装は会話画面と同じ設定（`agent.chat.skin`）で切り替える（Issue #1253）。
   // 統括画面だけ別の設定にすると、2画面を並べたときに片方だけ装飾が残る
   const skin = skinBodyClass(readChatSkinConfig());
-  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。カードから、開く・中断・ループの一時停止と再開・指示の送信ができます。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちのカードは「内容を見る」で中身を取り寄せ、表示したうえで承認・拒否できます。「やり取りを見る」で直近のやり取りを読めます（開いている間だけ取り寄せ、閉じると破棄します）。「脇道の質問」で本流の会話を汚さずに質問でき、回答はこのページのカードにだけ表示します。引き継ぎ確認待ちのカードは「引き継ぎ内容を見る」で引き継ぎ先のmodel / effortと判定理由を読み、引き継ぐ・設定を変えて引き継ぐ・再判定・中止を選べます。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><details id="filterRepos" class="filter-repos"><summary id="filterReposSummary">リポジトリ: すべて</summary><div id="filterRepoList" class="filter-repo-list" role="group" aria-label="リポジトリで絞り込む"></div></details><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
+  return `<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>${styles}</style></head><body class="${skin}"><main><header><div><p class="eyebrow">ALL WINDOWS</p><h1>セッション統括</h1><p class="description">このPCで開いている全VS Codeウィンドウの、この拡張機能が管理している会話を表示します。カードから、開く・中断・ループの一時停止と再開・指示の送信ができます。別ウィンドウのカードを開くと、相手ウィンドウの中でタブが開いた状態になりますが、ウィンドウ自体は前面に出ません。承認待ちのカードは「内容を見る」で中身を取り寄せ、表示したうえで承認・拒否できます。AskUserQuestionとCodexの問い合わせにもここから答えられます。task runの質問は盤面の上に並び、そこから答えられます。「やり取りを見る」で直近のやり取りを読めます（開いている間だけ取り寄せ、閉じると破棄します）。「脇道の質問」で本流の会話を汚さずに質問でき、回答はこのページのカードにだけ表示します。引き継ぎ確認待ちのカードは「引き継ぎ内容を見る」で引き継ぎ先のmodel / effortと判定理由を読み、引き継ぐ・設定を変えて引き継ぐ・再判定・中止を選べます。</p><div class="filters"><input id="filterQuery" class="filter-input" type="search" autocomplete="off" placeholder="タイトル・フォルダ名で絞り込む" aria-label="タイトル・フォルダ名で絞り込む"><details id="filterRepos" class="filter-repos"><summary id="filterReposSummary">リポジトリ: すべて</summary><div id="filterRepoList" class="filter-repo-list" role="group" aria-label="リポジトリで絞り込む"></div></details><label class="filter-toggle"><input id="filterCurrent" type="checkbox">このウィンドウのみ</label><button id="filterClear" class="filter-clear" type="button" disabled>絞り込みを解除</button></div></div><div id="summary" class="summary" aria-live="polite"></div></header><section id="pendingQuestions" class="pending-questions" aria-label="task runの質問"></section><section id="board" class="board" aria-label="セッションの状態"></section></main><div id="toast" class="toast" role="status" aria-live="polite"></div><script nonce="${nonce}">${script}</script></body></html>`;
 }
 
 const styles = `
@@ -367,6 +385,13 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .approval-detail { background: var(--vscode-textCodeBlock-background, var(--vscode-editorWidget-background)); border: 1px solid var(--vscode-panel-border); border-radius: 4px; font-family: var(--vscode-editor-font-family); font-size: 12px; margin: 0; max-height: 220px; overflow: auto; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .approval-paths { color: var(--vscode-descriptionForeground); font-size: 12px; margin: 0; padding-left: 18px; overflow-wrap: anywhere; }
 .approval-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.answer-form { display: flex; flex-direction: column; gap: 6px; }
+.answer-question { margin: 0; font-weight: 600; white-space: pre-wrap; overflow-wrap: anywhere; }
+.answer-choices { display: flex; flex-direction: column; gap: 2px; }
+.answer-choice { display: flex; gap: 6px; align-items: baseline; font-size: 12px; }
+.pending-questions:empty { display: none; }
+.pending-questions { display: flex; flex-direction: column; gap: 8px; margin: 0 0 12px; }
+.pending-question { border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .handoff-picker { display: flex; flex-wrap: wrap; gap: 8px; }
 .handoff-field { display: flex; align-items: center; gap: 4px; font-size: 12px; }
 .handoff-caption { color: var(--vscode-descriptionForeground); }
@@ -465,7 +490,7 @@ body.skin-cyber.vscode-high-contrast.has-approval::before, body.skin-cyber.vscod
 `;
 
 const script = `
-const vscode = acquireVsCodeApi(); const board = document.getElementById('board'); const summary = document.getElementById('summary'); const toast = document.getElementById('toast');
+const vscode = acquireVsCodeApi(); const board = document.getElementById('board'); const pendingQuestions = document.getElementById('pendingQuestions'); const summary = document.getElementById('summary'); const toast = document.getElementById('toast');
 const queryInput = document.getElementById('filterQuery'); const currentToggle = document.getElementById('filterCurrent'); const clearButton = document.getElementById('filterClear');
 const repoDetails = document.getElementById('filterRepos'); const repoSummary = document.getElementById('filterReposSummary'); const repoList = document.getElementById('filterRepoList');
 const specs = [{ key:'approvalPending', label:'承認待ち', icon:'⚠', empty:'対応待ちの会話はありません' }, { key:'handoffPending', label:'引き継ぎ確認待ち', icon:'⇄', empty:'引き継ぎ確認待ちの会話はありません' }, { key:'running', label:'実行中', icon:'↻', empty:'実行中の会話はありません' }, { key:'backgroundRunning', label:'バックグラウンド実行中', icon:'◐', empty:'バックグラウンド実行中の会話はありません' }, { key:'idle', label:'待機中', icon:'●', empty:'待機中の会話はありません' }];
@@ -505,11 +530,11 @@ const handoffExpanded = new Set(); const handoffs = new Map(); const handoffErro
 const handoffPicks = new Map();
 // 送った操作と、その結果を結び付ける通し番号
 let controlSeq = 0; const pendingControls = new Map();
-const actionLabels = { open: '開く', interrupt: '中断', pauseLoop: '一時停止', resumeLoop: '再開', send: '指示の送信', approvalDetail: '承認の内容の取り寄せ', recentTurns: 'やり取りの取り寄せ', sideQuestion: '脇道の質問', sideQuestionResult: '脇道の回答の取り寄せ', handoffDetail: '引き継ぎの確認内容の取り寄せ' };
+const actionLabels = { open: '開く', interrupt: '中断', pauseLoop: '一時停止', resumeLoop: '再開', send: '指示の送信', approvalDetail: '承認の内容の取り寄せ', recentTurns: 'やり取りの取り寄せ', sideQuestion: '脇道の質問', sideQuestionResult: '脇道の回答の取り寄せ', handoffDetail: '引き継ぎの確認内容の取り寄せ', answerQuestion: '質問への回答', answerPrompt: '問い合わせへの回答', answerTaskRunQuestion: 'task runの質問への回答' };
 const decisionLabels = { accept: '承認', decline: '拒否' };
 const handoffLabels = { proceed: '引き継ぎ', repick: '引き継ぎ先の変更', reclassify: '再判定', cancel: '引き継ぎの中止' };
 function controlLabel(action, extra) { if(action === 'approvalDecision') return decisionLabels[extra.decision]; if(action === 'handoffDecision') return handoffLabels[extra.decision]; return actionLabels[action]; }
-function sendControl(card, action, text, extra) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { action, card, label: controlLabel(action, extra), place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text, approvalRequestId: extra && extra.approvalRequestId, decision: extra && extra.decision, limit: extra && extra.limit, sideQuestionId: extra && extra.sideQuestionId, handoffRequestId: extra && extra.handoffRequestId, model: extra && extra.model, effort: extra && extra.effort }); return seq; }
+function sendControl(card, action, text, extra) { controlSeq += 1; const seq = controlSeq; pendingControls.set(seq, { action, card, label: controlLabel(action, extra), place: card.isCurrentWindow ? '' : windowLabel(card) + 'の', key: cardKey(card), text, extra }); vscode.postMessage({ type:'control', seq, action, windowId:card.windowId, provider:card.provider, threadId:card.threadId, text, approvalRequestId: extra && extra.approvalRequestId, decision: extra && extra.decision, limit: extra && extra.limit, sideQuestionId: extra && extra.sideQuestionId, handoffRequestId: extra && extra.handoffRequestId, model: extra && extra.model, effort: extra && extra.effort, pendingRequestId: extra && extra.pendingRequestId, pendingId: extra && extra.pendingId, answers: extra && extra.answers, submission: extra && extra.submission }); return seq; }
 // カードを折りたたむと、その中で開いていた欄もすべて閉じる（Issue #1282）。
 // 閉じたカードから承認の中身・やり取りの取り寄せが飛び続けないようにする。
 // 脇道の質問の回答（btwRuns）は受信側が預かっている分なので消さない（開き直せば読める）
@@ -651,7 +676,7 @@ function setApprovalFlag(has) { document.body.classList.toggle('has-approval', h
 // 承認が解決したカードは承認待ちの列から出ていき、「内容を閉じる」を押す手段が無くなる。
 // 列に残っていないキーはここで捨てる（開きっぱなしの統括ページに溜め続けないため）
 function dropStaleDetails(counts) { const alive=new Set(counts.approvalPending.map(cardKey)); for(const key of [...expanded]) { if(!alive.has(key)) { expanded.delete(key); details.delete(key); detailErrors.delete(key); } } const live=new Set(); for(const spec of specs) for(const card of counts[spec.key]) live.add(cardKey(card)); for(const key of [...turnsExpanded]) { if(!live.has(key)) { turnsExpanded.delete(key); turns.delete(key); turnsErrors.delete(key); turnsInflight.delete(key); } } for(const key of [...btwRuns.keys()]) { if(!live.has(key)) { btwRuns.delete(key); btwInflight.delete(key); btwDrafts.delete(key); btwExpanded.delete(key); } } const handoffAlive=new Set(counts.handoffPending.map(cardKey)); for(const key of [...handoffExpanded]) { if(!handoffAlive.has(key)) { handoffExpanded.delete(key); handoffs.delete(key); handoffErrors.delete(key); handoffInflight.delete(key); handoffPicks.delete(key); } } for(const key of [...cardsExpanded]) { if(!live.has(key)) cardsExpanded.delete(key); } }
-function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; dropStaleDetails(counts); for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); renderRepoOptions(collectRepos(data)); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); restoreFocus(focused); }
+function render(data) { const focused = focusedSpot(); board.replaceChildren(); summary.replaceChildren(); const counts=data.cards; dropStaleDetails(counts); for(const spec of specs) for(const card of counts[spec.key]) registerAlias(card); renderRepoOptions(collectRepos(data)); const shown={}; let shownTotal=0; for(const spec of specs) { shown[spec.key]=counts[spec.key].filter(matches); shownTotal+=shown[spec.key].length; } summary.append(text('span', countLabel(shownTotal, data.total) + ' セッション', 'metric')); for(const spec of specs) { const list=shown[spec.key]; const total=counts[spec.key].length; const metric=text('span', spec.label + ' ' + countLabel(list.length, total), 'metric' + (spec.key==='approvalPending' && total ? ' alert' : '')); summary.append(metric); const column=document.createElement('section'); column.className='column ' + spec.key; const head=document.createElement('div'); head.className='column-head'; head.append(text('span', spec.icon, 'icon'), text('span', spec.label), text('span', countLabel(list.length, total), 'count')); const cards=document.createElement('div'); cards.className='cards'; if(list.length===0) cards.append(text('p', total===0 ? spec.empty : '条件に一致する会話はありません', 'empty')); for(const card of list) cards.append(buildCard(card, spec.key)); column.append(head,cards); board.append(column); } setApprovalFlag(counts.approvalPending.length > 0); renderTaskRunPending(data.taskRunPending || []); restoreFocus(focused); }
 function actionButton(key, role, label, onClick) { const b=document.createElement('button'); b.type='button'; b.className='card-action'; b.dataset.cardKey=key; b.dataset.role=role; b.textContent=label; b.addEventListener('click', onClick); return b; }
 // カード1枚。見出しの部分が「開く」ボタンで、その下に操作が並ぶ（Issue #1258）。
 // カード全体をボタンにすると中に操作ボタンを置けない（入れ子のボタンは作れない）
@@ -809,6 +834,101 @@ function buildHandoff(card, key) {
   box.append(text('p', '元のウィンドウにダイアログが出ている場合、ここで答えても閉じられません（VS Codeに閉じる手段が無いため）。残ったダイアログを押しても二重には実行されません。', 'detail-note'));
   return box;
 }
+// 統括ページから質問へ答える（Issue #2135）。入力途中の値は250msごとの再描画をまたいで残す。
+// キーは「カード|要求id|欄」。選択肢は選んだ値の配列、自由入力は文字列を持つ
+const answerDrafts = new Map();
+function draftKey(key, requestId, id) { return key + '|' + requestId + '|' + id; }
+function clearAnswerDrafts(key, requestId) { const prefix = key + '|' + requestId + '|'; for(const k of [...answerDrafts.keys()]) { if(k.startsWith(prefix)) answerDrafts.delete(k); } }
+function answerInput(key, requestId, id, label) {
+  const input = document.createElement('input'); input.type = 'text'; input.className = 'send-input'; input.placeholder = label; input.setAttribute('aria-label', label);
+  input.dataset.cardKey = key; input.dataset.role = 'answer:' + requestId + ':' + id;
+  const dk = draftKey(key, requestId, id); input.value = answerDrafts.get(dk) || '';
+  input.addEventListener('input', () => answerDrafts.set(dk, input.value));
+  return input;
+}
+function answerChoices(key, requestId, id, options, multiple) {
+  const wrap = document.createElement('div'); wrap.className = 'answer-choices';
+  const dk = draftKey(key, requestId, id); const chosen = answerDrafts.get(dk) || [];
+  options.forEach((option, index) => {
+    const label = document.createElement('label'); label.className = 'answer-choice';
+    const box = document.createElement('input'); box.type = multiple ? 'checkbox' : 'radio'; box.name = dk; box.value = option.value; box.checked = chosen.includes(option.value);
+    box.dataset.cardKey = key; box.dataset.role = 'choice:' + requestId + ':' + id + ':' + index;
+    box.addEventListener('change', () => { const current = answerDrafts.get(dk) || []; answerDrafts.set(dk, multiple ? (box.checked ? current.concat([option.value]) : current.filter(v => v !== option.value)) : [option.value]); });
+    label.append(box, text('span', option.description ? option.label + '（' + option.description + '）' : option.label));
+    wrap.append(label);
+  });
+  return wrap;
+}
+// 選んだ値と自由入力をまとめる。自由入力は選択肢の後ろへ足す（チャットタブの「その他」と同じ）
+function pickedValues(key, requestId, choiceId, otherId) {
+  const picked = (answerDrafts.get(draftKey(key, requestId, choiceId)) || []).slice();
+  const other = (answerDrafts.get(draftKey(key, requestId, otherId)) || '').trim();
+  if(other !== '') picked.push(other);
+  return picked;
+}
+function buildQuestionAnswer(card, key, approval) {
+  const form = document.createElement('div'); form.className = 'answer-form';
+  const questions = approval.questions || [];
+  questions.forEach((q, index) => {
+    form.append(text('p', q.header ? q.header + ': ' + q.question : q.question, 'answer-question'));
+    form.append(answerChoices(key, approval.requestId, 'q' + index, q.options.map(o => ({ value: o.label, label: o.label, description: o.description })), q.multiSelect));
+    form.append(answerInput(key, approval.requestId, 'other' + index, 'その他（自由入力）'));
+  });
+  const row = document.createElement('div'); row.className = 'approval-actions';
+  row.append(actionButton(key, 'answer:' + approval.requestId, '回答する', () => {
+    const answers = Object.fromEntries(questions.map((q, index) => [q.question, pickedValues(key, approval.requestId, 'q' + index, 'other' + index)]));
+    sendControl(card, 'answerQuestion', undefined, { pendingRequestId: approval.requestId, answers });
+  }));
+  row.append(actionButton(key, 'decline:' + approval.requestId, '拒否', () => sendControl(card, 'approvalDecision', undefined, { approvalRequestId: approval.requestId, decision: 'decline' })));
+  form.append(row);
+  return form;
+}
+function buildPromptAnswer(card, key, approval) {
+  const form = document.createElement('div'); form.className = 'answer-form';
+  const row = document.createElement('div'); row.className = 'approval-actions';
+  const decline = actionButton(key, 'promptDecline:' + approval.requestId, '断る', () => sendControl(card, 'answerPrompt', undefined, { pendingRequestId: approval.requestId, submission: { action: 'decline', values: {} } }));
+  if(approval.answerBlockedReason) { form.append(text('p', approval.answerBlockedReason, 'detail-note')); row.append(decline); form.append(row); return form; }
+  const fields = approval.fields || [];
+  fields.forEach((f, index) => {
+    form.append(text('p', (f.label || f.id) + (f.required ? '（必須）' : '') + (f.description ? ': ' + f.description : ''), 'answer-question'));
+    if(f.options.length) form.append(answerChoices(key, approval.requestId, 'f' + index, f.options.map(o => ({ value: o.value, label: o.label || o.value, description: '' })), f.multiple));
+    if(f.allowOther || !f.options.length) form.append(answerInput(key, approval.requestId, 'fo' + index, f.options.length ? 'その他（自由入力）' : '回答'));
+  });
+  row.append(actionButton(key, 'promptSubmit:' + approval.requestId, '回答する', () => {
+    const values = Object.fromEntries(fields.map((f, index) => [f.id, pickedValues(key, approval.requestId, 'f' + index, 'fo' + index)]));
+    sendControl(card, 'answerPrompt', undefined, { pendingRequestId: approval.requestId, submission: { action: 'submit', values } });
+  }), decline);
+  form.append(row);
+  return form;
+}
+// task runの質問（Issue #2135）。会話に属さないため盤面の外へ並べる。中身が変わったときだけ
+// 描き直し、入力中の欄を250msごとに作り直さない
+let lastTaskRunPending = '';
+const taskRunDrafts = new Map();
+function renderTaskRunPending(items) {
+  const signature = JSON.stringify(items.map(item => [item.id, item.title, item.payload.summary, item.payload.options]));
+  if(signature === lastTaskRunPending) return;
+  lastTaskRunPending = signature;
+  pendingQuestions.replaceChildren();
+  const alive = new Set(items.map(item => item.id));
+  for(const k of [...taskRunDrafts.keys()]) { if(!alive.has(k)) taskRunDrafts.delete(k); }
+  if(items.length === 0) return;
+  pendingQuestions.append(text('p', 'task runの質問 ' + items.length + '件', 'metric alert'));
+  for(const item of items) {
+    const box = document.createElement('div'); box.className = 'pending-question';
+    box.append(text('p', item.title, 'approval-title'));
+    if(item.payload.summary) box.append(text('pre', item.payload.summary, 'approval-detail'));
+    const target = { windowId: item.session.windowId, provider: item.session.provider, threadId: item.session.threadId, isCurrentWindow: true };
+    const send = value => { if(value.trim() === '') return; sendControl(target, 'answerTaskRunQuestion', value, { pendingId: item.id }); };
+    const row = document.createElement('div'); row.className = 'approval-actions';
+    for(const option of item.payload.options || []) { const b = document.createElement('button'); b.type = 'button'; b.className = 'card-action'; b.textContent = option; b.addEventListener('click', () => send(option)); row.append(b); }
+    const input = document.createElement('input'); input.type = 'text'; input.className = 'send-input'; input.placeholder = '回答を書く'; input.setAttribute('aria-label', 'task runの質問への回答'); input.value = taskRunDrafts.get(item.id) || '';
+    input.addEventListener('input', () => taskRunDrafts.set(item.id, input.value));
+    input.addEventListener('keydown', e => { if(e.key === 'Enter') { e.preventDefault(); send(input.value); } });
+    const submit = document.createElement('button'); submit.type = 'button'; submit.className = 'card-action'; submit.textContent = '回答する'; submit.addEventListener('click', () => send(input.value));
+    row.append(input, submit); box.append(row); pendingQuestions.append(box);
+  }
+}
 // 取り寄せた承認の中身。承認・拒否のボタンはここにしか無いので、
 // 中身を表示していない状態では押せない（Issue #1259の受入基準）
 function buildDetail(card, key) {
@@ -825,6 +945,9 @@ function buildDetail(card, key) {
     if(approval.paths && approval.paths.length) { const paths = document.createElement('ul'); paths.className = 'approval-paths'; for(const p of approval.paths) paths.append(text('li', p)); block.append(paths); }
     const row = document.createElement('div'); row.className = 'approval-actions';
     if(approval.decidable) { row.append(actionButton(key, 'approve:' + approval.requestId, '承認', () => sendControl(card, 'approvalDecision', undefined, { approvalRequestId: approval.requestId, decision: 'accept' })), actionButton(key, 'decline:' + approval.requestId, '拒否', () => sendControl(card, 'approvalDecision', undefined, { approvalRequestId: approval.requestId, decision: 'decline' }))); }
+    // AskUserQuestionとCodexの問い合わせは、統括ページから答えられる（Issue #2135）
+    else if(approval.answer === 'choices' && approval.questions) { block.append(buildQuestionAnswer(card, key, approval)); }
+    else if(approval.answer === 'text' && approval.fields) { block.append(buildPromptAnswer(card, key, approval)); }
     else { row.append(text('span', 'この問い合わせは会話のタブ側で答えてください', 'detail-note')); }
     block.append(row); box.append(block);
   }
@@ -850,7 +973,9 @@ function showControlResult(data) {
   const label = (info ? info.place + info.label : '操作');
   showToast(data.ok ? label + 'を実行しました' : label + 'に失敗しました: ' + (data.error || '理由は不明です'));
   // 承認・拒否の後は手元の中身が古い。捨てて取り直す（解決済みの要求を押せないように）
-  if(info && info.action === 'approvalDecision') { details.delete(info.key); if(expanded.has(info.key)) { sendControl(info.card, 'approvalDetail'); } applyFilter(); return; }
+  // 回答が届いたら、入力途中の値を捨てる。届かなかったときは残して直せるようにする（Issue #2135）
+  if(info && data.ok && info.extra && info.extra.pendingRequestId !== undefined) clearAnswerDrafts(info.key, info.extra.pendingRequestId);
+  if(info && (info.action === 'approvalDecision' || info.action === 'answerQuestion' || info.action === 'answerPrompt')) { details.delete(info.key); if(expanded.has(info.key)) { sendControl(info.card, 'approvalDetail'); } applyFilter(); return; }
   // 引き継ぎの決定の後も手元の中身は古い。捨てて取り直す（解決済みの保留を押せないように）
   if(info && info.action === 'handoffDecision') { handoffs.delete(info.key); if(handoffExpanded.has(info.key)) { requestHandoff(info.card); } applyFilter(); return; }
   if(!data.ok && info && info.text !== undefined && drafts.get(info.key) === undefined) { drafts.set(info.key, info.text); applyFilter(); }
