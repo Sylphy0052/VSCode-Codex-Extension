@@ -56,7 +56,9 @@ describe('MissionControlViewManager（Issue #2136）', () => {
     await vi.waitFor(() =>
       expect(panel.webview.sent.at(-1)).toMatchObject({ type: 'reply', seq: 3, ok: true }),
     );
-    expect(env.clipboard.written).toEqual(['session:claude:22222222-2222-4222-8222-222222222222:t9']);
+    expect(env.clipboard.written).toEqual([
+      'session:claude:22222222-2222-4222-8222-222222222222:t9',
+    ]);
     panel.webview.simulateMessage({
       type: 'copyRef',
       seq: 4,
@@ -142,7 +144,11 @@ describe('MissionControlViewManager（Issue #2136）', () => {
         panel.webview.simulateMessage({ type: 'ready' });
         panel.webview.simulateMessage({
           type: 'watch',
-          target: { windowId: '22222222-2222-4222-8222-222222222222', provider: 'codex', threadId: 't' },
+          target: {
+            windowId: '22222222-2222-4222-8222-222222222222',
+            provider: 'codex',
+            threadId: 't',
+          },
         });
         await vi.advanceTimersByTimeAsync(0);
         expect(control).toHaveBeenCalledTimes(1);
@@ -170,7 +176,11 @@ describe('MissionControlViewManager（Issue #2136）', () => {
         // 閉じると止まり、タイマーも残らない
         panel.webview.simulateMessage({
           type: 'watch',
-          target: { windowId: '22222222-2222-4222-8222-222222222222', provider: 'codex', threadId: 't' },
+          target: {
+            windowId: '22222222-2222-4222-8222-222222222222',
+            provider: 'codex',
+            threadId: 't',
+          },
         });
         await vi.advanceTimersByTimeAsync(0);
         const before = control.mock.calls.length;
@@ -191,7 +201,11 @@ describe('MissionControlViewManager（Issue #2136）', () => {
         panel.webview.simulateMessage({ type: 'ready' });
         panel.webview.simulateMessage({
           type: 'watch',
-          target: { windowId: '11111111-1111-4111-8111-111111111111', provider: 'codex', threadId: 't' },
+          target: {
+            windowId: '11111111-1111-4111-8111-111111111111',
+            provider: 'codex',
+            threadId: 't',
+          },
         });
         await vi.advanceTimersByTimeAsync(10_000);
         expect(control).toHaveBeenCalledTimes(1);
