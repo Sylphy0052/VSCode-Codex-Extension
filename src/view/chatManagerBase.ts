@@ -1880,18 +1880,62 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         }
         if (action.kind === 'rewindPreview') {
           const preview = await this.previewRewind(entry, action.messageId);
-          return 'error' in preview
-            ? { ok: false, error: preview.error }
-            : { ok: true, rewindFiles: preview.files };
+          if ('error' in preview) {
+            this.rewindPreviews.delete(entry);
+            return { ok: false, error: preview.error };
+          }
+          this.rewindPreviews.set(entry, { messageId: action.messageId, files: preview.files });
+          return { ok: true, rewindFiles: preview.files };
         }
-        if (entry.session.getState().busy) {
-          return { ok: false, error: '実行中の会話は戻せません。中断してから戻してください' };
-        }
-        return done(await this.applyRewind(entry, action.messageId));
+        return done(await this.rewindFromHub(entry, action.messageId));
       }
       default:
         return { ok: false, error: 'この操作は扱えません' };
     }
+  }
+
+  /**
+   * Mission Controlで確かめた巻き戻しの内容（Issue #2160）。entryごとに最後の1件だけ持つ。
+   * 確かめてから押すまでに会話が進むと戻るファイルが増えるため、押したときに見せた一覧と
+   * 突き合わせる。
+   */
+  private readonly rewindPreviews = new WeakMap<
+    TPanel,
+    { messageId: string; files: readonly string[] }
+  >();
+
+  /**
+   * Mission Controlからの巻き戻しの適用（Issue #2160）。確かめた発言・ファイルと今の状態が
+   * 食い違うときは戻さずに断る（人が見ていないファイルまで戻さないように）。
+   */
+  private async rewindFromHub(entry: TPanel, messageId: string): Promise<string | undefined> {
+    const confirmed = this.rewindPreviews.get(entry);
+    if (confirmed?.messageId !== messageId) {
+      return '戻るファイルを確かめてから巻き戻してください';
+    }
+    if (entry.session.getState().busy) {
+      return '実行中の会話は戻せません。中断してから戻してください';
+    }
+    const current = await this.previewRewind(entry, messageId);
+    if ('error' in current) {
+      this.rewindPreviews.delete(entry);
+      return current.error;
+    }
+    const before = [...confirmed.files].sort();
+    const after = [...current.files].sort();
+    if (before.length !== after.length || before.some((file, i) => file !== after[i])) {
+      this.rewindPreviews.set(entry, { messageId, files: current.files });
+      return '確かめた後に戻るファイルが変わりました。確かめ直してください';
+    }
+    if (current.files.length === 0) {
+      return '戻すファイルの変更はありません';
+    }
+    // 確かめた後に会話が動き出していないか、問い合わせを待った後にもう一度見る
+    if (entry.session.getState().busy) {
+      return '実行中の会話は戻せません。中断してから戻してください';
+    }
+    this.rewindPreviews.delete(entry);
+    return this.applyRewind(entry, messageId);
   }
 
   /** 名前を変える（Issue #2160）。値は確かめ済み。変えられなかったときは理由の文を返す。 */

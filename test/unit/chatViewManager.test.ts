@@ -1234,6 +1234,73 @@ describe('ChatViewManager', () => {
     });
   });
 
+  describe('Mission Controlで選んだセッションへの操作（Issue #2160）', () => {
+    const openTwo = async () => {
+      const env = createManager();
+      const a = env.manager.openNew('/workspace/a');
+      await tick();
+      env.connection.resolveFirst('thread/start', threadStartResult('thread-a'));
+      await a;
+      const panelA = __mock.lastCreatedPanel();
+      const b = env.manager.openNew('/workspace/b');
+      await tick();
+      env.connection.resolveFirst('thread/start', threadStartResult('thread-b'));
+      await b;
+      return { ...env, panelA, panelB: __mock.lastCreatedPanel() };
+    };
+
+    it('名前の変更・クリア・分岐は最後にアクティブなチャットではなく指定したセッションに効く', async () => {
+      const { manager, connection, panelA, panelB } = await openTwo();
+
+      const renamed = manager.controlSessionAsync('thread-a', { kind: 'rename', name: 'A名' });
+      await tick();
+      connection.resolveFirst('thread/name/set', {});
+      expect(await renamed).toEqual({ ok: true });
+      expect(connection.requests.find((r) => r.method === 'thread/name/set')?.params).toEqual(
+        expect.objectContaining({ threadId: 'thread-a', name: 'A名' }),
+      );
+
+      const forked = manager.controlSessionAsync('thread-a', { kind: 'fork' });
+      await tick();
+      expect(connection.requests.find((r) => r.method === 'thread/fork')?.params).toEqual({
+        threadId: 'thread-a',
+      });
+      connection.resolveFirst('thread/fork', threadStartResult('thread-a-fork'));
+      await tick(40);
+      connection.resolveFirst('thread/resume', { thread: { id: 'thread-a-fork', turns: [] } });
+      expect(await forked).toEqual({ ok: true });
+
+      const cleared = manager.controlSessionAsync('thread-a', { kind: 'clear' });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-a2'));
+      expect(await cleared).toEqual({ ok: true });
+      expect(panelA?.disposed).toBe(true);
+      expect(panelB?.disposed).toBe(false);
+      expect(manager.isOpen('thread-b')).toBe(true);
+      // 消した会話のidへの操作は断る
+      expect((await manager.controlSessionAsync('thread-a', { kind: 'clear' })).ok).toBe(false);
+    });
+
+    it('コマンドパレットのクリアは従来どおり最後にアクティブなチャットに効く', async () => {
+      const { manager, connection, panelA, panelB } = await openTwo();
+      const cleared = manager.clearActive();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-b2'));
+      await cleared;
+      expect(panelB?.disposed).toBe(true);
+      expect(panelA?.disposed).toBe(false);
+    });
+
+    it('Codexのセッションは巻き戻しを断る', async () => {
+      const { manager } = await openTwo();
+      const result = await manager.controlSessionAsync('thread-a', {
+        kind: 'rewindPreview',
+        messageId: 'u-1',
+      });
+      expect(result.ok).toBe(false);
+    });
+  });
+
   describe('会話のクリア（TUIの /clear 相当）', () => {
     it('いまの会話を閉じて、同じ作業フォルダで新しい会話を開き直す', async () => {
       const { manager, connection } = createManager();

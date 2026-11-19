@@ -856,4 +856,186 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       expect(outputs()).toBe(0);
     });
   });
+
+  describe('選んだセッションへの操作（Issue #2160）', () => {
+    const otherWindowClaude = {
+      ...runningSession,
+      key: 's2',
+      windowId: 'w2',
+      threadId: 'c-2',
+      provider: 'claude' as const,
+      isCurrentWindow: false,
+      title: '別ウィンドウの会話',
+      activity: 'idle' as const,
+    };
+    const setup = async (sessions: Array<typeof runningSession | typeof otherWindowClaude>) => {
+      const env = boot();
+      env.window.HTMLElement.prototype.scrollIntoView = () => undefined;
+      const shiftKey = (k: string): void => {
+        env.window.document.dispatchEvent(
+          new env.window.KeyboardEvent('keydown', { key: k, shiftKey: true, bubbles: true }),
+        );
+      };
+      const reply = (action: string, result: Record<string, unknown>): void => {
+        const request = env.posted.filter((m) => m.action === action).at(-1);
+        env.deliver({ type: 'controlResult', seq: request?.seq, ok: true, ...result });
+      };
+      await tick();
+      env.deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions } });
+      await tick();
+      return { ...env, shiftKey, reply };
+    };
+    const ops = (posted: Array<Record<string, unknown>>) =>
+      posted.filter(
+        (m) =>
+          m.type === 'control' &&
+          [
+            'rename',
+            'clear',
+            'rewindPreview',
+            'rewind',
+            'fork',
+            'handoff',
+            'pin',
+            'unpin',
+          ].includes(String(m.action)),
+      );
+
+    it('名前の変更は別ウィンドウの選んだセッションの宛先で送る', async () => {
+      const { window, posted, shiftKey } = await setup([otherWindowClaude]);
+      shiftKey('R');
+      await tick();
+      const input = window.document.querySelector('[aria-label="新しい名前"]') as HTMLInputElement;
+      expect(input).not.toBeNull();
+      input.value = '  新しい名前  ';
+      input.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await tick();
+      (input.closest('form') as HTMLFormElement).requestSubmit();
+      await tick();
+      expect(ops(posted)).toEqual([
+        expect.objectContaining({
+          action: 'rename',
+          name: '新しい名前',
+          windowId: 'w2',
+          provider: 'claude',
+          threadId: 'c-2',
+        }),
+      ]);
+    });
+
+    it('クリアは確認を出し、押すまで送らない。Escで閉じれば送らない', async () => {
+      const { window, posted, shiftKey } = await setup([otherWindowClaude]);
+      shiftKey('C');
+      await tick();
+      const dialog = window.document.querySelector('[aria-label="会話のクリア"]');
+      expect(dialog?.textContent).toContain('進行中のターンは中断されます');
+      expect(ops(posted)).toHaveLength(0);
+      window.document.dispatchEvent(
+        new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+      await tick();
+      expect(window.document.querySelector('[aria-label="会話のクリア"]')).toBeNull();
+      expect(ops(posted)).toHaveLength(0);
+      shiftKey('C');
+      await tick();
+      (
+        window.document.querySelector('[aria-label="会話のクリア"] [data-submit]') as HTMLElement
+      ).click();
+      await tick();
+      expect(ops(posted)).toEqual([
+        expect.objectContaining({ action: 'clear', windowId: 'w2', threadId: 'c-2' }),
+      ]);
+    });
+
+    it('分岐・ピン留め・引き継ぎは、j / kで選び直したセッションへ送る', async () => {
+      const { posted, shiftKey, key } = await setup([
+        runningSession,
+        { ...otherWindowClaude, pinned: true } as typeof otherWindowClaude,
+      ]);
+      const focusedThread = (): unknown => {
+        shiftKey('B');
+        return ops(posted).at(-1)?.threadId;
+      };
+      const first = focusedThread();
+      await tick();
+      key('j');
+      await tick();
+      const second = focusedThread();
+      await tick();
+      expect(new Set([first, second])).toEqual(new Set(['t1', 'c-2']));
+      // 今選んでいるのはsecond。ピン留め済みのClaudeならunpin、Codexならpinを送る
+      shiftKey('I');
+      shiftKey('H');
+      await tick();
+      const last = ops(posted).slice(-2);
+      expect(last.map((m) => m.threadId)).toEqual([second, second]);
+      expect(last[0]?.action).toBe(second === 'c-2' ? 'unpin' : 'pin');
+      expect(last[1]?.action).toBe('handoff');
+    });
+
+    it('Codexのセッションでは巻き戻しを出さない', async () => {
+      const { window, posted, shiftKey } = await setup([runningSession]);
+      shiftKey('Z');
+      await tick();
+      expect(window.document.querySelector('[aria-label="巻き戻し"]')).toBeNull();
+      expect(window.document.querySelector('.toast')?.textContent).toContain('Claude');
+      expect(ops(posted)).toHaveLength(0);
+    });
+
+    it('巻き戻しは発言の固定のidで確かめ、ファイルが無ければ巻き戻すボタンを出さない', async () => {
+      const { window, posted, shiftKey, reply } = await setup([otherWindowClaude]);
+      shiftKey('Z');
+      await tick();
+      reply('recentTurns', {
+        turns: [
+          { role: 'user', text: '古い発言', truncated: false, id: 'u-old' },
+          { role: 'agent', text: '応答', truncated: false },
+          { role: 'user', text: '新しい発言', truncated: false, id: 'u-new' },
+        ],
+      });
+      await tick();
+      const dialog = (): Element | null => window.document.querySelector('[aria-label="巻き戻し"]');
+      expect(dialog()?.textContent).toContain('会話の履歴は変わりません');
+      // 新しい順に並ぶ。↓で古い発言へ移ってEnterで確かめる
+      const list = dialog()?.querySelector('[role="listbox"]') as HTMLElement;
+      list.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      await tick();
+      list.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await tick();
+      expect(ops(posted).at(-1)).toMatchObject({
+        action: 'rewindPreview',
+        messageId: 'u-old',
+        threadId: 'c-2',
+      });
+      reply('rewindPreview', { rewindFiles: [] });
+      await tick();
+      expect(dialog()?.textContent).toContain('戻すファイルの変更はありません');
+      expect(dialog()?.querySelector('[data-submit]')).toBeNull();
+      // 選び直して、ファイルがある発言なら確認を経て送る
+      (
+        Array.from(dialog()?.querySelectorAll('button') ?? []).find(
+          (b) => b.textContent === '選び直す',
+        ) as HTMLElement
+      ).click();
+      await tick();
+      (dialog()?.querySelector('[role="listbox"]') as HTMLElement).dispatchEvent(
+        new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await tick();
+      reply('rewindPreview', { rewindFiles: ['src/a.ts'] });
+      await tick();
+      expect(dialog()?.textContent).toContain('src/a.ts');
+      expect(ops(posted).filter((m) => m.action === 'rewind')).toHaveLength(0);
+      (dialog()?.querySelector('[data-submit]') as HTMLElement).click();
+      await tick();
+      expect(ops(posted).at(-1)).toMatchObject({
+        action: 'rewind',
+        messageId: ops(posted)
+          .filter((m) => m.action === 'rewindPreview')
+          .at(-1)?.messageId,
+        windowId: 'w2',
+        threadId: 'c-2',
+      });
+    });
+  });
 });

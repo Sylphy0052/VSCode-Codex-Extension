@@ -136,6 +136,8 @@ function ClearDialog(props: OpProps): JSX.Element {
           「{session.title}
           」の会話を閉じ、同じタブで新しい会話を始めます。元の会話は履歴に残ります。
         </p>
+        {/* 受信側はコマンドの経路と違い応答中かを聞き直さないので、ここで必ず伝える */}
+        <p class="notice">応答の途中なら、進行中のターンは中断されます。</p>
         {error === undefined ? null : (
           <p class="error" role="alert">
             {error}
@@ -269,7 +271,7 @@ function RewindDialog(props: OpProps): JSX.Element {
           <>
             <p class="notice">
               戻す先の発言を↑ /
-              ↓で選び、Enterで確かめます。選んだ発言の直前の状態へ、会話とファイルを戻します（直近
+              ↓で選び、Enterで確かめます。選んだ発言の直前の状態へファイルを戻します。会話の履歴は変わりません（直近
               {String(TURN_PAGE_SIZE)}件のやり取りから選べます）。
             </p>
             {turns.length === 0 ? (
@@ -301,12 +303,16 @@ function RewindDialog(props: OpProps): JSX.Element {
         ) : null}
         {state.step === 'confirm' ? (
           <>
-            <p>「{oneLine(state.turn.text)}」の直前まで巻き戻します。</p>
             {state.files.length === 0 ? (
-              <p class="notice">戻るファイルはありません（会話だけを戻します）。</p>
+              <p class="notice">
+                「{oneLine(state.turn.text)}」の時点から戻すファイルの変更はありません。
+              </p>
             ) : (
               <>
-                <p class="notice">次のファイルが元に戻ります。</p>
+                <p>
+                  「{oneLine(state.turn.text)}
+                  」の直前の状態へ、次のファイルを戻します。会話の履歴は変わりません。
+                </p>
                 <ul class="rewind-files">
                   {state.files.map((file) => (
                     <li key={file}>{file}</li>
@@ -324,15 +330,17 @@ function RewindDialog(props: OpProps): JSX.Element {
         <div class="actions">
           {state.step === 'confirm' ? (
             <>
-              <button
-                type="button"
-                class="btn primary"
-                data-submit
-                disabled={busy}
-                onClick={() => rewind(state.turn)}
-              >
-                {busy ? '巻き戻しています…' : '巻き戻す（Ctrl+Enter）'}
-              </button>
+              {state.files.length === 0 ? null : (
+                <button
+                  type="button"
+                  class="btn primary"
+                  data-submit
+                  disabled={busy}
+                  onClick={() => rewind(state.turn)}
+                >
+                  {busy ? '巻き戻しています…' : '巻き戻す（Ctrl+Enter）'}
+                </button>
+              )}
               <button
                 ref={backRef}
                 type="button"

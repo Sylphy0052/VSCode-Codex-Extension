@@ -3209,3 +3209,138 @@ describe('ローカルレビューの指摘の送信（Issue #1376）', () => {
     manager.dispose();
   });
 });
+
+describe('Mission Controlで選んだセッションへの操作（Issue #2160）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** 会話を2つ開く。後に開いたBが最後にアクティブなチャットになる。 */
+  const openTwo = async (store = fakeStore()) => {
+    const { calls, sessions } = stubStartCapturing();
+    const { manager } = createManager({ store });
+    const a = (await manager.openNew('/workspace/a'))!;
+    const panelA = __mock.lastCreatedPanel();
+    sessions.at(-1)!.receive(initLine(a));
+    sessions.at(-1)!.receive(userTextLine('u-1', '最初の発言'));
+    sessions.at(-1)!.receive(resultLine());
+    const b = (await manager.openNew('/workspace/b'))!;
+    const panelB = __mock.lastCreatedPanel();
+    sessions.at(-1)!.receive(initLine(b));
+    await flush();
+    return { manager, store, calls, sessions, panelA, panelB, a, b };
+  };
+
+  it('名前の変更とクリアは、最後にアクティブなチャットではなく指定したセッションに効く', async () => {
+    const { manager, store, calls, panelA, panelB, a, b } = await openTwo();
+
+    const renamed = await manager.controlSessionAsync(a, { kind: 'rename', name: 'A名' });
+    expect(renamed).toEqual({ ok: true });
+    expect(store.getName(a)).toBe('A名');
+    expect(store.getName(b)).toBeUndefined();
+
+    const cleared = await manager.controlSessionAsync(a, { kind: 'clear' });
+    expect(cleared).toEqual({ ok: true });
+    expect(panelA?.disposed).toBe(true);
+    expect(panelB?.disposed).toBe(false);
+    expect(calls.at(-1)?.cwd).toBe('/workspace/a');
+    // 消した会話のidへの操作は断る（キューが進んで別の会話へ効かない）
+    const again = await manager.controlSessionAsync(a, { kind: 'clear' });
+    expect(again.ok).toBe(false);
+    manager.dispose();
+  });
+
+  it('コマンドパレットの名前の変更・クリアは従来どおり最後にアクティブなチャットに効く', async () => {
+    const { manager, store, panelA, panelB, a, b } = await openTwo();
+    __mock.showInputBoxAnswer = 'B名';
+    await manager.renameActive();
+    expect(store.getName(b)).toBe('B名');
+    expect(store.getName(a)).toBeUndefined();
+    await manager.clearActive();
+    expect(panelB?.disposed).toBe(true);
+    expect(panelA?.disposed).toBe(false);
+    manager.dispose();
+  });
+
+  it('巻き戻しは確かめた発言とファイルが今と合うときだけ適用する', async () => {
+    const files = { current: ['a.txt'] };
+    const preview = vi
+      .spyOn(ClaudeStreamSession.prototype, 'previewRewindFiles')
+      .mockImplementation(() =>
+        Promise.resolve({
+          ok: true,
+          filesChanged: [...files.current],
+          insertions: 1,
+          deletions: 0,
+          error: undefined,
+        }),
+      );
+    const apply = vi.spyOn(ClaudeStreamSession.prototype, 'applyRewindFiles').mockResolvedValue({
+      ok: true,
+      filesChanged: [],
+      insertions: 0,
+      deletions: 0,
+      error: undefined,
+    });
+    const { manager, a } = await openTwo();
+
+    // 確かめずに押した・会話に無いidは断る
+    expect(
+      (await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' })).error,
+    ).toContain('確かめて');
+    expect(
+      (await manager.controlSessionAsync(a, { kind: 'rewindPreview', messageId: 'nope' })).ok,
+    ).toBe(false);
+    expect(preview).not.toHaveBeenCalled();
+
+    // 確かめた後に会話が進んで戻るファイルが増えたら、戻さずに断る
+    expect(
+      await manager.controlSessionAsync(a, { kind: 'rewindPreview', messageId: 'u-1' }),
+    ).toEqual({ ok: true, rewindFiles: ['a.txt'] });
+    files.current = ['a.txt', 'b.txt'];
+    const stale = await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' });
+    expect(stale.ok).toBe(false);
+    expect(stale.error).toContain('変わりました');
+    expect(apply).not.toHaveBeenCalled();
+
+    // 確かめ直せば適用する。適用は同じ発言のidで、指定したセッションに
+    await manager.controlSessionAsync(a, { kind: 'rewindPreview', messageId: 'u-1' });
+    const done = await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' });
+    expect(done).toEqual({ ok: true });
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenCalledWith('u-1');
+    // 適用した確認は使い切り。もう一度押しても戻さない
+    expect((await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' })).ok).toBe(
+      false,
+    );
+    expect(apply).toHaveBeenCalledTimes(1);
+    manager.dispose();
+  });
+
+  it('巻き戻しは応答中の会話には適用しない', async () => {
+    vi.spyOn(ClaudeStreamSession.prototype, 'previewRewindFiles').mockResolvedValue({
+      ok: true,
+      filesChanged: ['a.txt'],
+      insertions: 1,
+      deletions: 0,
+      error: undefined,
+    });
+    const apply = vi.spyOn(ClaudeStreamSession.prototype, 'applyRewindFiles');
+    const { manager, sessions, a } = await openTwo();
+    await manager.controlSessionAsync(a, { kind: 'rewindPreview', messageId: 'u-1' });
+    // 確かめた後に次のターンが始まった
+    sessions[0]!.receive(initLine(a));
+    const result = await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('実行中');
+    expect(apply).not.toHaveBeenCalled();
+    manager.dispose();
+  });
+});
