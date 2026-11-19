@@ -97,6 +97,15 @@ function isEditable(target: EventTarget | null): boolean {
   );
 }
 
+/** Enterで押される要素か（ボタン・リンク・`<summary>`）。 */
+function isActivatable(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLButtonElement ||
+    target instanceof HTMLAnchorElement ||
+    (target instanceof HTMLElement && target.tagName === 'SUMMARY')
+  );
+}
+
 /** 応答の`approvals`から、Inboxの項目に当たる1件を探す。 */
 function findApproval(
   approvals: readonly McApprovalDetail[],
@@ -124,6 +133,11 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const [turns, setTurns] = useState<Record<string, Loadable<McTurn[]>>>({});
   /** 回答を送った項目。共有ファイルから消えるまで、Inboxで送信済みとして薄く出す。 */
   const [sent, setSent] = useState<ReadonlySet<string>>(new Set());
+  /**
+   * 回答が断られた理由（項目のid → 文）。失敗すると中身を取り寄せ直し、回答欄は作り直される
+   * ため、理由は回答欄の外で持つ。
+   */
+  const [answerErrors, setAnswerErrors] = useState<ReadonlyMap<string, string>>(new Map());
   const [toast, setToast] = useState('');
   const searchRef = useRef<HTMLInputElement | null>(null);
   const detailRef = useRef<HTMLDivElement | null>(null);
@@ -251,18 +265,38 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const submitFor =
     (item: McPendingItem): Submit =>
     async (action: McControlAction) => {
+      setAnswerError(item.id, undefined);
       const result: ControlResult = await bridge.request(item, action);
       if (result.ok) {
         setSent((prev) => new Set(prev).add(item.id));
         setToast('回答を送りました');
         return undefined;
       }
-      // 取り寄せた中身は1回の回答で使い切る。失敗したら取り寄せ直して答え直せるようにする
+      const failure = result.error ?? '回答を送れませんでした';
+      // 取り寄せた中身は1回の回答で使い切る。失敗したら取り寄せ直して答え直せるようにする。
+      // 回答欄は作り直されて理由を持てないため、理由は詳細ペインの側で出す
       if (needsApprovalDetail(item.kind)) {
+        setAnswerError(item.id, failure);
         loadApprovals(item);
+        return undefined;
       }
-      return result.error ?? '回答を送れませんでした';
+      return failure;
     };
+
+  const setAnswerError = (id: string, message: string | undefined): void => {
+    setAnswerErrors((prev) => {
+      if (message === undefined && !prev.has(id)) {
+        return prev;
+      }
+      const next = new Map(prev);
+      if (message === undefined) {
+        next.delete(id);
+      } else {
+        next.set(id, message);
+      }
+      return next;
+    });
+  };
 
   const sessionAction = (session: McSession, action: McControlAction, done: string): void => {
     void bridge.request(session, action).then((result) => {
@@ -283,7 +317,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         altKey: event.altKey,
         inEditable: editable || event.isComposing,
       });
-      if (command === undefined) {
+      // ボタン・リンクの上のEnterは、そのボタンを押す標準の操作に任せる。奪うとTabで移って
+      // Enterで押す操作ができない
+      if (command === undefined || (command.kind === 'detail' && isActivatable(event.target))) {
         return;
       }
       const state = latest.current;
@@ -444,6 +480,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
             session={sessionOf(selectedPending)}
             now={now}
             sent={sent.has(selectedPending.id)}
+            answerError={answerErrors.get(selectedPending.id)}
             approvals={approvals[targetKey(selectedPending)]}
             turns={turns[targetKey(selectedPending)]}
             formKeys={formKeys}
@@ -703,6 +740,8 @@ function PendingDetail(props: {
   session: McSession | undefined;
   now: number;
   sent: boolean;
+  /** 直前の回答が断られた理由。 */
+  answerError: string | undefined;
   approvals: Loadable<McApprovalDetail[]> | undefined;
   turns: Loadable<McTurn[]> | undefined;
   formKeys: FormKeysRef;
@@ -760,6 +799,11 @@ function PendingDetail(props: {
           .filter((v): v is string => v !== undefined && v !== '')
           .join(' · ')}
       </p>
+      {props.answerError === undefined || props.sent ? null : (
+        <p class="error" role="alert">
+          {props.answerError}
+        </p>
+      )}
       {form}
       {props.session !== undefined ? (
         <SessionActions session={props.session} onSessionAction={props.onSessionAction} />
