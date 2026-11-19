@@ -4,12 +4,15 @@ import type {
   McHandoffDetail,
   McHistoryItem,
   McHostMessage,
+  McIssueListing,
+  McIssueStartRequest,
   McLaunchChoices,
   McLaunchRepo,
   McLaunchRequest,
   McLifecycleOp,
   McLifecycleOutcome,
   McProvider,
+  McRunOp,
   McSideQuestion,
   McSnapshot,
   McTarget,
@@ -42,6 +45,8 @@ export interface ReplyResult {
   choices?: McLaunchChoices | undefined;
   outcomes?: McLifecycleOutcome[] | undefined;
   history?: McHistoryItem[] | undefined;
+  issues?: McIssueListing | undefined;
+  message?: string | undefined;
 }
 
 /** ライブtailで届いた直近のやり取り。 */
@@ -77,6 +82,12 @@ export interface Bridge {
   reloadWindow(): Promise<ReplyResult>;
   /** セッションid（`send_message`の宛先）をクリップボードへコピーさせる。 */
   copyRef(target: McTarget): Promise<ReplyResult>;
+  /** runへの操作（Issue #2150）。 */
+  runOp(op: McRunOp, runId: string): Promise<ReplyResult>;
+  runParallel(runId: string, maxParallel: number): Promise<ReplyResult>;
+  runStart(): Promise<ReplyResult>;
+  issueList(folder: string): Promise<ReplyResult>;
+  issueStart(request: McIssueStartRequest): Promise<ReplyResult>;
   /** ライブtailの対象を伝える。`undefined`で止める。 */
   watch(target: McTarget | undefined): void;
   onLiveTurns(listener: (live: LiveTurns) => void): () => void;
@@ -150,6 +161,8 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           choices: message.choices,
           outcomes: message.outcomes,
           history: message.history,
+          issues: message.issues,
+          message: message.message,
         });
       }
       return;
@@ -228,6 +241,18 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     resumeDismiss: (to) => call({ type: 'resumeDismiss', ...targetOnly(to) }),
     reloadWindow: () => call({ type: 'reloadWindow' }),
     copyRef: (to) => call({ type: 'copyRef', ...targetOnly(to) }),
+    runOp: (op, runId) => call({ type: 'runOp', op, runId }),
+    runParallel: (runId, maxParallel) => call({ type: 'runParallel', runId, maxParallel }),
+    runStart: () => call({ type: 'runStart' }),
+    issueList: (folder) => call({ type: 'issueList', folder }),
+    issueStart: (request) =>
+      call({
+        type: 'issueStart',
+        folder: request.folder,
+        engine: request.engine,
+        roadmapIssueNumbers: request.roadmapIssueNumbers,
+        issueNumbers: request.issueNumbers,
+      }),
     watch(target) {
       api.postMessage({
         type: 'watch',

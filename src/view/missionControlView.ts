@@ -16,7 +16,15 @@ import { MISSION_CONTROL_STYLES } from '../webview/missionControl/styles';
 import type { SessionControlResult } from './chatManagerBase';
 import { parseLaunchRequest, type McLaunchResult } from './missionControlLaunch';
 import { missionControlTitle } from './missionControlModel';
+import {
+  parseIssueStart,
+  parseRunOp,
+  parseRunParallel,
+  pickFolder as pickRunFolder,
+  type McRunsPort,
+} from './missionControlRuns';
 import { parseLifecycleRequest, type McLifecycleRunResult } from './missionControlSessions';
+import { MAX_TASK_RUN_PARALLEL } from '../orchestrator/taskRunState';
 import { parseAction, parseTarget, type SessionControl } from './sessionControlMessage';
 
 export const MISSION_CONTROL_OPEN_COMMAND = 'agent.missionControl.open';
@@ -102,6 +110,8 @@ export class MissionControlViewManager implements vscode.Disposable {
     private readonly launcher?: McLaunchPort,
     private readonly host?: McHostPort,
     private readonly sessionPort?: McSessionPort,
+    /** オーケストレータモードのrun（Issue #2150）。task runの組み立ての後に入るため関数で受ける。 */
+    private readonly runsPort?: () => McRunsPort | undefined,
   ) {}
 
   /** webviewの設定。`createWebviewPanel`と、Reload後の復元の両方で使う。 */
@@ -270,6 +280,13 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'historyOpen':
         this.handleSessions(m);
         return;
+      case 'runOp':
+      case 'runParallel':
+      case 'runStart':
+      case 'issueList':
+      case 'issueStart':
+        this.handleRuns(m);
+        return;
       default:
         return;
     }
@@ -421,6 +438,74 @@ export class MissionControlViewManager implements vscode.Disposable {
       .catch((e: unknown) => {
         this.log.warn(
           `Mission Control: 操作に失敗しました（${String(message.type)}）: ${String(e)}`,
+        );
+        this.postReply(seq, { ok: false, error: '操作に失敗しました' });
+      });
+  }
+
+  /**
+   * runの操作とroadmap・Issueからの起動（Issue #2150）。応答は`reply`で返す。webviewから届いた
+   * 値は形を確かめ、フォルダは開いているワークスペースフォルダとの一致だけを受ける。
+   */
+  private handleRuns(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const port = this.runsPort?.();
+    if (port === undefined) {
+      this.postReply(seq, { ok: false, error: 'オーケストレータモードはこの画面では使えません' });
+      return;
+    }
+    const folders = (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath);
+    const done = (error: string | undefined): Record<string, unknown> =>
+      error === undefined ? { ok: true } : { ok: false, error };
+    const run = async (): Promise<Record<string, unknown>> => {
+      switch (message.type) {
+        case 'runOp': {
+          const request = parseRunOp(message);
+          return typeof request === 'string'
+            ? { ok: false, error: request }
+            : done(await port.runOp(request.op, request.runId));
+        }
+        case 'runParallel': {
+          const request = parseRunParallel(message, MAX_TASK_RUN_PARALLEL);
+          return typeof request === 'string'
+            ? { ok: false, error: request }
+            : done(await port.setMaxParallel(request.runId, request.maxParallel));
+        }
+        case 'runStart':
+          return done(await port.start());
+        case 'issueList': {
+          const folder = pickRunFolder(message.folder, folders);
+          if (folder === undefined) {
+            return { ok: false, error: '開いているワークスペースフォルダを選んでください' };
+          }
+          const listing = await port.listIssues(folder);
+          return typeof listing === 'string'
+            ? { ok: false, error: listing }
+            : { ok: true, issues: listing };
+        }
+        default: {
+          const request = parseIssueStart(message, folders);
+          if (typeof request === 'string') {
+            return { ok: false, error: request };
+          }
+          const result = await port.startFromIssues(request);
+          return result.ok
+            ? { ok: true, message: result.message }
+            : { ok: false, error: result.message };
+        }
+      }
+    };
+    void run()
+      .then((reply) => {
+        this.postReply(seq, reply);
+        this.refresh();
+      })
+      .catch((e: unknown) => {
+        this.log.warn(
+          `Mission Control: runの操作に失敗しました（${String(message.type)}）: ${String(e)}`,
         );
         this.postReply(seq, { ok: false, error: '操作に失敗しました' });
       });

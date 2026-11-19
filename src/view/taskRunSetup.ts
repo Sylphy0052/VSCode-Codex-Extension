@@ -111,6 +111,8 @@ import { currentWorkspaceFolders, TaskRunKanbanViewManager } from './taskRunKanb
 import { createStageReflexJudges } from './taskRunStageJudges';
 import { sessionHubRoot } from './sessionHub';
 import { listTaskRunPendingItems, type TaskRunPendingPort } from './taskRunPending';
+import type { McRunsPort } from './missionControlRuns';
+import { createMcRunsPort } from './missionControlRunsPort';
 import {
   startRoadmapRunCommand,
   startRoadmapRunFromChat,
@@ -165,6 +167,11 @@ export interface TaskRunSetupDeps {
    * `extension.ts`はsession-hubを組み立てる時点でこの箱から読む。
    */
   pendingPort?: { current?: TaskRunPendingPort | undefined };
+  /**
+   * Mission ControlのRunsタブ（Issue #2150）の口の置き場。渡すと実体を入れる。`extension.ts`は
+   * Mission Controlを組み立てる時点でこの箱から読む。
+   */
+  missionControlRuns?: { current?: McRunsPort | undefined };
   /** 通常チャットの会話を区切って振り返る画面（Issue #2123）。省略時は追わない。 */
   chatConversationHosts?: readonly ChatConversationHost[];
   /**
@@ -732,6 +739,20 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     resumeRun: (runId) => resumeRun(runId, { parallel: true }),
     showRun: (runId) => showRun(view, orchestrator, runId),
   });
+
+  if (deps.missionControlRuns !== undefined) {
+    deps.missionControlRuns.current = createMcRunsPort({
+      controller,
+      view,
+      orchestrator,
+      git: deps.git,
+      cli: deps.cli,
+      log,
+      switchToRun,
+      roadmapStartDeps: (engine) => roadmapStartDeps(engine),
+      defaultMaxParallel: readTaskRunMaxParallelPerFolder,
+    });
+  }
 
   void controller
     .restore()

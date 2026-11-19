@@ -15,14 +15,14 @@ const log: Logger = {
 function snapshot(pendingCount: number): McSnapshot {
   return {
     now: 0,
-    windowId: 'w1',
+    windowId: '11111111-1111-4111-8111-111111111111',
     repos: [],
     sessions: [],
     stallMs: 300_000,
     pending: Array.from({ length: pendingCount }, (_, i) => ({
       id: `p${String(i)}`,
       kind: 'toolApproval' as const,
-      windowId: 'w1',
+      windowId: '11111111-1111-4111-8111-111111111111',
       threadId: 't',
       provider: 'codex' as const,
       isCurrentWindow: true,
@@ -49,18 +49,20 @@ describe('MissionControlViewManager（Issue #2136）', () => {
     panel.webview.simulateMessage({
       type: 'copyRef',
       seq: 3,
-      windowId: 'w2',
+      windowId: '22222222-2222-4222-8222-222222222222',
       provider: 'claude',
       threadId: 't9',
     });
     await vi.waitFor(() =>
       expect(panel.webview.sent.at(-1)).toMatchObject({ type: 'reply', seq: 3, ok: true }),
     );
-    expect(env.clipboard.written).toEqual(['session:claude:w2:t9']);
+    expect(env.clipboard.written).toEqual([
+      'session:claude:22222222-2222-4222-8222-222222222222:t9',
+    ]);
     panel.webview.simulateMessage({
       type: 'copyRef',
       seq: 4,
-      windowId: 'w2',
+      windowId: '22222222-2222-4222-8222-222222222222',
       provider: 'x',
       threadId: 't9',
     });
@@ -99,7 +101,7 @@ describe('MissionControlViewManager（Issue #2136）', () => {
     panel.webview.simulateMessage({
       type: 'control',
       seq: 7,
-      windowId: 'w2',
+      windowId: '22222222-2222-4222-8222-222222222222',
       provider: 'claude',
       threadId: 't',
       action: 'approvalDecision',
@@ -110,7 +112,7 @@ describe('MissionControlViewManager（Issue #2136）', () => {
     panel.webview.simulateMessage({
       type: 'control',
       seq: 8,
-      windowId: 'w2',
+      windowId: '22222222-2222-4222-8222-222222222222',
       provider: 'claude',
       threadId: 't',
       action: 'approvalDecision',
@@ -124,7 +126,7 @@ describe('MissionControlViewManager（Issue #2136）', () => {
     );
     expect(control).toHaveBeenCalledTimes(1);
     expect(control).toHaveBeenCalledWith(
-      { windowId: 'w2', provider: 'claude', threadId: 't' },
+      { windowId: '22222222-2222-4222-8222-222222222222', provider: 'claude', threadId: 't' },
       { kind: 'approvalDecision', approvalRequestId: '1', decision: 'accept' },
     );
   });
@@ -142,12 +144,16 @@ describe('MissionControlViewManager（Issue #2136）', () => {
         panel.webview.simulateMessage({ type: 'ready' });
         panel.webview.simulateMessage({
           type: 'watch',
-          target: { windowId: 'w2', provider: 'codex', threadId: 't' },
+          target: {
+            windowId: '22222222-2222-4222-8222-222222222222',
+            provider: 'codex',
+            threadId: 't',
+          },
         });
         await vi.advanceTimersByTimeAsync(0);
         expect(control).toHaveBeenCalledTimes(1);
         expect(control).toHaveBeenLastCalledWith(
-          { windowId: 'w2', provider: 'codex', threadId: 't' },
+          { windowId: '22222222-2222-4222-8222-222222222222', provider: 'codex', threadId: 't' },
           { kind: 'recentTurns', limit: 6 },
         );
         await vi.advanceTimersByTimeAsync(4_000);
@@ -170,7 +176,11 @@ describe('MissionControlViewManager（Issue #2136）', () => {
         // 閉じると止まり、タイマーも残らない
         panel.webview.simulateMessage({
           type: 'watch',
-          target: { windowId: 'w2', provider: 'codex', threadId: 't' },
+          target: {
+            windowId: '22222222-2222-4222-8222-222222222222',
+            provider: 'codex',
+            threadId: 't',
+          },
         });
         await vi.advanceTimersByTimeAsync(0);
         const before = control.mock.calls.length;
@@ -191,7 +201,11 @@ describe('MissionControlViewManager（Issue #2136）', () => {
         panel.webview.simulateMessage({ type: 'ready' });
         panel.webview.simulateMessage({
           type: 'watch',
-          target: { windowId: 'w1', provider: 'codex', threadId: 't' },
+          target: {
+            windowId: '11111111-1111-4111-8111-111111111111',
+            provider: 'codex',
+            threadId: 't',
+          },
         });
         await vi.advanceTimersByTimeAsync(10_000);
         expect(control).toHaveBeenCalledTimes(1);

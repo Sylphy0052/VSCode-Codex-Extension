@@ -8,7 +8,7 @@ import {
   type FormKeysRef,
   type Submit,
 } from './answerForms';
-import type { Bridge, ControlResult } from './bridge';
+import type { Bridge, ReplyResult, ControlResult } from './bridge';
 import {
   HandoffForm,
   ResumeDetail,
@@ -18,6 +18,7 @@ import {
   SideQuestionForm,
 } from './extras';
 import { KindIcon, ProviderIcon } from './icons';
+import { IssueStartDialog, orderRuns, RunsPane } from './runs';
 import {
   HistoryDialog,
   LaunchSettingsFields,
@@ -60,6 +61,7 @@ import type {
   McPendingItem,
   McProvider,
   McRepo,
+  McRunOp,
   McResumeItem,
   McSession,
   McSnapshot,
@@ -72,6 +74,7 @@ interface PersistedState {
   filter: McFilter;
   selected: string | undefined;
   viewMode: 'list' | 'grid';
+  tab: 'sessions' | 'runs';
 }
 
 const RECENT_TURNS = 6;
@@ -102,7 +105,12 @@ function resumeRowId(item: McResumeItem): string {
 }
 
 function readPersisted(raw: unknown): PersistedState {
-  const fallback: PersistedState = { filter: EMPTY_FILTER, selected: undefined, viewMode: 'list' };
+  const fallback: PersistedState = {
+    filter: EMPTY_FILTER,
+    selected: undefined,
+    viewMode: 'list',
+    tab: 'sessions',
+  };
   if (typeof raw !== 'object' || raw === null) {
     return fallback;
   }
@@ -122,6 +130,7 @@ function readPersisted(raw: unknown): PersistedState {
         : EMPTY_FILTER,
     selected: typeof v.selected === 'string' ? v.selected : undefined,
     viewMode: v.viewMode === 'grid' ? 'grid' : 'list',
+    tab: v.tab === 'runs' ? 'runs' : 'sessions',
   };
 }
 
@@ -186,6 +195,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const autoSelect = useRef(true);
   const [launchOpen, setLaunchOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [tab, setTab] = useState<'sessions' | 'runs'>(initial.tab);
+  const [selectedRun, setSelectedRun] = useState<string | undefined>(undefined);
+  const [issuesOpen, setIssuesOpen] = useState(false);
   /** 複数選択（`x`）したセッションの`McSession.key`（Issue #2149の1）。 */
   const [marks, setMarks] = useState<ReadonlySet<string>>(new Set());
 
@@ -205,8 +217,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   }, []);
 
   useEffect(() => {
-    bridge.setState({ filter, selected, viewMode } satisfies PersistedState);
-  }, [bridge, filter, selected, viewMode]);
+    bridge.setState({ filter, selected, viewMode, tab } satisfies PersistedState);
+  }, [bridge, filter, selected, viewMode, tab]);
 
   useEffect(() => {
     if (toast === '') {
@@ -463,6 +475,38 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     });
   };
 
+  // Runsタブ（Issue #2150）
+  const runsSnap = snapshot?.runs;
+  const orderedRuns = useMemo(() => orderRuns(runsSnap?.runs ?? []), [runsSnap]);
+  const runIds = orderedRuns.map((r) => r.runId);
+  const effectiveRun = orderedRuns.find((r) => r.runId === selectedRun) ?? orderedRuns[0];
+  const runAction = (op: McRunOp): void => {
+    if (effectiveRun === undefined) {
+      setToast('runを選んでください');
+      return;
+    }
+    const sent: McRunOp = op === 'pause' && effectiveRun.halted ? 'unpause' : op;
+    void bridge.runOp(sent, effectiveRun.runId).then(reportRunResult);
+  };
+  const reportRunResult = (result: ReplyResult): void => {
+    if (!result.ok) {
+      setToast(result.error ?? '操作に失敗しました');
+    } else if (result.message !== undefined && result.message !== '') {
+      setToast(result.message);
+    }
+  };
+  const runParallel = (delta: 1 | -1): void => {
+    if (effectiveRun === undefined || runsSnap === undefined) {
+      setToast('runを選んでください');
+      return;
+    }
+    const next = Math.min(Math.max(effectiveRun.maxParallel + delta, 1), runsSnap.maxParallelLimit);
+    void bridge.runParallel(effectiveRun.runId, next).then(reportRunResult);
+  };
+  const runStart = (): void => {
+    void bridge.runStart().then(reportRunResult);
+  };
+
   // キーボード操作（Issue #2136の5）。最新の状態をrefで読む
   const latest = useRef({
     rowIds,
@@ -470,6 +514,13 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     helpOpen,
     launchOpen,
     historyOpen,
+    issuesOpen,
+    tab,
+    runIds,
+    effectiveRunId: effectiveRun?.runId,
+    runAction,
+    runParallel,
+    runStart,
     marks,
     runLifecycle,
     toggleFocused: () => toggleMark(focusedSession),
@@ -480,6 +531,13 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     helpOpen,
     launchOpen,
     historyOpen,
+    issuesOpen,
+    tab,
+    runIds,
+    effectiveRunId: effectiveRun?.runId,
+    runAction,
+    runParallel,
+    runStart,
     marks,
     runLifecycle,
     toggleFocused: () => toggleMark(focusedSession),
@@ -492,6 +550,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         ctrlKey: event.ctrlKey,
         metaKey: event.metaKey,
         altKey: event.altKey,
+        shiftKey: event.shiftKey,
         inEditable: editable || event.isComposing,
       });
       // ボタン・リンクの上のEnterは、そのボタンを押す標準の操作に任せる。奪うとTabで移って
@@ -505,20 +564,71 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       }
       // 新規起動・履歴の画面を出している間は、一覧・回答のキーを効かせない（Escで閉じるだけ。
       // 履歴の↑ / ↓・Enterは`HistoryDialog`が受け持つ）
-      if (state.launchOpen || state.historyOpen) {
+      if (state.launchOpen || state.historyOpen || state.issuesOpen) {
         if (command.kind === 'escape' && !editable) {
           event.preventDefault();
           setLaunchOpen(false);
           setHistoryOpen(false);
+          setIssuesOpen(false);
         } else if (command.kind === 'escape' && event.target instanceof HTMLElement) {
           event.target.blur();
         }
         return;
       }
       event.preventDefault();
+      const onRuns = state.tab === 'runs';
+      if (command.kind === 'runOp' || command.kind === 'parallel') {
+        if (!onRuns) {
+          setToast('Runsタブで使います');
+        } else if (command.kind === 'runOp') {
+          state.runAction(command.op);
+        } else {
+          state.runParallel(command.delta);
+        }
+        return;
+      }
+      if (
+        onRuns &&
+        (command.kind === 'approve' ||
+          command.kind === 'decline' ||
+          command.kind === 'choose' ||
+          command.kind === 'reply' ||
+          command.kind === 'toggleMark' ||
+          command.kind === 'lifecycle')
+      ) {
+        return;
+      }
+      if (onRuns && command.kind === 'detail') {
+        state.runAction('switch');
+        return;
+      }
+      if (onRuns && command.kind === 'newSession') {
+        state.runStart();
+        return;
+      }
       switch (command.kind) {
+        case 'tab':
+          setTab((t) => (t === 'runs' ? 'sessions' : 'runs'));
+          return;
+        case 'issues':
+          setIssuesOpen(true);
+          return;
         case 'next':
         case 'prev': {
+          if (onRuns) {
+            const nextRun = moveSelection(
+              state.runIds,
+              state.effectiveRunId,
+              command.kind === 'next' ? 1 : -1,
+            );
+            setSelectedRun(nextRun);
+            if (nextRun !== undefined) {
+              document
+                .querySelector(`[data-row="${CSS.escape(`run:${nextRun}`)}"]`)
+                ?.scrollIntoView({ block: 'nearest' });
+            }
+            return;
+          }
           const next = moveSelection(
             state.rowIds,
             state.selected,
@@ -591,6 +701,26 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     return <p class="empty">読み込み中…</p>;
   }
   const now = Date.now() + clockOffset;
+  const tabButtons = (
+    <div class="seg" role="group" aria-label="タブ">
+      <button
+        type="button"
+        aria-pressed={tab === 'sessions'}
+        title="セッション（t）"
+        onClick={() => setTab('sessions')}
+      >
+        セッション
+      </button>
+      <button
+        type="button"
+        aria-pressed={tab === 'runs'}
+        title="Runs（t）"
+        onClick={() => setTab('runs')}
+      >
+        Runs（{String(runsSnap?.runs.length ?? 0)}）
+      </button>
+    </div>
+  );
   // 回答欄が描かれないときは、前の項目の回答欄へキーが届かないよう外す
   formKeys.current = null;
 
@@ -602,187 +732,204 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         filter={filter}
         onFilter={(next) => setFilter(next)}
       />
-      <div class="pane center">
-        <div class="toolbar">
-          <input
-            ref={searchRef}
-            class="search"
-            type="search"
-            placeholder="検索（/）"
-            aria-label="タイトル・要約・repo名で検索"
-            value={filter.query}
-            onInput={(e) => setFilter({ ...filter, query: e.currentTarget.value })}
-          />
-          <div class="seg" role="group" aria-label="セッション一覧の表示">
-            <button
-              type="button"
-              aria-pressed={viewMode === 'list'}
-              onClick={() => setViewMode('list')}
-            >
-              一覧
-            </button>
-            <button
-              type="button"
-              aria-pressed={viewMode === 'grid'}
-              onClick={() => setViewMode('grid')}
-            >
-              カード
-            </button>
-          </div>
-          <button
-            type="button"
-            class="btn primary"
-            onClick={() => setLaunchOpen(true)}
-            title="新規セッション（n）"
-          >
-            ＋ 新規
-          </button>
-          <button
-            type="button"
-            class="btn"
-            onClick={() => setHistoryOpen(true)}
-            title="履歴から再開（h）"
-          >
-            履歴
-          </button>
-          <button
-            type="button"
-            class="btn"
-            title="ウィンドウをReloadする"
-            onClick={() =>
-              void bridge.reloadWindow().then((result) => {
-                if (!result.ok) {
-                  setToast(result.error ?? 'Reloadを取りやめました');
-                }
-              })
-            }
-          >
-            Reload
-          </button>
-          <button type="button" class="btn" onClick={() => setHelpOpen(true)} title="キー操作">
-            ?
-          </button>
-        </div>
-        <section class="section" aria-label="Inbox">
-          <h2 class="pane-title">Inbox（{String(pending.length + resumable.length)}）</h2>
-          {pending.length === 0 && resumable.length === 0 ? (
-            <p class="empty">回答待ちの項目はありません。</p>
-          ) : (
-            pending.map((item) => (
-              <PendingRow
-                key={item.id}
-                item={item}
-                repos={repos}
-                session={sessionOf(item)}
-                now={now}
-                selected={selected === pendingRowId(item)}
-                sent={sent.has(item.id)}
-                onSelect={() => setSelected(pendingRowId(item))}
-              />
-            ))
-          )}
-          {resumable.map((item) => (
-            <ResumeRow
-              key={item.id}
-              item={item}
-              repos={repos}
-              now={now}
-              selected={selected === resumeRowId(item)}
-              onSelect={() => setSelected(resumeRowId(item))}
-            />
-          ))}
-        </section>
-        <ReviewSection
-          sessions={reviewSessions}
-          selected={selected}
-          rowId={sessionRowId}
-          onSelect={setSelected}
+      {tab === 'runs' ? (
+        <RunsPane
+          runs={runsSnap}
+          selectedRun={effectiveRun?.runId}
+          onSelect={setSelectedRun}
+          onOp={runAction}
+          onParallel={runParallel}
+          onStart={runStart}
+          onIssues={() => setIssuesOpen(true)}
+          tabButtons={tabButtons}
         />
-        <section class="section" aria-label="セッション一覧">
-          <h2 class="pane-title">セッション（{String(sessions.length)}）</h2>
-          <MarkBar count={marks.size} onOp={runLifecycle} onClear={() => setMarks(new Set())} />
-          {groups.length === 0 ? (
-            <p class="empty">セッションはありません。</p>
-          ) : (
-            groups.map((group) => (
-              <div key={group.repo.key}>
-                <h3 class="group-title" title={group.repo.full}>
-                  {group.repo.label}
-                  <span class="count">{String(group.sessions.length)}</span>
-                </h3>
-                <div class={viewMode === 'grid' ? 'grid' : undefined}>
-                  {group.sessions.map((session) => (
-                    <SessionRow
-                      key={session.key}
-                      session={session}
-                      now={now}
-                      stallMs={snapshot.stallMs}
-                      selected={selected === sessionRowId(session)}
-                      marked={marks.has(session.key)}
-                      onSelect={() => setSelected(sessionRowId(session))}
-                    />
-                  ))}
-                </div>
+      ) : null}
+      {tab === 'sessions' ? (
+        <>
+          <div class="pane center">
+            <div class="toolbar">
+              {tabButtons}
+              <input
+                ref={searchRef}
+                class="search"
+                type="search"
+                placeholder="検索（/）"
+                aria-label="タイトル・要約・repo名で検索"
+                value={filter.query}
+                onInput={(e) => setFilter({ ...filter, query: e.currentTarget.value })}
+              />
+              <div class="seg" role="group" aria-label="セッション一覧の表示">
+                <button
+                  type="button"
+                  aria-pressed={viewMode === 'list'}
+                  onClick={() => setViewMode('list')}
+                >
+                  一覧
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={viewMode === 'grid'}
+                  onClick={() => setViewMode('grid')}
+                >
+                  カード
+                </button>
               </div>
-            ))
-          )}
-        </section>
-      </div>
-      <div class="pane" ref={detailRef} aria-label="詳細">
-        {selectedPending !== undefined ? (
-          <PendingDetail
-            key={selectedPending.id}
-            item={selectedPending}
-            bridge={bridge}
-            repos={repos}
-            session={sessionOf(selectedPending)}
-            now={now}
-            sent={sent.has(selectedPending.id)}
-            answerError={answerErrors.get(selectedPending.id)}
-            approvals={approvals[targetKey(selectedPending)]}
-            turns={turns[targetKey(selectedPending)]}
-            formKeys={formKeys}
-            submit={submitFor(selectedPending)}
-            onReload={() => loadApprovals(selectedPending)}
-            onReloadTurns={() => loadTurns(selectedPending)}
-            onSessionAction={sessionAction}
-          />
-        ) : selectedSession !== undefined ? (
-          <SessionDetail
-            key={selectedSession.key}
-            session={selectedSession}
-            bridge={bridge}
-            onToast={setToast}
-            now={now}
-            stallMs={snapshot.stallMs}
-            onSend={(text) => sendTo(selectedSession, text)}
-            pending={(snapshot.pending ?? []).filter(
-              (p) =>
-                p.windowId === selectedSession.windowId &&
-                p.threadId === selectedSession.threadId &&
-                p.provider === selectedSession.provider,
+              <button
+                type="button"
+                class="btn primary"
+                onClick={() => setLaunchOpen(true)}
+                title="新規セッション（n）"
+              >
+                ＋ 新規
+              </button>
+              <button
+                type="button"
+                class="btn"
+                onClick={() => setHistoryOpen(true)}
+                title="履歴から再開（h）"
+              >
+                履歴
+              </button>
+              <button
+                type="button"
+                class="btn"
+                title="ウィンドウをReloadする"
+                onClick={() =>
+                  void bridge.reloadWindow().then((result) => {
+                    if (!result.ok) {
+                      setToast(result.error ?? 'Reloadを取りやめました');
+                    }
+                  })
+                }
+              >
+                Reload
+              </button>
+              <button type="button" class="btn" onClick={() => setHelpOpen(true)} title="キー操作">
+                ?
+              </button>
+            </div>
+            <section class="section" aria-label="Inbox">
+              <h2 class="pane-title">Inbox（{String(pending.length + resumable.length)}）</h2>
+              {pending.length === 0 && resumable.length === 0 ? (
+                <p class="empty">回答待ちの項目はありません。</p>
+              ) : (
+                pending.map((item) => (
+                  <PendingRow
+                    key={item.id}
+                    item={item}
+                    repos={repos}
+                    session={sessionOf(item)}
+                    now={now}
+                    selected={selected === pendingRowId(item)}
+                    sent={sent.has(item.id)}
+                    onSelect={() => setSelected(pendingRowId(item))}
+                  />
+                ))
+              )}
+              {resumable.map((item) => (
+                <ResumeRow
+                  key={item.id}
+                  item={item}
+                  repos={repos}
+                  now={now}
+                  selected={selected === resumeRowId(item)}
+                  onSelect={() => setSelected(resumeRowId(item))}
+                />
+              ))}
+            </section>
+            <ReviewSection
+              sessions={reviewSessions}
+              selected={selected}
+              rowId={sessionRowId}
+              onSelect={setSelected}
+            />
+            <section class="section" aria-label="セッション一覧">
+              <h2 class="pane-title">セッション（{String(sessions.length)}）</h2>
+              <MarkBar count={marks.size} onOp={runLifecycle} onClear={() => setMarks(new Set())} />
+              {groups.length === 0 ? (
+                <p class="empty">セッションはありません。</p>
+              ) : (
+                groups.map((group) => (
+                  <div key={group.repo.key}>
+                    <h3 class="group-title" title={group.repo.full}>
+                      {group.repo.label}
+                      <span class="count">{String(group.sessions.length)}</span>
+                    </h3>
+                    <div class={viewMode === 'grid' ? 'grid' : undefined}>
+                      {group.sessions.map((session) => (
+                        <SessionRow
+                          key={session.key}
+                          session={session}
+                          now={now}
+                          stallMs={snapshot.stallMs}
+                          selected={selected === sessionRowId(session)}
+                          marked={marks.has(session.key)}
+                          onSelect={() => setSelected(sessionRowId(session))}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+            </section>
+          </div>
+          <div class="pane" ref={detailRef} aria-label="詳細">
+            {selectedPending !== undefined ? (
+              <PendingDetail
+                key={selectedPending.id}
+                item={selectedPending}
+                bridge={bridge}
+                repos={repos}
+                session={sessionOf(selectedPending)}
+                now={now}
+                sent={sent.has(selectedPending.id)}
+                answerError={answerErrors.get(selectedPending.id)}
+                approvals={approvals[targetKey(selectedPending)]}
+                turns={turns[targetKey(selectedPending)]}
+                formKeys={formKeys}
+                submit={submitFor(selectedPending)}
+                onReload={() => loadApprovals(selectedPending)}
+                onReloadTurns={() => loadTurns(selectedPending)}
+                onSessionAction={sessionAction}
+              />
+            ) : selectedSession !== undefined ? (
+              <SessionDetail
+                key={selectedSession.key}
+                session={selectedSession}
+                bridge={bridge}
+                onToast={setToast}
+                now={now}
+                stallMs={snapshot.stallMs}
+                onSend={(text) => sendTo(selectedSession, text)}
+                pending={(snapshot.pending ?? []).filter(
+                  (p) =>
+                    p.windowId === selectedSession.windowId &&
+                    p.threadId === selectedSession.threadId &&
+                    p.provider === selectedSession.provider,
+                )}
+                turns={turns[targetKey(selectedSession)]}
+                onSelectPending={(item) => setSelected(pendingRowId(item))}
+                onReloadTurns={() => loadTurns(selectedSession)}
+                onSessionAction={sessionAction}
+                marked={marks.has(selectedSession.key)}
+                // 詳細のボタンは、複数選択があってもこのセッションだけに効かせる
+                onLifecycle={(op) => runLifecycle(op, [selectedSession])}
+                onToggleMark={() => toggleMark(selectedSession)}
+              />
+            ) : selectedResume !== undefined ? (
+              <ResumeDetail
+                key={selectedResume.id}
+                item={selectedResume}
+                now={now}
+                bridge={bridge}
+                onToast={setToast}
+              />
+            ) : (
+              <p class="empty">項目を選ぶと詳細が出ます（j / kで移動）。</p>
             )}
-            turns={turns[targetKey(selectedSession)]}
-            onSelectPending={(item) => setSelected(pendingRowId(item))}
-            onReloadTurns={() => loadTurns(selectedSession)}
-            onSessionAction={sessionAction}
-            marked={marks.has(selectedSession.key)}
-            // 詳細のボタンは、複数選択があってもこのセッションだけに効かせる
-            onLifecycle={(op) => runLifecycle(op, [selectedSession])}
-            onToggleMark={() => toggleMark(selectedSession)}
-          />
-        ) : selectedResume !== undefined ? (
-          <ResumeDetail
-            key={selectedResume.id}
-            item={selectedResume}
-            now={now}
-            bridge={bridge}
-            onToast={setToast}
-          />
-        ) : (
-          <p class="empty">項目を選ぶと詳細が出ます（j / kで移動）。</p>
-        )}
-      </div>
+          </div>
+        </>
+      ) : null}
       {helpOpen ? <HelpOverlay onClose={() => setHelpOpen(false)} /> : null}
       {launchOpen ? (
         <LaunchDialog
@@ -791,6 +938,17 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           onClose={() => setLaunchOpen(false)}
           onLaunched={(message) => {
             setLaunchOpen(false);
+            setToast(message);
+          }}
+        />
+      ) : null}
+      {issuesOpen ? (
+        <IssueStartDialog
+          bridge={bridge}
+          folders={runsSnap?.folders ?? []}
+          onClose={() => setIssuesOpen(false)}
+          onDone={(message) => {
+            setIssuesOpen(false);
             setToast(message);
           }}
         />

@@ -3,13 +3,26 @@ import { parseAction, parseTarget } from '../../src/view/sessionControlMessage';
 
 describe('parseTarget', () => {
   it('3つの値が揃っていれば対象を返す', () => {
-    expect(parseTarget({ windowId: 'w1', provider: 'codex', threadId: 't1' })).toEqual({
-      windowId: 'w1',
+    expect(
+      parseTarget({
+        windowId: '11111111-1111-4111-8111-111111111111',
+        provider: 'codex',
+        threadId: 't1',
+      }),
+    ).toEqual({
+      windowId: '11111111-1111-4111-8111-111111111111',
       provider: 'codex',
       threadId: 't1',
     });
-    expect(parseTarget({ windowId: 'w1', provider: 'claude', threadId: 't1', extra: 1 })).toEqual({
-      windowId: 'w1',
+    expect(
+      parseTarget({
+        windowId: '11111111-1111-4111-8111-111111111111',
+        provider: 'claude',
+        threadId: 't1',
+        extra: 1,
+      }),
+    ).toEqual({
+      windowId: '11111111-1111-4111-8111-111111111111',
       provider: 'claude',
       threadId: 't1',
     });

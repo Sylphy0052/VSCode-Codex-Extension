@@ -9,6 +9,7 @@ import type {
   McQuestion,
   McRepo,
   McResumeItem,
+  McRunOp,
   McSession,
 } from './protocol';
 
@@ -294,15 +295,39 @@ export type McKeyCommand =
   // Issue #2149: 複数選択・閉じる・archive・delete・履歴
   | { kind: 'toggleMark' }
   | { kind: 'lifecycle'; op: McLifecycleOp }
-  | { kind: 'history' };
+  | { kind: 'history' }
+  // Issue #2150: Runsタブ・roadmapからの起動
+  | { kind: 'tab' }
+  | { kind: 'runOp'; op: McRunOp }
+  | { kind: 'parallel'; delta: 1 | -1 }
+  | { kind: 'issues' };
 
 export interface McKeyInput {
   key: string;
   ctrlKey: boolean;
   metaKey: boolean;
   altKey: boolean;
+  /**
+   * Shiftが押されているか。英字はこれで大文字の操作（Shift+Dの削除など）を見分ける。CapsLockが
+   * 有効だと`key`はShift無しでも大文字で届くため、`key`の大小では判定しない。
+   */
+  shiftKey?: boolean | undefined;
   /** 入力欄にフォーカスがあるか。あるときは`Escape`以外を文字入力として通す。 */
   inEditable: boolean;
+}
+
+/** Shift付きの英字の操作。取り消せない操作だけを置き、Shift無しの操作と取り違えないようにする。 */
+function mapShiftedLetter(letter: string): McKeyCommand | undefined {
+  switch (letter) {
+    // 取り消せない削除は、拒否の`d`と取り違えないようShift付きにする
+    case 'd':
+      return { kind: 'lifecycle', op: 'delete' };
+    // runを終える操作も取り消せない（終えたrunは再開できない）
+    case 'f':
+      return { kind: 'runOp', op: 'finish' };
+    default:
+      return undefined;
+  }
 }
 
 export function mapKey(input: McKeyInput): McKeyCommand | undefined {
@@ -312,7 +337,13 @@ export function mapKey(input: McKeyInput): McKeyCommand | undefined {
   if (input.inEditable || input.ctrlKey || input.metaKey || input.altKey) {
     return undefined;
   }
-  switch (input.key) {
+  const isLetter = /^[A-Za-z]$/u.test(input.key);
+  if (isLetter && input.shiftKey === true) {
+    return mapShiftedLetter(input.key.toLowerCase());
+  }
+  // 英字はShiftの有無だけで見分け、CapsLockで大文字になったものはShift無しの操作として扱う
+  const key = isLetter ? input.key.toLowerCase() : input.key;
+  switch (key) {
     case 'j':
     case 'ArrowDown':
       return { kind: 'next' };
@@ -339,16 +370,30 @@ export function mapKey(input: McKeyInput): McKeyCommand | undefined {
       return { kind: 'lifecycle', op: 'close' };
     case 'e':
       return { kind: 'lifecycle', op: 'archive' };
-    // 取り消せない削除は、拒否の`d`と取り違えないようShift付きにする
-    case 'D':
-      return { kind: 'lifecycle', op: 'delete' };
     case 'h':
       return { kind: 'history' };
+    case 't':
+      return { kind: 'tab' };
+    case 'o':
+      return { kind: 'runOp', op: 'switch' };
+    case 'p':
+      return { kind: 'runOp', op: 'pause' };
+    case 'z':
+      return { kind: 'runOp', op: 'suspend' };
+    case 'u':
+      return { kind: 'runOp', op: 'resume' };
+    case '+':
+    case '=':
+      return { kind: 'parallel', delta: 1 };
+    case '-':
+      return { kind: 'parallel', delta: -1 };
+    case 'i':
+      return { kind: 'issues' };
     default:
       break;
   }
-  if (/^[1-9]$/u.test(input.key)) {
-    return { kind: 'choose', index: Number(input.key) - 1 };
+  if (/^[1-9]$/u.test(key)) {
+    return { kind: 'choose', index: Number(key) - 1 };
   }
   return undefined;
 }
@@ -435,6 +480,17 @@ export const KEY_HELP: ReadonlyArray<[string, string]> = [
   ['/', '検索'],
   ['?', 'この一覧'],
   ['Esc', '閉じる / 複数選択を外す / 入力欄から出る'],
+  // Issue #2150: Runsタブ
+  ['t', 'セッション / Runsのタブを切り替える'],
+  ['j / k（Runs）', '次 / 前のrun'],
+  ['n（Runs）', '新しいrunを始める'],
+  ['o / Enter（Runs）', 'runへ切り替える（KanbanとOrchestratorを前面へ）'],
+  ['p（Runs）', 'runを一時停止 / 一時停止を解く'],
+  ['z（Runs）', 'runを中断（確認あり）'],
+  ['u（Runs）', '中断したrunを再開'],
+  ['Shift+F（Runs）', 'runを終える（必ず確認）'],
+  ['+ / -（Runs）', '並列上限を1つ上げる / 下げる'],
+  ['i', 'roadmap・Issueから起動（j / kで移動、xで選択、Enterで起動、fでフォルダ、gでCLI）'],
 ];
 
 /** 履歴の絞り込み（Issue #2149の3）。日付は`YYYY-MM-DD`（`<input type="date">`の値）。 */

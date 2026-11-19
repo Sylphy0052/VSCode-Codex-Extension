@@ -132,6 +132,104 @@ export interface McSnapshot {
   stallMs: number;
   /** Reloadで切れたセッション（このウィンドウの分だけ）。古い版の拡張ホストでは無い。 */
   resumable?: McResumeItem[] | undefined;
+  /** オーケストレータモードのrun（Issue #2150）。task runが使えないときは無い。 */
+  runs?: McRunsSnapshot | undefined;
+}
+
+/**
+ * runの状態の区分（Issue #2150）。`waiting`は一時停止中と計画の承認待ち、`suspended`は中断中、
+ * `finished`は終えたrun。
+ */
+export type McRunState = 'running' | 'waiting' | 'suspended' | 'finished';
+
+/** runのタスク1件。 */
+export interface McRunTask {
+  taskId: string;
+  title: string;
+  /** 工程の列の表示名（計画承認待ち・実装・レビューなど）。 */
+  stage: string;
+  /** 依存待ち・失敗・停止などのバッジの表示名。 */
+  badges: string[];
+  /** 人の対応が要るバッジがあるか。 */
+  warn: boolean;
+  done: boolean;
+  issueNumber?: number | undefined;
+  pullRequestNumber?: number | undefined;
+}
+
+/** run一覧の1行。 */
+export interface McRun {
+  runId: string;
+  label: string;
+  /** 状態の表示名（実行中・一時停止中・中断中・終了など）。 */
+  status: string;
+  state: McRunState;
+  /** runの進み具合の説明（人の対応待ち・すべて完了など）。 */
+  assessment: string;
+  workspaceRoot: string;
+  /** `workspaceRoot`の末尾の要素。 */
+  repoLabel: string;
+  engine: McProvider;
+  maxParallel: number;
+  activeSessions: number;
+  halted: boolean;
+  /** 開始時刻（ISO 8601）。 */
+  startedAt: string;
+  inCurrentFolder: boolean;
+  taskTotal: number;
+  taskDone: number;
+  /** 終えたrunでは空（一覧を軽くするため）。 */
+  tasks: McRunTask[];
+}
+
+/** roadmapから起動するときのフォルダの候補（開いているワークスペースフォルダ）。 */
+export interface McRunFolder {
+  path: string;
+  label: string;
+}
+
+export interface McRunsSnapshot {
+  /** Kanbanと同じ並び（開いているフォルダのrunが先、それぞれ新しい順）。 */
+  runs: McRun[];
+  /** 並列上限の最大値。 */
+  maxParallelLimit: number;
+  folders: McRunFolder[];
+}
+
+/** runへの操作（Issue #2150）。`finish`・`suspend`は拡張ホストが確認を出す。 */
+export type McRunOp = 'switch' | 'pause' | 'unpause' | 'suspend' | 'resume' | 'finish';
+
+/** roadmap・Issueの一覧の1件。 */
+export interface McIssueItem {
+  number: number;
+  title: string;
+  /** `roadmap`ラベルが付いているか。 */
+  roadmap: boolean;
+}
+
+/** roadmapの着手順（本文のチェックリストの並び）。 */
+export interface McRoadmapOrder {
+  number: number;
+  title: string;
+  children: Array<{ number: number; title: string; checked: boolean }>;
+}
+
+export interface McIssueListing {
+  folder: string;
+  roadmaps: McRoadmapOrder[];
+  /** OPENのIssue（roadmapを含む）。 */
+  issues: McIssueItem[];
+}
+
+/**
+ * roadmap・Issueからの起動。`roadmapIssueNumbers`は1本ずつそのroadmapで起動し（`start_roadmap_orchestrator`
+ * と同じ経路）、`issueNumbers`は自由な指示から始めるrunを1本始めて、選んだIssue番号を最初の指示文で渡す。
+ */
+export interface McIssueStartRequest {
+  folder: string;
+  engine: McProvider;
+  roadmapIssueNumbers: number[];
+  issueNumbers: number[];
 }
 
 /** 新規セッションの起動先の候補（Issue #2137の1）。 */
@@ -331,6 +429,10 @@ export type McHostMessage =
       outcomes?: McLifecycleOutcome[] | undefined;
       /** `history`の応答（Issue #2149の3）。 */
       history?: McHistoryItem[] | undefined;
+      /** `issueList`の応答（Issue #2150）。 */
+      issues?: McIssueListing | undefined;
+      /** run・roadmapの操作の結果の説明（Issue #2150）。 */
+      message?: string | undefined;
     }
   | {
       /** 詳細で選択中のセッションの直近のやり取り（ライブtail。Issue #2137の3）。 */
@@ -397,6 +499,16 @@ export type McWebviewMessage =
   | ({ type: 'openDiff'; seq: number; path: string } & McTarget)
   /** レビュー待ちを「確認済み」にする。 */
   | ({ type: 'reviewAck'; seq: number } & McTarget)
+  /** runの操作（Issue #2150）。 */
+  | { type: 'runOp'; seq: number; op: McRunOp; runId: string }
+  /** runの並列上限を変える。 */
+  | { type: 'runParallel'; seq: number; runId: string; maxParallel: number }
+  /** 新しいrunを始める（`agent.taskRun.start`と同じ）。 */
+  | { type: 'runStart'; seq: number }
+  /** roadmapの着手順とOPENのIssueを取り寄せる。 */
+  | { type: 'issueList'; seq: number; folder: string }
+  /** roadmap・Issueからオーケストレータを起動する。 */
+  | ({ type: 'issueStart'; seq: number } & McIssueStartRequest)
   /** 再開待ちの会話を開き直す（Issue #2138の3）。 */
   | ({ type: 'resume'; seq: number } & McTarget)
   /** 再開待ちを一覧から外す。 */
