@@ -216,7 +216,17 @@ export function Composer(props: {
         return;
       }
       setQueueError(undefined);
+      // 読み直しで、フォーカス中の項目が送られて消えると、フォーカスがbodyへ落ちてキーが効かなくなる
+      const hadFocus = queueRef.current?.contains(document.activeElement) === true;
       setQueue((open) => (open === undefined ? undefined : (result.queued ?? [])));
+      if (hadFocus) {
+        setTimeout(() => {
+          const list = queueRef.current;
+          if (list !== null && !list.contains(document.activeElement)) {
+            (list.querySelector<HTMLElement>('button') ?? list).focus();
+          }
+        }, 0);
+      }
     });
   };
 
@@ -371,7 +381,11 @@ export function Composer(props: {
     const at = buttons.findIndex((b) => b === document.activeElement);
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
-      buttons[stepIndex(at < 0 ? 0 : at, buttons.length, e.key === 'ArrowDown' ? 1 : -1)]?.focus();
+      const down = e.key === 'ArrowDown';
+      // 一覧の外（コンテナ）から入るときは、↓で先頭、↑で末尾へ入る
+      const next =
+        at < 0 ? (down ? 0 : buttons.length - 1) : stepIndex(at, buttons.length, down ? 1 : -1);
+      buttons[next]?.focus();
       return;
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') && at >= 0) {
@@ -517,7 +531,10 @@ export function Composer(props: {
             onKeyDown={onQueueKeyDown}
           >
             {queue.map((item, i) => (
-              <li key={`${String(i)}-${item.text}`}>
+              // 位置を含めない（先頭が送られて繰り上がっても同じ項目のDOMを残し、フォーカスを保つ）
+              <li
+                key={`${item.text}#${String(queue.slice(0, i).filter((q) => q.text === item.text).length)}`}
+              >
                 <button
                   type="button"
                   class="choice"

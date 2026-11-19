@@ -245,6 +245,43 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
     pendingCount: 0,
   };
 
+  it('送信キューは一覧の外から↓で先頭へ入り、先頭が送られて繰り上がってもフォーカスが残る（Issue #2158のレビュー）', async () => {
+    const { window, posted, deliver } = boot();
+    await tick();
+    deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+    await tick();
+    const doc = window.document;
+    const keydown = (target: EventTarget, init: KeyboardEventInit): void => {
+      target.dispatchEvent(
+        new window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+      );
+    };
+    const answer = (queued: string[]): void => {
+      const request = posted.filter((m) => m.action === 'queuedMessages').at(-1);
+      deliver({
+        type: 'controlResult',
+        seq: request?.seq,
+        ok: true,
+        queued: queued.map((text) => ({ text, truncated: false, attachments: 0 })),
+      });
+    };
+    keydown(doc.body, { key: 'Q', shiftKey: true });
+    await tick();
+    answer(['一', '二', '三']);
+    await tick();
+    // 開いた直後は一覧のコンテナにフォーカスがある。↓は2件目ではなく先頭へ入る
+    keydown(doc.querySelector('.composer-queue') as HTMLElement, { key: 'ArrowDown' });
+    await tick();
+    expect(doc.activeElement?.textContent).toContain('一');
+    // 先頭が送られて繰り上がる（2秒ごとの読み直し）。フォーカスはbodyへ落ちない
+    keydown(doc.activeElement as HTMLElement, { key: 'ArrowDown' });
+    await vi.advanceTimersByTimeAsync(2_000);
+    answer(['二', '三']);
+    await tick();
+    expect(doc.activeElement?.textContent).toContain('二');
+    expect(doc.activeElement?.tagName).toBe('BUTTON');
+  });
+
   it('composerは送信中に二重送信させず、失敗したら入力を残して理由を出す（Issue #2137）', async () => {
     const { window, posted, deliver } = boot();
     await tick();
