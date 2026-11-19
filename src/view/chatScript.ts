@@ -3723,8 +3723,8 @@ export function chatScript(
   el('workflowView').addEventListener('click', () =>
     vscode.postMessage({ type: 'workflowView' }),
   );
-  el('sessionKanban').addEventListener('click', () =>
-    vscode.postMessage({ type: 'sessionKanban' }),
+  el('missionControl').addEventListener('click', () =>
+    vscode.postMessage({ type: 'missionControl' }),
   );
   el('forgeHub').addEventListener('click', () =>
     vscode.postMessage({ type: 'forgeHub' }),

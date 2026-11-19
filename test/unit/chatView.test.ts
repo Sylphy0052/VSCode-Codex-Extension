@@ -220,7 +220,7 @@ const ICON_ROW_BUTTON_IDS = [
   'workflowMenu',
   'teamWorkflow',
   'workflowView',
-  'sessionKanban',
+  'missionControl',
   'openProgress',
   'handoffToNewSession',
 ];
@@ -454,7 +454,7 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
       'workflowMenu',
       'teamWorkflow',
       'workflowView',
-      'sessionKanban',
+      'missionControl',
       'openProgress',
     ]) {
       expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
@@ -504,7 +504,7 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
       'exportTranscript',
       'teamWorkflow',
       'workflowView',
-      'sessionKanban',
+      'missionControl',
       'openProgress',
       'handoffToNewSession',
     ]) {
@@ -529,7 +529,7 @@ describe('入力欄アイコン列の「…」メニュー折りたたみ（issu
           'workflowMenu',
           'teamWorkflow',
           'workflowView',
-          'sessionKanban',
+          'missionControl',
           'forgeHub',
           'openProgress',
           'handoffToNewSession',

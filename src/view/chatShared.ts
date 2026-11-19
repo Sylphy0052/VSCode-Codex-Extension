@@ -1417,10 +1417,10 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         pressed: false,
         icon: COMPOSER_ICONS.workflowView,
       };
-    case 'sessionKanban':
+    case 'missionControl':
       return {
-        ariaLabel: 'セッションカンバンを開く',
-        title: 'このワークスペースで開いている会話を状態別に表示します',
+        ariaLabel: 'Mission Controlを開く',
+        title: '全ウィンドウの会話と回答待ちの項目をMission Controlで表示します',
         hidden: false,
         pressed: false,
         icon: COMPOSER_ICONS.kanban,

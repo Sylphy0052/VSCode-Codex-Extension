@@ -328,6 +328,33 @@ describe('WorktreeCreationQueue.create', () => {
     ]);
   });
 
+  it("location: 'claude'（Mission Control）はwf/でなくmc/<taskId>のブランチで作られる（Issue #2138）", async () => {
+    const git = new FakeGit();
+    git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });
+    git.respond(['worktree', 'add'], { code: 0, stdout: '', stderr: '' });
+    const queue = new WorktreeCreationQueue();
+    const cwd = path.join('/repo', '.claude', 'worktrees', 'mc-0a1b2c3d');
+    const fs = new FakeFs();
+    fs.realpaths.set(cwd, cwd);
+    fs.realpaths.set('/repo', '/repo');
+
+    const result = await queue.create(
+      {
+        repoRoot: '/repo',
+        runId: RUN_ID,
+        taskId: 'mc-0a1b2c3d',
+        headCommit: HEAD_SHA,
+        retry: undefined,
+        location: 'claude',
+      },
+      git,
+      fs,
+    );
+
+    expect(result).toEqual({ ok: true, cwd, branch: 'mc/mc-0a1b2c3d' });
+    expect(git.calls[1]?.args).toEqual(['worktree', 'add', '-b', 'mc/mc-0a1b2c3d', cwd, HEAD_SHA]);
+  });
+
   it('branchNaming: conventionalかつissueありのとき、GitLab運用規約形式のブランチで作られる', async () => {
     const git = new FakeGit();
     git.respond(['rev-parse', '--verify'], { code: 1, stdout: '', stderr: '' });

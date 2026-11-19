@@ -587,7 +587,7 @@ describe('webviewメッセージの振り分け: 拡張機能側のコマンド'
     ['workflowMenu', 'agent.workflows.menu'],
     ['teamWorkflow', 'agent.workflows.team'],
     ['workflowView', 'agent.workflows.view'],
-    ['sessionKanban', 'agent.sessionKanban'],
+    ['missionControl', 'agent.missionControl.open'],
     ['forgeHub', 'agent.forgeHub'],
     ['orchestratorMode', 'agent.taskRun.start'],
     ['openProgress', 'agent.openProgress'],

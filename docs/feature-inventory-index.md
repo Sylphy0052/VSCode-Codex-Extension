@@ -45,7 +45,7 @@
 | `claude.reloadSkills`            | skillsを読み直す（Claude Code）             | [F17](feature-inventory.md#f17) |
 | `claude.renameChat`              | セッション名を変更（Claude Code）           | [F03](feature-inventory.md#f03) |
 | `agent.workflows.menu`           | ワークフロー…                               | [F36](feature-inventory.md#f36) |
-| `agent.sessionKanban`            | セッションカンバンを開く                    | [F24](feature-inventory.md#f24) |
+| `agent.sessionKanban`            | Mission Controlを開く（旧統括ページの別名） | [F24](feature-inventory.md#f24) |
 | `agent.forgeHub`                 | Forge Hubを開く                             | [F37](feature-inventory.md#f37) |
 | `agent.workflows.run`            | ワークフローを実行…                         | [F28](feature-inventory.md#f28) |
 | `agent.workflows.stop`           | ワークフローを停止…                         | [F28](feature-inventory.md#f28) |
@@ -185,7 +185,7 @@
 | `workflowMenu`        | [F36](feature-inventory.md#f36) |
 | `teamWorkflow`        | [F32](feature-inventory.md#f32) |
 | `workflowView`        | [F36](feature-inventory.md#f36) |
-| `sessionKanban`       | [F24](feature-inventory.md#f24) |
+| `missionControl`      | [F24](feature-inventory.md#f24) |
 | `forgeHub`            | [F37](feature-inventory.md#f37) |
 | `openProgress`        | [F23](feature-inventory.md#f23) |
 | `handoffToNewSession` | [F13](feature-inventory.md#f13) |
@@ -453,8 +453,7 @@
 | [src/view/sendKey.ts](../src/view/sendKey.ts)                                               | [F05](feature-inventory.md#f05)                                                                                                                                     |
 | [src/view/sessionActivity.ts](../src/view/sessionActivity.ts)                               | [F12](feature-inventory.md#f12)、[F24](feature-inventory.md#f24)                                                                                                    |
 | [src/view/sessionDecorations.ts](../src/view/sessionDecorations.ts)                         | [F12](feature-inventory.md#f12)                                                                                                                                     |
-| [src/view/sessionKanbanModel.ts](../src/view/sessionKanbanModel.ts)                         | [F24](feature-inventory.md#f24)                                                                                                                                     |
-| [src/view/sessionKanbanView.ts](../src/view/sessionKanbanView.ts)                           | [F24](feature-inventory.md#f24)                                                                                                                                     |
+| [src/view/sessionControlMessage.ts](../src/view/sessionControlMessage.ts)                   | [F24](feature-inventory.md#f24)                                                                                                                                     |
 | [src/view/sessionTitle.ts](../src/view/sessionTitle.ts)                                     | [F03](feature-inventory.md#f03)                                                                                                                                     |
 | [src/view/sessionTreeProvider.ts](../src/view/sessionTreeProvider.ts)                       | [F02](feature-inventory.md#f02)                                                                                                                                     |
 | [src/view/settingsProvider.ts](../src/view/settingsProvider.ts)                             | [F04](feature-inventory.md#f04)、[F15](feature-inventory.md#f15)、[F16](feature-inventory.md#f16)、[F17](feature-inventory.md#f17)                                  |

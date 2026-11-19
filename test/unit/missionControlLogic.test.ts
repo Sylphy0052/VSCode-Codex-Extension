@@ -3,19 +3,29 @@ import {
   buildPromptValues,
   buildQuestionAnswers,
   chooseOption,
+  countByActivity,
   countSessionsInRepo,
   EMPTY_DRAFT,
   EMPTY_FILTER,
   filterPending,
+  filterResumable,
   filterSessions,
   formatElapsed,
+  isAnswerableInInbox,
   isStalled,
+  type McFilter,
+  stalledSince,
   mapKey,
   moveSelection,
   reconcileSelection,
   setOther,
 } from '../../src/webview/missionControl/logic';
-import type { McPendingItem, McRepo, McSession } from '../../src/webview/missionControl/protocol';
+import type {
+  McPendingItem,
+  McRepo,
+  McResumeItem,
+  McSession,
+} from '../../src/webview/missionControl/protocol';
 import { MISSION_CONTROL_STYLES } from '../../src/webview/missionControl/styles';
 
 const repos: McRepo[] = [
@@ -93,6 +103,89 @@ describe('Inboxの絞り込み（Issue #2136）', () => {
     expect(filterSessions(sessions, repos, { ...EMPTY_FILTER, provider: 'claude' })).toHaveLength(
       0,
     );
+  });
+});
+
+describe('状態の絞り込みと再開待ち（Issue #2138）', () => {
+  function session(overrides: Partial<McSession>): McSession {
+    return {
+      key: 's',
+      windowId: 'w1',
+      threadId: 't',
+      provider: 'codex',
+      isCurrentWindow: true,
+      repoKey: '/w/app',
+      title: 'リファクタ',
+      activity: 'running',
+      activitySince: 0,
+      cwdLabel: 'app',
+      cwdFull: '/w/app',
+      pendingCount: 0,
+      ...overrides,
+    };
+  }
+  const sessions = [
+    session({ key: 'a', activity: 'running' }),
+    session({ key: 'b', activity: 'idle' }),
+    session({ key: 'c', activity: 'idle', repoKey: '/w/other' }),
+    session({ key: 'd', activity: 'handoffPending' }),
+  ];
+
+  it('選んだ状態のセッションだけを出す', () => {
+    expect(
+      filterSessions(sessions, repos, { ...EMPTY_FILTER, activity: 'idle' }).map((s) => s.key),
+    ).toEqual(['b', 'c']);
+    expect(filterSessions(sessions, repos, EMPTY_FILTER)).toHaveLength(4);
+  });
+
+  it('状態ごとの数は、状態以外の絞り込みだけを掛けて数える', () => {
+    const counts = countByActivity(sessions, repos, {
+      ...EMPTY_FILTER,
+      repoKey: '/w/app',
+      activity: 'running',
+    });
+    expect(counts).toEqual({
+      approvalPending: 0,
+      handoffPending: 1,
+      running: 1,
+      backgroundRunning: 0,
+      idle: 1,
+    });
+  });
+
+  it('再開待ちにはrepo・provider・検索の絞り込みが効き、状態の絞り込みは効かない', () => {
+    const resume: McResumeItem[] = [
+      {
+        id: 'resume:codex:t1',
+        windowId: 'w1',
+        provider: 'codex',
+        threadId: 't1',
+        title: '移行作業',
+        repoKey: '/w/app',
+        cwdLabel: 'app',
+        since: 0,
+      },
+      {
+        id: 'resume:claude:t2',
+        windowId: 'w1',
+        provider: 'claude',
+        threadId: 't2',
+        title: '調査',
+        repoKey: '/w/other',
+        cwdLabel: 'other',
+        since: 0,
+      },
+    ];
+    const ids = (filter: McFilter): string[] =>
+      filterResumable(resume, repos, filter).map((r) => r.id);
+    expect(ids({ ...EMPTY_FILTER, activity: 'idle', currentWindowOnly: true })).toHaveLength(2);
+    expect(ids({ ...EMPTY_FILTER, repoKey: '/w/other' })).toEqual(['resume:claude:t2']);
+    expect(ids({ ...EMPTY_FILTER, provider: 'codex' })).toEqual(['resume:codex:t1']);
+    expect(ids({ ...EMPTY_FILTER, query: '移行' })).toEqual(['resume:codex:t1']);
+  });
+
+  it('引き継ぎ確認はInboxで答えられる', () => {
+    expect(isAnswerableInInbox('handoff')).toBe(true);
   });
 });
 
@@ -217,15 +310,37 @@ describe('選択の扱い（段階2のレビュー）', () => {
 
 describe('停滞とworktreeの既定（Issue #2137）', () => {
   it('実行中で出力が閾値以上動いていなければ停滞', () => {
-    expect(isStalled({ activity: 'running', lastOutputAt: 0 }, 300_000, 300_000)).toBe(true);
-    expect(isStalled({ activity: 'running', lastOutputAt: 1 }, 300_000, 300_000)).toBe(false);
-    expect(isStalled({ activity: 'idle', lastOutputAt: 0 }, 900_000, 300_000)).toBe(false);
-    expect(isStalled({ activity: 'approvalPending', lastOutputAt: 0 }, 900_000, 300_000)).toBe(
-      false,
-    );
-    expect(isStalled({ activity: 'running', lastOutputAt: undefined }, 900_000, 300_000)).toBe(
-      false,
-    );
+    expect(
+      isStalled({ activity: 'running', lastOutputAt: 0, activitySince: 0 }, 300_000, 300_000),
+    ).toBe(true);
+    expect(
+      isStalled({ activity: 'running', lastOutputAt: 1, activitySince: 0 }, 300_000, 300_000),
+    ).toBe(false);
+    expect(
+      isStalled({ activity: 'idle', lastOutputAt: 0, activitySince: 0 }, 900_000, 300_000),
+    ).toBe(false);
+    expect(
+      isStalled(
+        { activity: 'approvalPending', lastOutputAt: 0, activitySince: 0 },
+        900_000,
+        300_000,
+      ),
+    ).toBe(false);
+    expect(
+      isStalled(
+        { activity: 'running', lastOutputAt: undefined, activitySince: 0 },
+        900_000,
+        300_000,
+      ),
+    ).toBe(false);
+  });
+
+  it('実行を始めた直後は、前の出力から時間が経っていても停滞としない（Issue #2138）', () => {
+    // 出力は10分前だが、実行中になったのは1秒前
+    const session = { activity: 'running', lastOutputAt: 0, activitySince: 599_000 } as const;
+    expect(isStalled(session, 600_000, 300_000)).toBe(false);
+    expect(stalledSince(session)).toBe(599_000);
+    expect(isStalled(session, 899_000, 300_000)).toBe(true);
   });
 
   it('同じrepoで開いているセッションを数える', () => {

@@ -230,8 +230,7 @@ import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
 import type { SessionControlAction, SessionControlResult } from './view/chatManagerBase';
 import { ApprovalDisclosureLog } from './view/approvalDisclosure';
-import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
-import { SessionKanbanViewManager, type SessionKanbanTarget } from './view/sessionKanbanView';
+import type { SessionControlTarget } from './view/sessionControlMessage';
 import {
   ActivitySince,
   buildMissionControlSnapshot,
@@ -245,6 +244,14 @@ import {
   readMissionControlStallMs,
 } from './view/missionControlLauncher';
 import { MISSION_CONTROL_OPEN_COMMAND, MissionControlViewManager } from './view/missionControlView';
+import { withSafeGitConfig } from './view/missionControlGit';
+import { ReviewTracker } from './view/missionControlReview';
+import {
+  RUNNING_TURNS_KEY,
+  RunningTurnJournal,
+  type RunningTurnSession,
+} from './view/missionControlResume';
+import { createMissionControlHost, isRunningTurn, resumeKey } from './view/missionControlHost';
 import { setupTaskRun } from './view/taskRunSetup';
 import type { TaskRunPendingPort } from './view/taskRunPending';
 import {
@@ -1669,12 +1676,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
    * 宛先のウィンドウを問わず、セッション1件へ操作を1つ届ける（Issue #1258、#1274）。
    *
    * 自ウィンドウなら`controlSession`を直接呼び、別ウィンドウなら要求ファイル経由で流す。
-   * 統括ページ（`SessionKanbanViewManager`）と、エージェント向けのMCPの口
+   * Mission Control（`MissionControlViewManager`）と、エージェント向けのMCPの口
    * （`SessionBridgePort`。Issue #1274）が同じこの関数を通る——宛先解決を1箇所へ
    * 集めるため、入口ごとに分岐を持たせない。
    */
   const controlSessionAnywhere = async (
-    target: SessionKanbanTarget,
+    target: SessionControlTarget,
     action: SessionControlAction,
   ): Promise<SessionControlResult> => {
     // task runの質問は会話に属さないため、会話への操作（`controlSession`）を通さない（Issue #2135）
@@ -1859,44 +1866,65 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     },
   });
   ensureImageGenerationHost();
-  const sessionKanban = new SessionKanbanViewManager(
-    () => {
-      const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
-      const selfSessions: ManagedSessionInput[] = currentWindowSessions().map((session) => ({
-        ...session,
-        windowId,
-      }));
-      const otherSessions: ManagedSessionInput[] = sessionHubReader
-        .getOthers()
-        .flatMap((window) =>
-          window.sessions.map((session) => ({ ...session, windowId: window.windowId })),
-        );
-      return {
-        ...buildSessionKanban([...selfSessions, ...otherSessions], roots, windowId),
-        taskRunPending: [
-          ...currentWindowPending(),
-          ...sessionHubReader.getOthers().flatMap((window) => window.pending ?? []),
-        ],
-      };
-    },
-    controlSessionAnywhere,
-    log,
-  );
-  // Mission Control（Issue #2136）。統括ページと同じ材料（全ウィンドウのセッションと待ち項目）
+  // Mission Control（Issue #2136）。全ウィンドウのセッションと待ち項目
   // から1画面を作り、操作も同じ`controlSessionAnywhere`を通す
   const missionControlRepoResolver = createRepoResolver();
   const missionControlActivitySince = new ActivitySince();
-  const missionControl = new MissionControlViewManager(
-    () =>
-      buildMissionControlSnapshot({
-        sessions: [
-          ...currentWindowSessions().map((session) => ({ ...session, windowId })),
-          ...sessionHubReader
-            .getOthers()
-            .flatMap((window) =>
-              window.sessions.map((session) => ({ ...session, windowId: window.windowId })),
-            ),
-        ],
+  // レビュー待ち（Issue #2138の1）。gitは裏で1件ずつ走らせ、結果が変わったら画面を更新する
+  const missionControlReview = new ReviewTracker(withSafeGitConfig(nodeGitCommandRunner), () =>
+    missionControl.refresh(),
+  );
+  // Reloadで切れた会話（Issue #2138の3）。前回の起動で実行中だった分を読み出して「再開待ち」にする
+  const runningTurnJournal = new RunningTurnJournal({
+    get: () => context.workspaceState.get(RUNNING_TURNS_KEY),
+    update: (value) => context.workspaceState.update(RUNNING_TURNS_KEY, value),
+  });
+  const missionControlResumable = new Map(
+    runningTurnJournal.takePrevious().map((entry) => [resumeKey(entry), entry] as const),
+  );
+  /** このウィンドウの会話（再開待ち・Reloadの確認に使う軽い一覧）。 */
+  const currentWindowManagedSessions = (): RunningTurnSession[] => [
+    ...chat.managedSessions().map((session) => ({ ...session, provider: 'codex' as const })),
+    ...claudeChat.managedSessions().map((session) => ({ ...session, provider: 'claude' as const })),
+  ];
+  const missionControlHost = createMissionControlHost({
+    review: missionControlReview,
+    git: withSafeGitConfig(nodeGitCommandRunner),
+    windowId,
+    resumable: missionControlResumable,
+    forgetResumable: (entry) => runningTurnJournal.forget(entry),
+    openThread: (provider, threadId, title, cwd) =>
+      (provider === 'codex' ? chat : claudeChat).openThread(threadId, title, cwd),
+    runningTurnCount: () =>
+      currentWindowManagedSessions().filter((session) => isRunningTurn(session.activity)).length,
+    showMissionControl: () => missionControl.show(),
+    log,
+  });
+  context.subscriptions.push(
+    ...missionControlHost.disposables,
+    { dispose: () => missionControlReview.dispose() },
+    { dispose: () => runningTurnJournal.dispose() },
+  );
+  const missionControl: MissionControlViewManager = new MissionControlViewManager(
+    () => {
+      const sessions = [
+        ...currentWindowSessions().map((session) => ({ ...session, windowId })),
+        ...sessionHubReader
+          .getOthers()
+          .flatMap((window) =>
+            window.sessions.map((session) => ({ ...session, windowId: window.windowId })),
+          ),
+      ];
+      return buildMissionControlSnapshot({
+        sessions,
+        reviews: missionControlReview.observe(
+          sessions.map((session) => ({
+            key: formatSessionTarget(session),
+            cwd: session.cwd,
+            activity: session.activity,
+          })),
+        ),
+        resumable: [...missionControlResumable.values()],
         windowPending: [
           ...currentWindowPending(),
           ...sessionHubReader.getOthers().flatMap((window) => window.pending ?? []),
@@ -1906,7 +1934,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         activitySince: missionControlActivitySince,
         now: Date.now(),
         stallMs: readMissionControlStallMs(),
-      }),
+      });
+    },
     controlSessionAnywhere,
     context.extensionUri,
     log,
@@ -1929,6 +1958,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       },
       log,
     }),
+    missionControlHost.port,
   );
   const forgeHub = new ForgeHubViewManager(
     new ForgeHubService({
@@ -1952,25 +1982,30 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     (provider, cwd) =>
       provider === 'claude' ? claudeSkills.read(cwd) : appServer.listSkills([cwd]),
   );
-  const onSessionKanbanRelevantChange = (): void => {
-    sessionKanban.refresh();
+  const onSessionHubRelevantChange = (): void => {
+    // 実行中のターンを書き残し、走り出した会話は再開待ちから外す（Issue #2138の3）
+    const managed = currentWindowManagedSessions();
+    runningTurnJournal.observe(managed);
+    for (const session of managed) {
+      if (isRunningTurn(session.activity)) {
+        missionControlResumable.delete(resumeKey(session));
+      }
+    }
     missionControl.refresh();
     // heartbeat（15秒）を待たず、状態が変わった時点で他ウィンドウへも反映させる
     // （実際の書き込みはWriter側でまとめる）
     sessionHubWriter.requestWrite();
   };
   context.subscriptions.push(
-    sessionKanban,
     forgeHub,
     sessionHubReader,
     sessionHubRequestWatcher,
     { dispose: () => void sessionHubWriter.dispose() },
-    chat.onDidChangeState(onSessionKanbanRelevantChange),
-    claudeChat.onDidChangeState(onSessionKanbanRelevantChange),
-    chat.onDidChangePanels(onSessionKanbanRelevantChange),
-    claudeChat.onDidChangePanels(onSessionKanbanRelevantChange),
+    chat.onDidChangeState(onSessionHubRelevantChange),
+    claudeChat.onDidChangeState(onSessionHubRelevantChange),
+    chat.onDidChangePanels(onSessionHubRelevantChange),
+    claudeChat.onDidChangePanels(onSessionHubRelevantChange),
     sessionHubReader.onDidChange(() => {
-      sessionKanban.refresh();
       missionControl.refresh();
     }),
     missionControl,
@@ -1994,7 +2029,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       return;
     }
     lastTaskRunPendingIds = ids;
-    onSessionKanbanRelevantChange();
+    onSessionHubRelevantChange();
   });
   if (taskRunPendingSubscription !== undefined) {
     context.subscriptions.push(taskRunPendingSubscription);
@@ -2429,7 +2464,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
-    vscode.commands.registerCommand('agent.sessionKanban', () => sessionKanban.show()),
+    // 旧セッション統括ページ（Issue #2138で廃止）のコマンドは、Mission Controlを開く別名として残す
+    vscode.commands.registerCommand('agent.sessionKanban', () => missionControl.show()),
     vscode.commands.registerCommand('agent.forgeHub', (providerHint?: unknown) =>
       forgeHub.show(providerHint === 'claude' ? 'claude' : 'codex'),
     ),

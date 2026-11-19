@@ -5,6 +5,7 @@ import type {
   McPromptField,
   McQuestion,
   McRepo,
+  McResumeItem,
   McSession,
 } from './protocol';
 
@@ -23,6 +24,8 @@ export interface McFilter {
   currentWindowOnly: boolean;
   /** `/`で入れる検索語。タイトル・要約・repo名に部分一致（大文字小文字は区別しない）。 */
   query: string;
+  /** Railで選んだ状態（Issue #2138の6）。`undefined`はすべて。セッションだけを絞る。 */
+  activity?: McActivity | undefined;
 }
 
 export const EMPTY_FILTER: McFilter = {
@@ -30,6 +33,7 @@ export const EMPTY_FILTER: McFilter = {
   provider: 'all',
   currentWindowOnly: false,
   query: '',
+  activity: undefined,
 };
 
 interface Filterable {
@@ -84,10 +88,46 @@ export function filterSessions(
   return sessions.filter(
     (session) =>
       matchesBase(session, filter) &&
+      (filter.activity === undefined || session.activity === filter.activity) &&
       matchesQuery(
         [session.title, session.cwdLabel, repoLabelOf(repos, session.repoKey)],
         filter.query,
       ),
+  );
+}
+
+/** 状態ごとのセッション数（Railの「状態」一覧用。状態以外の絞り込みは掛けて数える）。 */
+export function countByActivity(
+  sessions: readonly McSession[],
+  repos: readonly McRepo[],
+  filter: McFilter,
+): Record<McActivity, number> {
+  const counts: Record<McActivity, number> = {
+    approvalPending: 0,
+    handoffPending: 0,
+    running: 0,
+    backgroundRunning: 0,
+    idle: 0,
+  };
+  for (const session of filterSessions(sessions, repos, { ...filter, activity: undefined })) {
+    counts[session.activity] += 1;
+  }
+  return counts;
+}
+
+/**
+ * 再開待ち（Issue #2138の4）の絞り込み。スナップショットはこのウィンドウの分だけなので
+ * 「このウィンドウのみ」は常に満たす。状態の絞り込みは掛けない（セッションではないため）。
+ */
+export function filterResumable(
+  items: readonly McResumeItem[],
+  repos: readonly McRepo[],
+  filter: McFilter,
+): McResumeItem[] {
+  return items.filter(
+    (item) =>
+      matchesBase({ ...item, isCurrentWindow: true }, filter) &&
+      matchesQuery([item.title, item.cwdLabel, repoLabelOf(repos, item.repoKey)], filter.query),
   );
 }
 
@@ -146,7 +186,8 @@ export function isAnswerableInInbox(kind: McPendingKind): boolean {
     kind === 'toolApproval' ||
     kind === 'askUserQuestion' ||
     kind === 'codexPrompt' ||
-    kind === 'taskRunQuestion'
+    kind === 'taskRunQuestion' ||
+    kind === 'handoff'
   );
 }
 
@@ -332,17 +373,26 @@ export function reconcileSelection(
 /**
  * 停滞（Issue #2137の5）。実行中なのに、出力が`stallMs`以上動いていないセッション。
  * 出力の時刻を持たない（古い版のウィンドウの）セッションは判定しない。
+ *
+ * 起点は出力の時刻と実行中になった時刻の遅い方にする。出力の時刻だけだと、前のターンの
+ * 出力から時間が経った会話で実行を始めた直後に停滞と出る（Issue #2138）。
  */
 export function isStalled(
-  session: Pick<McSession, 'activity' | 'lastOutputAt'>,
+  session: Pick<McSession, 'activity' | 'lastOutputAt' | 'activitySince'>,
   now: number,
   stallMs: number,
 ): boolean {
-  return (
-    session.activity === 'running' &&
-    session.lastOutputAt !== undefined &&
-    now - session.lastOutputAt >= stallMs
-  );
+  const since = stalledSince(session);
+  return session.activity === 'running' && since !== undefined && now - since >= stallMs;
+}
+
+/** 停滞の起点（`isStalled`の説明を参照）。出力の時刻が無ければ`undefined`。 */
+export function stalledSince(
+  session: Pick<McSession, 'lastOutputAt' | 'activitySince'>,
+): number | undefined {
+  return session.lastOutputAt === undefined
+    ? undefined
+    : Math.max(session.lastOutputAt, session.activitySince);
 }
 
 /** 同じrepoで開いているセッションの数（新規起動でworktreeを既定ONにするかの判断）。 */

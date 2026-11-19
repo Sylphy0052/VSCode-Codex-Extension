@@ -5352,8 +5352,8 @@ export class ClaudeChatViewManager
         void vscode.commands.executeCommand('agent.workflows.view');
         return;
       }
-      if (type === 'sessionKanban') {
-        void vscode.commands.executeCommand('agent.sessionKanban');
+      if (type === 'missionControl') {
+        void vscode.commands.executeCommand('agent.missionControl.open');
         return;
       }
       if (type === 'forgeHub') {

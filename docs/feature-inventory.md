@@ -479,11 +479,13 @@
 - [x] F24.02:承認待ち・実行中・待機の3列分類。
 - [x] F24.03:カードから会話を開き状態変化を反映。
 
-レビュー結果:[静的レビュー](reviews/f24-session-kanban.md)。実装修正・実機検証は未実施。
+旧統括ページ（`sessionKanbanView.ts`）はIssue #2138で廃止し、Mission Controlへ統合した。`agent.sessionKanban`はMission Controlを開く別名として残る。5つの状態での絞り込み、レビュー待ち、再開待ち、引き継ぎ確認・脇道の質問もMission Controlで扱う。
 
-主な実装:[src/view/sessionKanbanModel.ts](../src/view/sessionKanbanModel.ts)、[src/view/sessionKanbanView.ts](../src/view/sessionKanbanView.ts)、[src/view/sessionActivity.ts](../src/view/sessionActivity.ts)。
+レビュー結果:[静的レビュー](reviews/f24-session-kanban.md)（廃止前の旧統括ページが対象）。
 
-既存テスト:[sessionKanbanModel](../test/unit/sessionKanbanModel.test.ts)、[sessionKanbanView](../test/unit/sessionKanbanView.test.ts)。
+主な実装:[src/view/missionControlView.ts](../src/view/missionControlView.ts)、[src/view/missionControlModel.ts](../src/view/missionControlModel.ts)、[src/view/missionControlReview.ts](../src/view/missionControlReview.ts)、[src/view/missionControlResume.ts](../src/view/missionControlResume.ts)、[src/view/missionControlNotifier.ts](../src/view/missionControlNotifier.ts)、[src/view/sessionControlMessage.ts](../src/view/sessionControlMessage.ts)、[src/webview/missionControl/app.tsx](../src/webview/missionControl/app.tsx)、[src/view/sessionActivity.ts](../src/view/sessionActivity.ts)。
+
+既存テスト:[missionControlLogic](../test/unit/missionControlLogic.test.ts)、[missionControlView](../test/unit/missionControlView.test.ts)、[sessionControlMessage](../test/unit/sessionControlMessage.test.ts)。
 
 レビュー観点:履歴全件との対象差、cwd不明・複数ルート・worktree配下、タイトル順、消えた会話。
 

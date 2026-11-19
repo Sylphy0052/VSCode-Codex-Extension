@@ -1,9 +1,11 @@
 import type {
   McApprovalDetail,
   McControlAction,
+  McHandoffDetail,
   McHostMessage,
   McLaunchRepo,
   McLaunchRequest,
+  McSideQuestion,
   McSnapshot,
   McTarget,
   McTurn,
@@ -21,6 +23,8 @@ export interface ControlResult {
   error?: string | undefined;
   approvals?: McApprovalDetail[] | undefined;
   turns?: McTurn[] | undefined;
+  handoff?: McHandoffDetail | undefined;
+  sideQuestion?: McSideQuestion | undefined;
 }
 
 /** `launchOptions`・`pickFolder`・`launch`の応答（Issue #2137）。 */
@@ -47,6 +51,18 @@ export interface Bridge {
   /** フォルダ選択のダイアログを出させる。 */
   pickFolder(): Promise<ReplyResult>;
   launch(request: McLaunchRequest): Promise<ReplyResult>;
+  /** レビュー待ちの1ファイルをdiffエディタで開かせる（Issue #2138の1）。 */
+  openDiff(target: McTarget, path: string): Promise<ReplyResult>;
+  /** レビュー待ちを「確認済み」にする。 */
+  reviewAck(target: McTarget): Promise<ReplyResult>;
+  /** 再開待ちの会話を開き直す（Issue #2138の3）。 */
+  resume(target: McTarget): Promise<ReplyResult>;
+  /** 再開待ちを一覧から外す。 */
+  resumeDismiss(target: McTarget): Promise<ReplyResult>;
+  /** ウィンドウのReloadを頼む。確認は拡張ホストが出す。 */
+  reloadWindow(): Promise<ReplyResult>;
+  /** セッションid（`send_message`の宛先）をクリップボードへコピーさせる。 */
+  copyRef(target: McTarget): Promise<ReplyResult>;
   /** ライブtailの対象を伝える。`undefined`で止める。 */
   watch(target: McTarget | undefined): void;
   onLiveTurns(listener: (live: LiveTurns) => void): () => void;
@@ -141,6 +157,8 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           error: message.error,
           approvals: message.approvals,
           turns: message.turns,
+          handoff: message.handoff,
+          sideQuestion: message.sideQuestion,
         });
       }
     }
@@ -180,6 +198,12 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
         prompt: request.prompt,
         worktree: request.worktree,
       }),
+    openDiff: (to, file) => call({ type: 'openDiff', ...targetOnly(to), path: file }),
+    reviewAck: (to) => call({ type: 'reviewAck', ...targetOnly(to) }),
+    resume: (to) => call({ type: 'resume', ...targetOnly(to) }),
+    resumeDismiss: (to) => call({ type: 'resumeDismiss', ...targetOnly(to) }),
+    reloadWindow: () => call({ type: 'reloadWindow' }),
+    copyRef: (to) => call({ type: 'copyRef', ...targetOnly(to) }),
     watch(target) {
       api.postMessage({
         type: 'watch',
@@ -205,4 +229,9 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     getState: () => api.getState(),
     setState: (state) => api.setState(state),
   };
+}
+
+/** 宛先の3つの値だけを取り出す（行の項目をそのまま渡されても、余計な値を送らない）。 */
+function targetOnly(target: McTarget): McTarget {
+  return { windowId: target.windowId, provider: target.provider, threadId: target.threadId };
 }
