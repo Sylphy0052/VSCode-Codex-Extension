@@ -3,7 +3,7 @@ import type { Logger } from '../../src/log';
 import { readMissionControlStallMs } from '../../src/view/missionControlLauncher';
 import { MissionControlViewManager } from '../../src/view/missionControlView';
 import type { McSnapshot } from '../../src/webview/missionControl/protocol';
-import { __mock, env, Uri, type FakeWebviewPanel } from '../mocks/vscode';
+import { __mock, commands, env, Uri, type FakeWebviewPanel } from '../mocks/vscode';
 
 const log: Logger = {
   info: () => undefined,
@@ -68,6 +68,56 @@ describe('MissionControlViewManager（Issue #2136）', () => {
     });
     expect(panel.webview.sent.at(-1)).toMatchObject({ type: 'reply', seq: 4, ok: false });
     expect(env.clipboard.written).toHaveLength(1);
+  });
+
+  it('runCommand: 許可リストのコマンドだけを実行し、宛先はスナップショットのセッションに限る（Issue #2161）', async () => {
+    const windowId = '11111111-1111-4111-8111-111111111111';
+    const base = snapshot(0);
+    const read = (): McSnapshot => ({
+      ...base,
+      sessions: [
+        { windowId, provider: 'claude', threadId: 't1' } as McSnapshot['sessions'][number],
+      ],
+    });
+    const { panel } = open(read);
+    panel.webview.simulateMessage({ type: 'ready' });
+    const spy = vi.spyOn(commands, 'executeCommand');
+    try {
+      panel.webview.simulateMessage({ type: 'runCommand', seq: 10, command: 'codex.showUsage' });
+      await vi.waitFor(() =>
+        expect(panel.webview.sent.at(-1)).toMatchObject({ type: 'reply', seq: 10, ok: true }),
+      );
+      expect(spy).toHaveBeenLastCalledWith('codex.showUsage');
+
+      panel.webview.simulateMessage({
+        type: 'runCommand',
+        seq: 11,
+        command: 'agent.forgeHub',
+        windowId,
+        provider: 'claude',
+        threadId: 't1',
+      });
+      await vi.waitFor(() =>
+        expect(panel.webview.sent.at(-1)).toMatchObject({ type: 'reply', seq: 11, ok: true }),
+      );
+      expect(spy).toHaveBeenLastCalledWith('agent.forgeHub', 'claude');
+
+      spy.mockClear();
+      const rejected: Record<string, unknown>[] = [
+        { command: 'codex.deleteSession' },
+        { command: 'workbench.action.terminal.new' },
+        { command: 'codex.showUsage', args: ['x'] },
+        { command: 'agent.forgeHub', windowId, provider: 'claude', threadId: 'unknown' },
+        { command: 42 },
+      ];
+      rejected.forEach((extra, i) => {
+        panel.webview.simulateMessage({ type: 'runCommand', seq: 20 + i, ...extra });
+        expect(panel.webview.sent.at(-1)).toMatchObject({ type: 'reply', seq: 20 + i, ok: false });
+      });
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('タブ名に件数を出し、CSPはdefault-src noneとnonce付きの1ファイルだけ', () => {

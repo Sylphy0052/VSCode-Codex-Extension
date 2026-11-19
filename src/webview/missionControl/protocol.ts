@@ -621,4 +621,10 @@ export type McWebviewMessage =
   /** セッションidをクリップボードへコピーする（旧統括ページの「idをコピー」）。 */
   | ({ type: 'copyRef'; seq: number } & McTarget)
   /** 添付するファイルを選ぶ（Issue #2158）。`cwd`はダイアログの初期位置にだけ使う。 */
-  | { type: 'pickAttachments'; seq: number; cwd?: string | undefined };
+  | { type: 'pickAttachments'; seq: number; cwd?: string | undefined }
+  /**
+   * 許可リスト（`extensionCommands.ts`）の拡張コマンドを実行する（Issue #2161）。送るのは
+   * コマンドidだけで、引数は拡張ホストが決める。宛先は、選択中のセッションのproviderを渡す
+   * コマンドにだけ付ける。
+   */
+  | ({ type: 'runCommand'; seq: number; command: string } & Partial<McTarget>);

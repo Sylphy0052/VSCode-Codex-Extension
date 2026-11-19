@@ -454,6 +454,40 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       expect(window.document.querySelector('[role="dialog"][aria-label="履歴"]')).not.toBeNull();
     });
 
+    it('パレットから許可リストの拡張コマンドをキーだけで実行し、送るのはidと宛先だけ（Issue #2161）', async () => {
+      const { window, posted, deliver } = boot();
+      await tick();
+      deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+      await tick();
+      const runFromPalette = async (query: string): Promise<Record<string, unknown>> => {
+        press(window, ':');
+        await tick();
+        const input = window.document.querySelector(
+          '[aria-label="コマンドパレット"] input',
+        ) as HTMLInputElement;
+        input.value = query;
+        input.dispatchEvent(new window.Event('input', { bubbles: true }));
+        await tick();
+        press(window, 'Enter');
+        await vi.waitFor(() => expect(posted.at(-1)?.type).toBe('runCommand'));
+        return posted.pop() as Record<string, unknown>;
+      };
+      // 引数を取らないコマンドはidだけを送る
+      const usage = await runFromPalette('使用量を表示');
+      expect(Object.keys(usage).sort()).toEqual(['command', 'seq', 'type']);
+      expect(usage.command).toBe('codex.showUsage');
+      // providerを渡すコマンドは選択中のセッションの宛先だけを添える
+      const forge = await runFromPalette('Forge Hub');
+      expect(forge).toEqual({
+        type: 'runCommand',
+        seq: forge.seq,
+        command: 'agent.forgeHub',
+        windowId: runningSession.windowId,
+        provider: runningSession.provider,
+        threadId: runningSession.threadId,
+      });
+    });
+
     it('詳細ペインのボタンにアクセスキーを振り、その英字で押せる。全体のキーの英字は振らない', async () => {
       const { window, posted, deliver } = boot();
       await tick();

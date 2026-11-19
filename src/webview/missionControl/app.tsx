@@ -76,6 +76,7 @@ import { Composer, type ComposerKeysRef } from './composer';
 import { CommandPalette, type McPaletteEntry } from './palette';
 import { SessionSettingsPanel } from './sessionSettings';
 import { SessionOpDialog, type McSessionOpDialog } from './sessionOps';
+import { MC_EXTENSION_COMMANDS } from './extensionCommands';
 import { Conversation, type ConversationKeysRef, type TurnLogState } from './conversation';
 import { hasOlderTurns, logFromPage, mergeTurnPage, TURN_PAGE_SIZE, type TurnLog } from './turnLog';
 import type {
@@ -1156,6 +1157,24 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         run: reloadWindow,
       },
     );
+    // 許可リストの拡張コマンド（Issue #2161）。送るのはidだけで、providerを渡すコマンドには
+    // 選択中のセッションの宛先を添える（拡張ホストが知っているセッションかを確かめる）
+    const commandTarget = onRuns ? undefined : focusedSession;
+    for (const command of MC_EXTENSION_COMMANDS) {
+      entries.push({
+        id: `command:${command.id}`,
+        label: command.label,
+        contextual: false,
+        run: () => {
+          const to = command.arg === 'provider' ? commandTarget : undefined;
+          void bridge.runCommand(command.id, to).then((result) => {
+            if (!result.ok) {
+              setToast(result.error ?? 'コマンドを実行できませんでした');
+            }
+          });
+        },
+      });
+    }
     return entries;
   };
 
