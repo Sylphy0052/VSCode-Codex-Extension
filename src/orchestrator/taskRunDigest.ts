@@ -80,7 +80,8 @@ export function tallyTaskRun(run: TaskRun): TaskRunTally {
   return tally;
 }
 
-function countRepeatedFailures(task: OrchestratedTask): number {
+/** 1タスクの同じ原因の失敗の数（`TaskRunTally.repeatedFailureCount`の1タスク分）。 */
+export function countRepeatedFailures(task: OrchestratedTask): number {
   const seen = new Set<string>();
   let repeated = 0;
   for (const gate of task.gates ?? []) {

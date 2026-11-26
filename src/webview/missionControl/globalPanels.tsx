@@ -5,6 +5,7 @@ import {
   activeSavedFilter,
   formatCapturedAt,
   formatCostTotal,
+  formatUsageProjection,
   formatUsageSummary,
   formatUsageWindow,
   isUsageLimited,
@@ -176,11 +177,20 @@ function UsageSourceDetail(props: {
         <p class="notice">取得できない（まだ値が届いていません）</p>
       ) : (
         <ul>
-          {source.windows.map((w, i) => (
-            <li key={String(i)} class={w.limited ? 'limited' : undefined}>
-              {formatUsageWindow(w, props.now)}
-            </li>
-          ))}
+          {source.windows.map((w, i) => {
+            const projection = formatUsageProjection(w, props.now);
+            return (
+              <li key={String(i)} class={w.limited ? 'limited' : undefined}>
+                {formatUsageWindow(w, props.now)}
+                {projection === '' ? null : (
+                  <span class="notice" data-usage-projection="">
+                    {' '}
+                    {projection}
+                  </span>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
       {source?.plan === undefined ? null : (

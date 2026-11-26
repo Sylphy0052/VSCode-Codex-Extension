@@ -511,7 +511,20 @@ export interface TaskRunEndReview {
   sentAt: string;
   /** 終了レビューからの再計画で再開した回数（累計）。 */
   reopens: number;
+  /**
+   * 最後に送った終了レビューの完了条件の判定（Issue #2195）。判定しなかった・判定できなかったときは
+   * 省く。項目の無い保存データは判定なしと読む。
+   */
+  lastVerdict?: TaskRunEndReviewVerdict;
+  /**
+   * 判定が未達のまま再開した回数（Issue #2195）。続けて未達だった分だけ数え、達した判定の後の再開で
+   * 0へ戻す。停滞の信号に使う。項目の無い保存データは0回と読む。
+   */
+  unmetReopens?: number;
 }
+
+/** 保存する終了レビューの判定。`met`は完了条件を満たした、`unmet`は満たしていない。 */
+export type TaskRunEndReviewVerdict = 'met' | 'unmet';
 
 /** `set_goal`でgoalを直した記録（Issue #2193）。 */
 export interface TaskRunGoalRevision {

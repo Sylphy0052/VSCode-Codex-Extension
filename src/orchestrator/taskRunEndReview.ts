@@ -70,11 +70,23 @@ export function readTaskRunEndReview(run: {
   ) {
     return undefined;
   }
-  const reopens =
-    typeof raw.reopens === 'number' && Number.isInteger(raw.reopens) && raw.reopens >= 0
-      ? raw.reopens
-      : 0;
-  return { finishedAt: raw.finishedAt, sentAt: raw.sentAt, reopens };
+  const review: TaskRunEndReview = {
+    finishedAt: raw.finishedAt,
+    sentAt: raw.sentAt,
+    reopens: readCount(raw.reopens),
+  };
+  if (raw.lastVerdict === 'met' || raw.lastVerdict === 'unmet') {
+    review.lastVerdict = raw.lastVerdict;
+  }
+  const unmetReopens = readCount(raw.unmetReopens);
+  if (unmetReopens > 0) {
+    review.unmetReopens = unmetReopens;
+  }
+  return review;
+}
+
+function readCount(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
 /** 終了レビューから再開した回数。記録が無ければ0。 */
@@ -96,16 +108,30 @@ export function isEndReviewTarget(run: TaskRun): boolean {
 
 /**
  * 終了レビューを送ったことを記録する。runが別の終わりへ進んでいた（再開・終わり直し）ときは書かない。
- * 再開の回数は引き継ぐ。
+ * 再開の回数は引き継ぐ。判定できていれば結果も残す（Issue #2195。停滞の信号に使う）。
  */
-export function markEndReviewSent(run: TaskRun, finishedAt: string, now: Date): TaskRun {
+export function markEndReviewSent(
+  run: TaskRun,
+  finishedAt: string,
+  now: Date,
+  verdict?: EndReviewVerdict,
+): TaskRun {
   if (run.finishedAt !== finishedAt) {
     return run;
   }
-  return {
-    ...run,
-    endReview: { finishedAt, sentAt: now.toISOString(), reopens: endReviewReopenCount(run) },
+  const previous = readTaskRunEndReview(run);
+  const endReview: TaskRunEndReview = {
+    finishedAt,
+    sentAt: now.toISOString(),
+    reopens: previous?.reopens ?? 0,
   };
+  if (verdict?.kind === 'judged') {
+    endReview.lastVerdict = verdict.met ? 'met' : 'unmet';
+  }
+  if (previous?.unmetReopens !== undefined) {
+    endReview.unmetReopens = previous.unmetReopens;
+  }
+  return { ...run, endReview };
 }
 
 /** 終わったrunへの再計画を受け付けるかの判断。 */
@@ -155,11 +181,23 @@ export function reopenByEndReviewReplan(run: TaskRun): TaskRun {
   if (run.finishedAt === undefined || review === undefined) {
     return run;
   }
+  // 未達の判定の後の再開だけを続けて数え、達した判定の後なら数え直す。判定なしは数を変えない
+  const unmetReopens =
+    review.lastVerdict === 'unmet'
+      ? (review.unmetReopens ?? 0) + 1
+      : review.lastVerdict === 'met'
+        ? 0
+        : (review.unmetReopens ?? 0);
+  const endReview: TaskRunEndReview = { ...review, reopens: review.reopens + 1 };
+  delete endReview.unmetReopens;
+  if (unmetReopens > 0) {
+    endReview.unmetReopens = unmetReopens;
+  }
   const next: TaskRun = {
     ...run,
     finishedAt: undefined,
     haltedByUser: false,
-    endReview: { ...review, reopens: review.reopens + 1 },
+    endReview,
   };
   delete next.reopenedAt;
   delete next.suspendedAt;

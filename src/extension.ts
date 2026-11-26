@@ -318,6 +318,12 @@ import { FavoritesTreeProvider } from './view/favoritesTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildMcUsage } from './view/missionControlUsage';
+import { normalizeRetentionDays, WorkHistoryStore } from './view/workHistory';
+import {
+  setWorkHistoryHandoffSink,
+  WORK_HISTORY_OBSERVE_INTERVAL_MS,
+  WorkHistoryRecorder,
+} from './view/workHistoryRecorder';
 import { createMcSettingsPort } from './view/missionControlSettings';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
 import {
@@ -821,6 +827,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     pinnedSessions,
     { marks: manuallyNamedSessions },
     accountAutoSwitcher,
+    // 5時間枠と週次の使用率とリセット時刻（Issue #2174）。ステータスバーの表示には使わない
+    (probed) => usageBar.updateClaudeSlots(probed),
   );
   context.subscriptions.push(claudeChat);
 
@@ -2084,6 +2092,43 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 早く復元されうるので、MCより先に作っておく
   const usageBar = new UsageStatusBar();
   context.subscriptions.push(usageBar);
+  // 作業履歴（Issue #2175）。自ウィンドウのセッションのイベントと、利用枠の値を取得のたびに残す
+  const workHistory = new WorkHistoryRecorder({
+    store: new WorkHistoryStore(context.globalStorageUri.fsPath, (message) => log.warn(message)),
+    windowId,
+    retentionDays: () =>
+      normalizeRetentionDays(
+        vscode.workspace
+          .getConfiguration('agent')
+          .get<unknown>('missionControl.historyRetentionDays'),
+      ),
+  });
+  void workHistory.pruneIfDue(true);
+  stopWorkHistoryOnDeactivate = () => workHistory.stop();
+  setWorkHistoryHandoffSink((provider, parentThreadId, childThreadId) => {
+    workHistory.recordHandoff(provider, parentThreadId, childThreadId);
+  });
+  const workHistoryTimer = setInterval(() => {
+    workHistory.observeSessions(currentWindowSessions());
+  }, WORK_HISTORY_OBSERVE_INTERVAL_MS);
+  context.subscriptions.push(
+    usageBar.onDidChange(() => {
+      workHistory.observeUsage(buildMcUsage(usageBar.current(), Date.now()));
+    }),
+    // 保持日数を縮めたら、6時間ごとの削除を待たずに消す
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('agent.missionControl.historyRetentionDays')) {
+        void workHistory.pruneIfDue(true);
+      }
+    }),
+    {
+      dispose: () => {
+        clearInterval(workHistoryTimer);
+        setWorkHistoryHandoffSink(undefined);
+        workHistory.stop();
+      },
+    },
+  );
   const missionControl: MissionControlViewManager = new MissionControlViewManager(
     () => {
       const sessions = [
@@ -2388,6 +2433,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 実行中のターンを書き残し、走り出した会話は再開待ちから外す（Issue #2138の3）
     const managed = currentWindowManagedSessions();
     runningTurnJournal.observe(managed);
+    workHistory.observeSessions(currentWindowSessions());
     for (const session of managed) {
       if (isRunningTurn(session.activity)) {
         missionControlResumable.delete(resumeKey(session));
@@ -5327,8 +5373,15 @@ function debounce(fn: () => void, delayMs: number): () => void {
 }
 
 export function deactivate(): void {
-  // subscriptions で破棄されるため個別の後始末は不要。
+  // subscriptions で破棄されるため個別の後始末は不要。ただし作業履歴（Issue #2175）は、
+  // チャットの管理が破棄されてセッションが一覧から消える（`closed`として記録される）より前に
+  // 止めて`shutdown`を書く。VS Codeは`deactivate`をsubscriptionsの破棄より先に呼ぶ
+  stopWorkHistoryOnDeactivate?.();
+  stopWorkHistoryOnDeactivate = undefined;
 }
+
+/** `deactivate`で作業履歴の記録係を止める口（Issue #2175）。`activate`が設定する。 */
+let stopWorkHistoryOnDeactivate: (() => void) | undefined;
 
 /**
  * CLIの実行ファイルを解決するクロージャを作る（issue #305）。

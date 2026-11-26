@@ -165,7 +165,7 @@ import type { Logger } from '../log';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import type { FileSystemPort } from '../session/ports';
 import type { AccountAutoSwitcher, LimitHit } from '../claude/accountAutoSwitch';
-import { ClaudeUsageProbe } from '../claude/usageProbe';
+import { ClaudeUsageProbe, type ProbedSlots } from '../claude/usageProbe';
 import { ClaudeSandboxProbe, claudeSandboxArgs, nodeSandboxProbePorts } from '../claude/sandbox';
 import { CommandCatalog } from '../provider/commandCatalog';
 import {
@@ -293,6 +293,7 @@ import {
   describeProfile,
 } from './handoffTrace';
 import { appendHandoffLog } from './handoffLog';
+import { reportWorkHistoryHandoff } from './workHistoryRecorder';
 import {
   applyHandoffReflexThresholds,
   describeHandoffBoundaryMaterial,
@@ -702,11 +703,19 @@ export class ClaudeChatViewManager
     private readonly autoName?: SessionAutoNameHost,
     /** アカウントの自動切り替え（Issue #1924）。渡さなければ使用率を記録せず、切り替えもしない。 */
     private readonly accounts?: AccountAutoSwitcher,
+    /** `/usage`から5時間枠と週次を読めたときの受け取り先（Issue #2174。Mission Controlの見込み用）。 */
+    onUsageSlots?: (probed: ProbedSlots | undefined) => void,
   ) {
     super(pinnedSessions, 'claude');
     this.catalog = new CommandCatalog(fs);
     // 取得結果をウィンドウ間で共有し、`claude`の起動を全ウィンドウで間引く（Issue #1809）
-    this.usageProbe = new ClaudeUsageProbe(claudePath, log, globalStorageDir, accounts);
+    this.usageProbe = new ClaudeUsageProbe(
+      claudePath,
+      log,
+      globalStorageDir,
+      accounts,
+      onUsageSlots,
+    );
     if (accounts !== undefined) {
       this.startAccountPolling();
     }
@@ -1736,6 +1745,8 @@ export class ClaudeChatViewManager
         : withHandoffAcceptance(`${attemptText}\n\n${factsSection}`, handoffId, asksChecklist);
       // 開いて初回プロンプトを送るまで。model/effortがズレたときの作り直し（Issue #2016）でも
       // 同じ内容をもう一度送るため、まとめておく。開けない・送れないときは`undefined`
+      // 作業履歴の親子（Issue #2175）に使う、開けた引き継ぎ先のid
+      let launchedSessionId: string | undefined;
       const launch = async (): Promise<HandoffDestination<ClaudePanel> | undefined> => {
         const newSessionId = await this.openNew(
           entry.cwd,
@@ -1854,6 +1865,7 @@ export class ClaudeChatViewManager
           this.teardown(newEntry);
           return undefined;
         }
+        launchedSessionId = newSessionId;
         return { entry: newEntry, firstResponse, abandon: () => giveUp.abort(), launchMismatch };
       };
       const launched = await launch();
@@ -1861,6 +1873,10 @@ export class ClaudeChatViewManager
         continue;
       }
       await recordHandoff();
+      // 作業履歴へ親子を残す（Issue #2175）
+      if (launchedSessionId !== undefined) {
+        reportWorkHistoryHandoff('claude', sessionId, launchedSessionId);
+      }
       if (autoReply) {
         this.stopAutoReply(entry, 'handedOff');
       }
@@ -1875,7 +1891,14 @@ export class ClaudeChatViewManager
         entry,
         launched,
         choice.settings,
-        launch,
+        // 作り直した引き継ぎ先も親子として残す（Issue #2175）
+        async () => {
+          const relaunched = await launch();
+          if (relaunched !== undefined && launchedSessionId !== undefined) {
+            reportWorkHistoryHandoff('claude', sessionId, launchedSessionId);
+          }
+          return relaunched;
+        },
         trigger.kind === 'assistantSuggested' && trigger.keepOldTab === true,
       );
       return 'started';

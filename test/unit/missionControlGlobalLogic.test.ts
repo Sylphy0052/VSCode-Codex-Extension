@@ -5,12 +5,14 @@ import {
   findSelectedTask,
   formatCapturedAt,
   formatCostTotal,
+  formatUsageProjection,
   formatUsageSummary,
   formatUsageWindow,
   fromFilterSpec,
   isUsageLimited,
   isWindowStale,
   oneLine,
+  projectUsage,
   sameFilter,
   taskOpBlockReason,
   toFilterSpec,
@@ -118,6 +120,91 @@ describe('利用枠の表示', () => {
 
   it('窓の名前は1行にして長さを切る', () => {
     expect(formatUsageWindow(win({ label: '週\n次 偽の行' }), NOW)).toBe('週 次 偽の行');
+  });
+});
+
+describe('利用枠の到達見込み（Issue #2174）', () => {
+  const HOUR = 3_600_000;
+  const FIVE_HOURS = 5 * HOUR;
+
+  it('使用率 ÷ 経過割合 でリセット時の見込みを出し、届かなければ到達時刻は無い', () => {
+    // 5時間窓の半分が過ぎて30% → リセット時60%
+    const w = win({
+      label: '5時間',
+      usedPercent: 30,
+      resetsAt: NOW + 2.5 * HOUR,
+      windowMs: FIVE_HOURS,
+    });
+    expect(projectUsage(w, NOW)).toEqual({ atResetPercent: 60 });
+    expect(formatUsageProjection(w, NOW)).toBe('見込み リセット時60%');
+  });
+
+  it('100%を超える見込みなら到達時刻を出す', () => {
+    // 5時間窓の2時間が過ぎて80% → リセット時200%、2.5時間目（あと30分）で100%
+    const w = win({
+      label: '5時間',
+      usedPercent: 80,
+      resetsAt: NOW + 3 * HOUR,
+      windowMs: FIVE_HOURS,
+    });
+    const projection = projectUsage(w, NOW);
+    expect(projection?.atResetPercent).toBeCloseTo(200);
+    expect(projection?.reachAt).toBe(NOW + 0.5 * HOUR);
+    expect(formatUsageProjection(w, NOW)).toMatch(
+      /^見込み リセット時200%・100%到達 \d{2}:\d{2}（あと30分）$/,
+    );
+  });
+
+  it('長さ・リセット時刻・使用率のどれかが無い窓、到達済み・リセット済みの窓には出さない', () => {
+    const base = { usedPercent: 50, resetsAt: NOW + HOUR, windowMs: FIVE_HOURS };
+    expect(projectUsage(win({ ...base, windowMs: undefined }), NOW)).toBeUndefined();
+    expect(projectUsage(win({ ...base, resetsAt: undefined }), NOW)).toBeUndefined();
+    expect(projectUsage(win({ ...base, usedPercent: undefined }), NOW)).toBeUndefined();
+    expect(projectUsage(win({ ...base, limited: true }), NOW)).toBeUndefined();
+    // 到達の通知より先に使用率が100%に届いた窓
+    expect(projectUsage(win({ ...base, usedPercent: 100 }), NOW)).toBeUndefined();
+    expect(projectUsage(win({ ...base, usedPercent: 99 }), NOW)?.reachAt).toEqual(
+      expect.any(Number),
+    );
+    expect(projectUsage(win({ ...base, resetsAt: NOW - 1 }), NOW)).toBeUndefined();
+    expect(projectUsage(win({ ...base, windowMs: 0 }), NOW)).toBeUndefined();
+    expect(formatUsageProjection(win({ ...base, windowMs: undefined }), NOW)).toBe('');
+  });
+
+  it('窓の始めの短い間と、リセット時刻が窓の長さより先にある窓には出さない', () => {
+    // 経過5%未満（5時間窓で15分未満）
+    const early = win({
+      usedPercent: 1,
+      resetsAt: NOW + FIVE_HOURS - 10 * 60_000,
+      windowMs: FIVE_HOURS,
+    });
+    expect(projectUsage(early, NOW)).toBeUndefined();
+    // 窓の長さより先のリセット時刻は、窓がまだ始まっていない（経過が負）
+    const future = win({ usedPercent: 1, resetsAt: NOW + 2 * FIVE_HOURS, windowMs: FIVE_HOURS });
+    expect(projectUsage(future, NOW)).toBeUndefined();
+  });
+
+  it('ペースは計測時刻で測り、計測が無いまま時間が進んでも見込みは変わらない', () => {
+    // 5時間窓の2時間目に80%を計測 → リセット時200%、2.5時間目に100%
+    const w = win({
+      usedPercent: 80,
+      resetsAt: NOW + 3 * HOUR,
+      windowMs: FIVE_HOURS,
+      sampledAt: NOW,
+    });
+    const later = NOW + 15 * 60_000;
+    expect(projectUsage(w, later)).toEqual(projectUsage(w, NOW));
+    expect(projectUsage(w, later)?.reachAt).toBe(NOW + 0.5 * HOUR);
+    expect(formatUsageProjection(w, later)).toMatch(/（あと15分）$/);
+    // 見込みの時刻を過ぎたら、そう出す
+    expect(formatUsageProjection(w, NOW + HOUR)).toMatch(/（見込みの時刻を過ぎた）$/);
+    // 計測時刻が未来に見えても今の時点で測る
+    expect(projectUsage({ ...w, sampledAt: NOW + HOUR }, NOW)?.reachAt).toBe(NOW + 0.5 * HOUR);
+  });
+
+  it('使用率0%なら見込みも0%で、到達時刻は無い', () => {
+    const w = win({ usedPercent: 0, resetsAt: NOW + HOUR, windowMs: FIVE_HOURS });
+    expect(projectUsage(w, NOW)).toEqual({ atResetPercent: 0 });
   });
 });
 

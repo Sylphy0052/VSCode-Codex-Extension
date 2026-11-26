@@ -237,6 +237,7 @@ import {
   describeProfile,
 } from './handoffTrace';
 import { appendHandoffLog } from './handoffLog';
+import { reportWorkHistoryHandoff } from './workHistoryRecorder';
 import {
   applyHandoffReflexThresholds,
   describeHandoffBoundaryMaterial,
@@ -1487,6 +1488,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
     const targetViewColumn = entry.panel?.viewColumn ?? entry.lastKnownViewColumn;
     // 開けなかったら1回だけやり直す（Issue #1750）。`openNew`は失敗時に作りかけのタブを片付ける。
     // model/effortがズレたときの作り直し（Issue #2016）でも同じ手順で開く
+    let destinationThreadId: string | undefined;
     const openDestination = async (): Promise<ChatPanel | undefined> => {
       for (let attempt = 1; attempt <= 2; attempt++) {
         const newThreadId = await this.openNew(
@@ -1498,6 +1500,7 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         );
         const opened = newThreadId === undefined ? undefined : this.panels.get(newThreadId);
         if (opened !== undefined) {
+          destinationThreadId = newThreadId;
           return opened;
         }
         if (newThreadId !== undefined) {
@@ -1517,6 +1520,10 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
       return 'failed';
     }
     await recordHandoff();
+    // 作業履歴へ親子を残す（Issue #2175）
+    if (destinationThreadId !== undefined) {
+      reportWorkHistoryHandoff('codex', threadId, destinationThreadId);
+    }
     // 自動返信のON/OFFも持ち越し、引き継ぎ元では止める（`claudeChatView.ts`と同じ理由。
     // Issue #1362）
     const autoReply = entry.session.getState().autoReply;
@@ -1699,7 +1706,12 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         }
         try {
           carryOver(target);
-          return await sendTo(target, canRebuildAgain);
+          const sent = await sendTo(target, canRebuildAgain);
+          // 作り直した引き継ぎ先も親子として残す（Issue #2175）
+          if (sent !== undefined && destinationThreadId !== undefined) {
+            reportWorkHistoryHandoff('codex', threadId, destinationThreadId);
+          }
+          return sent;
         } catch (e) {
           // 初回プロンプトの届いていないタブは閉じる（作り直しは旧タブを残す扱いになるため、
           // 空のタブを残すと新旧どちらで続けるべきか分からなくなる）
