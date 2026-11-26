@@ -60,6 +60,7 @@ import {
   moveSelection,
   needsApprovalDetail,
   PENDING_KIND_LABELS,
+  purposeLabels,
   reconcileSelection,
   type McCardStatus,
   type McDensity,
@@ -368,6 +369,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     [snapshot, repos, filter],
   );
   const groups = useMemo(() => groupSessionsByRepo(sessions, repos), [sessions, repos]);
+  // Issue #2172: 目的の1文要約。似た要約は一覧全体で見比べてブランチ名を添える
+  const purposes = useMemo(() => purposeLabels(snapshot?.sessions ?? []), [snapshot]);
   // Issue #2138: 再開待ちとレビュー待ち
   const resumable = useMemo(
     () => filterResumable(snapshot?.resumable ?? [], repos, filter),
@@ -1727,6 +1730,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                         <SessionRow
                           key={session.key}
                           session={session}
+                          purpose={purposes.get(session.key)}
                           now={now}
                           stallMs={snapshot.stallMs}
                           replyWaitMs={snapshot.replyWaitMs ?? DEFAULT_REPLY_WAIT_MS}
@@ -1769,6 +1773,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
               <SessionDetail
                 key={selectedSession.key}
                 session={selectedSession}
+                purpose={purposes.get(selectedSession.key)}
                 bridge={bridge}
                 onToast={setToast}
                 now={now}
@@ -2102,6 +2107,8 @@ function EmptyGuide(props: { filtered: boolean }): JSX.Element {
 
 function SessionRow(props: {
   session: McSession;
+  /** 目的の1文要約（Issue #2172）。似た要約が並ぶときはブランチ名が付いている。 */
+  purpose?: string | undefined;
   now: number;
   stallMs: number;
   replyWaitMs: number;
@@ -2153,6 +2160,11 @@ function SessionRow(props: {
         />{' '}
         {formatElapsed(props.now - session.activitySince)}
       </span>
+      {props.purpose === undefined ? null : (
+        <span class="row-purpose" title={`目的: ${props.purpose}`}>
+          {props.purpose}
+        </span>
+      )}
       {facts.length === 0 ? null : <span class="row-facts">{facts.join(' · ')}</span>}
       {session.lastOutput === undefined ? null : (
         <span class="row-out" title={session.lastOutput}>
@@ -2320,6 +2332,8 @@ function PendingDetail(props: {
 
 function SessionDetail(props: {
   session: McSession;
+  /** 目的の1文要約（Issue #2172）。 */
+  purpose?: string | undefined;
   bridge: Bridge;
   onToast: (message: string) => void;
   now: number;
@@ -2352,6 +2366,11 @@ function SessionDetail(props: {
         {formatElapsed(props.now - session.activitySince)} · {session.cwdLabel} ·{' '}
         {session.isCurrentWindow ? 'このウィンドウ' : '別ウィンドウ'}
       </p>
+      {props.purpose === undefined ? null : (
+        <p class="detail-purpose">
+          <span class="muted">目的:</span> {props.purpose}
+        </p>
+      )}
       <SessionActions
         session={session}
         onSessionAction={props.onSessionAction}

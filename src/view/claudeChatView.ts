@@ -4456,6 +4456,14 @@ export class ClaudeChatViewManager
         this.log,
         (id, display) => entry.session.noteEndSummary(id, display),
       );
+      // セッションの目的の1文要約（Issue #2172）。発話が増えたターンだけ呼ぶ
+      this.maybeSessionPurpose(
+        entry,
+        state,
+        'claude',
+        (provider) => (provider === 'claude' ? this.claudePath() : readConfig().executablePath),
+        this.log,
+      );
     }
     const next = deriveTitle(state, entry.pinnedName);
     if (next !== undefined && entry.title !== next) {

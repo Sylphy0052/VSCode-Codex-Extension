@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
+import { stripControlChars } from '../orchestrator/sanitize';
 import { isApprovalLevel, type ApprovalLevel } from '../provider/approvalLevel';
 import { parseAttachmentInputs, type AttachmentInput } from '../provider/attachments';
 import {
@@ -84,7 +85,20 @@ export interface SharedSession {
    * 既読（タブの表示・Mission Controlの詳細ペインでの表示）で下げる。
    */
   unread?: boolean | undefined;
+  /**
+   * セッションの目的の1文要約（Issue #2172）。別のAIが利用者の発話から作った文なので外部由来の
+   * テキストとして扱い、読み手は1行へ畳んで文字列として表示するだけにする。古い版のファイルには無い。
+   */
+  purpose?: string | undefined;
+  /** 目的を要約したときの作業ディレクトリのブランチ名（Issue #2172）。似た要約を見分けるのに使う。 */
+  branch?: string | undefined;
 }
+
+/** `purpose`の上限（文字数）。書き手の上限（`MAX_SESSION_PURPOSE_CHARS`）に省略記号の分を足す。 */
+export const MAX_SHARED_PURPOSE_CHARS = 81;
+
+/** `branch`の上限（文字数）。 */
+export const MAX_SHARED_BRANCH_CHARS = 120;
 
 /** `lastOutput`の上限（文字数）。共有ファイルと画面へ長い行を流さない。 */
 export const MAX_SHARED_LAST_OUTPUT_CHARS = 200;
@@ -229,20 +243,16 @@ function normalizeSharedSession(session: SharedSession, windowId: string): Share
       ? session.lastOutputAt
       : undefined;
   // カードの補足（Issue #2151）も同じく、形の合わないものは無かったものとして落とす
-  const model =
-    typeof session.model === 'string' && session.model.trim() !== ''
-      ? session.model
-          // eslint-disable-next-line no-control-regex -- 改行・制御文字で一覧の行を崩さない
-          .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
-          .trim()
-          .slice(0, MAX_SHARED_MODEL_CHARS)
-      : undefined;
+  const model = inlineText(session.model, MAX_SHARED_MODEL_CHARS);
   const tokens = nonNegativeNumber(session.tokens);
   const costUsd = nonNegativeNumber(session.costUsd);
   // 返事待ちの判定に使う印（Issue #2171）。`true`以外は立っていないものとして扱う
   const taskManaged = session.taskManaged === true ? true : undefined;
   const handoffKept = session.handoffKept === true ? true : undefined;
   const unread = session.unread === true ? true : undefined;
+  // 目的の1文要約とブランチ名（Issue #2172）も1行へ畳んで長さを切る
+  const purpose = inlineText(session.purpose, MAX_SHARED_PURPOSE_CHARS);
+  const branch = inlineText(session.branch, MAX_SHARED_BRANCH_CHARS);
   return {
     ...session,
     loop,
@@ -255,7 +265,24 @@ function normalizeSharedSession(session: SharedSession, windowId: string): Share
     taskManaged,
     handoffKept,
     unread,
+    purpose,
+    branch,
   };
+}
+
+/**
+ * 文字列なら1行へ畳み、長さを切る。空・文字列以外は`undefined`。
+ *
+ * 改行・制御文字（C0・C1・U+2028/2029）は空白へ、双方向制御文字・不可視文字は除く
+ * （`stripControlChars`）。書き手が古い版でも、ファイルが書き換えられていても、
+ * 一覧の行を崩したり表示を逆向きにしたりさせない。
+ */
+export function inlineText(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const text = stripControlChars(value).replace(/\s+/gu, ' ').trim().slice(0, max);
+  return text === '' ? undefined : text;
 }
 
 function withOwnerWindow(items: readonly PendingItem[], windowId: string): PendingItem[] {

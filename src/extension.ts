@@ -1550,6 +1550,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         taskManaged: session.taskManaged === true ? true : undefined,
         handoffKept: session.handoffKept !== undefined ? true : undefined,
         unread: session.replyUnread === true ? true : undefined,
+        // セッションの目的の1文要約（Issue #2172）。まだ無ければ載せない
+        purpose: session.purpose,
+        branch: session.branch,
         pending:
           state === undefined
             ? []
