@@ -184,6 +184,24 @@ describe('利用枠の到達見込み（Issue #2174）', () => {
     expect(projectUsage(future, NOW)).toBeUndefined();
   });
 
+  it('ペースは計測時刻で測り、計測が無いまま時間が進んでも見込みは変わらない', () => {
+    // 5時間窓の2時間目に80%を計測 → リセット時200%、2.5時間目に100%
+    const w = win({
+      usedPercent: 80,
+      resetsAt: NOW + 3 * HOUR,
+      windowMs: FIVE_HOURS,
+      sampledAt: NOW,
+    });
+    const later = NOW + 15 * 60_000;
+    expect(projectUsage(w, later)).toEqual(projectUsage(w, NOW));
+    expect(projectUsage(w, later)?.reachAt).toBe(NOW + 0.5 * HOUR);
+    expect(formatUsageProjection(w, later)).toMatch(/（あと15分）$/);
+    // 見込みの時刻を過ぎたら、そう出す
+    expect(formatUsageProjection(w, NOW + HOUR)).toMatch(/（見込みの時刻を過ぎた）$/);
+    // 計測時刻が未来に見えても今の時点で測る
+    expect(projectUsage({ ...w, sampledAt: NOW + HOUR }, NOW)?.reachAt).toBe(NOW + 0.5 * HOUR);
+  });
+
   it('使用率0%なら見込みも0%で、到達時刻は無い', () => {
     const w = win({ usedPercent: 0, resetsAt: NOW + HOUR, windowMs: FIVE_HOURS });
     expect(projectUsage(w, NOW)).toEqual({ atResetPercent: 0 });

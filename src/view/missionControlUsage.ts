@@ -54,8 +54,9 @@ function codexSource(snapshot: UsageSnapshot | undefined, now: number): McUsageS
             minutesToMs(w.windowMinutes),
           ),
         );
-  const source: McUsageSource = { windows };
   const capturedAt = parseTime(snapshot.capturedAt);
+  // 使用率はAPI応答の時刻のもの。見込みのペースはこの時点で測る（Issue #2174）
+  const source: McUsageSource = { windows: windows.map((w) => withSampledAt(w, capturedAt)) };
   if (capturedAt !== undefined) {
     source.capturedAt = capturedAt;
   }
@@ -66,17 +67,22 @@ function codexSource(snapshot: UsageSnapshot | undefined, now: number): McUsageS
 }
 
 function claudeSource(state: UsageState, now: number): McUsageSource | undefined {
-  const { entries, slotsUsed } = withProbedSlots(state.claude, state.claudeSlots, now);
+  const { entries, fromSlots } = withProbedSlots(state.claude, state.claudeSlots, now);
+  const slotsUsed = fromSlots.size > 0;
   const windows = entries
     .filter((e) => e.usedPercent !== undefined || e.resetsAt !== undefined || e.limited === true)
     .map((e) =>
-      toWindow(
-        e.label ?? '制限',
-        e.usedPercent,
-        e.resetsAt,
-        e.limited === true,
-        now,
-        claudeWindowMs(e.label),
+      withSampledAt(
+        toWindow(
+          e.label ?? '制限',
+          e.usedPercent,
+          e.resetsAt,
+          e.limited === true,
+          now,
+          claudeWindowMs(e.label),
+        ),
+        // `/usage`から重ねた枠だけ計測時刻が分かる（Issue #2174）
+        fromSlots.has(e) ? state.claudeSlots?.readAt : undefined,
       ),
     );
   if (windows.length === 0) {
@@ -103,9 +109,9 @@ function withProbedSlots(
   entries: readonly ClaudeLimitEntry[],
   probed: ProbedSlots | undefined,
   now: number,
-): { entries: ClaudeLimitEntry[]; slotsUsed: boolean } {
+): { entries: ClaudeLimitEntry[]; fromSlots: ReadonlySet<ClaudeLimitEntry> } {
   if (probed === undefined) {
-    return { entries: [...entries], slotsUsed: false };
+    return { entries: [...entries], fromSlots: new Set() };
   }
   const slotEntries: ClaudeLimitEntry[] = [];
   for (const [label, slot] of [
@@ -122,7 +128,7 @@ function withProbedSlots(
       });
     }
   }
-  let slotsUsed = false;
+  const fromSlots = new Set<ClaudeLimitEntry>();
   const merged = entries.map((entry) => {
     const index = slotEntries.findIndex((s) => s.label === entry.label);
     if (index < 0) {
@@ -132,13 +138,14 @@ function withProbedSlots(
     if (slot?.resetsAt === undefined || slot.resetsAt * 1000 <= now) {
       return entry;
     }
-    slotsUsed = true;
-    return { ...slot, limited: entry.limited };
+    const used = { ...slot, limited: entry.limited };
+    fromSlots.add(used);
+    return used;
   });
-  if (slotEntries.length > 0) {
-    slotsUsed = true;
+  for (const slot of slotEntries) {
+    fromSlots.add(slot);
   }
-  return { entries: [...merged, ...slotEntries], slotsUsed };
+  return { entries: [...merged, ...slotEntries], fromSlots };
 }
 
 function oldest(a: number | undefined, b: number | undefined): number | undefined {
@@ -164,6 +171,13 @@ function claudeWindowMs(label: string | undefined): number | undefined {
     return undefined;
   }
   return minutesToMs(CLAUDE_WINDOW_MINUTES[label]);
+}
+
+/** 使用率を計測した時刻を付ける（Issue #2174）。分からない・使用率が無い窓には付けない。 */
+function withSampledAt(window: McUsageWindow, sampledAt: number | undefined): McUsageWindow {
+  return sampledAt === undefined || window.usedPercent === undefined
+    ? window
+    : { ...window, sampledAt };
 }
 
 function minutesToMs(minutes: number | undefined): number | undefined {

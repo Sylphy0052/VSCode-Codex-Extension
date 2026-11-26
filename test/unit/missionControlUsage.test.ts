@@ -49,6 +49,7 @@ describe('buildMcUsage', () => {
           usedPercent: 40,
           resetsAt: NOW + 3_600_000,
           windowMs: 10080 * 60_000,
+          sampledAt: NOW - 60_000,
           limited: false,
           stale: false,
         },
@@ -178,6 +179,7 @@ describe('buildMcUsage', () => {
           usedPercent: 16,
           resetsAt: NOW + 3_600_000,
           windowMs: 5 * 3_600_000,
+          sampledAt: NOW - 60_000,
           limited: true,
           stale: false,
         },
@@ -187,6 +189,7 @@ describe('buildMcUsage', () => {
           usedPercent: 23,
           resetsAt: NOW + 86_400_000,
           windowMs: 7 * 24 * 3_600_000,
+          sampledAt: NOW - 60_000,
           limited: false,
           stale: false,
         },
@@ -196,7 +199,9 @@ describe('buildMcUsage', () => {
     });
     // 画面側の計算に渡すと見込みが出る（週次の6/7が過ぎて23% → リセット時約27%）
     const weekly = usage.claude?.windows[2];
-    expect(weekly && projectUsage(weekly, NOW)?.atResetPercent).toBeCloseTo((23 * 7) / 6);
+    // 計測時刻（1分前）で測るので、経過割合は6/7から1分ぶん少ない
+    const fraction = (6 * 86_400_000 - 60_000) / (7 * 86_400_000);
+    expect(weekly && projectUsage(weekly, NOW)?.atResetPercent).toBeCloseTo(23 / fraction);
   });
 
   it('/usageの値のリセット時刻を過ぎていれば、ステータスバーの枠をそのまま使う（Issue #2174）', () => {

@@ -92,8 +92,11 @@ export interface McUsageProjection {
 
 /**
  * 使用率 ÷ 窓の経過割合 で、リセット時点の使用率と、100%に届く時刻を見込む（Issue #2174）。
- * 窓の始まりは`resetsAt - windowMs`とする。長さ・リセット時刻・使用率のどれかが分からない窓、
- * リセット済みの窓、上限に達した窓（`limited`か使用率100%以上。もう見込む先が無い）、経過が短すぎる窓には出さない。
+ * 窓の始まりは`resetsAt - windowMs`とする。経過割合は使用率を計測した時刻（`sampledAt`。
+ * 無ければ`now`）で測る。`now`で測ると、新しい計測が無いまま時間が進むだけでペースが
+ * 下がって見える。`now`はリセット済みかの判定と残り時間にだけ使う。
+ * 長さ・リセット時刻・使用率のどれかが分からない窓、リセット済みの窓、上限に達した窓
+ * （`limited`か使用率100%以上。もう見込む先が無い）、計測時点の経過が短すぎる窓には出さない。
  */
 export function projectUsage(window: McUsageWindow, now: number): McUsageProjection | undefined {
   const { usedPercent, resetsAt, windowMs } = window;
@@ -110,7 +113,9 @@ export function projectUsage(window: McUsageWindow, now: number): McUsageProject
     return undefined;
   }
   const start = resetsAt - windowMs;
-  const elapsed = now - start;
+  // 時計のずれで計測時刻が未来に見えても、今より先の時点では測らない
+  const sampledAt = Math.min(window.sampledAt ?? now, now);
+  const elapsed = sampledAt - start;
   const fraction = elapsed / windowMs;
   if (!Number.isFinite(fraction) || fraction < MIN_ELAPSED_FRACTION || fraction > 1) {
     return undefined;
@@ -118,8 +123,9 @@ export function projectUsage(window: McUsageWindow, now: number): McUsageProject
   const atResetPercent = usedPercent / fraction;
   const projection: McUsageProjection = { atResetPercent };
   if (usedPercent > 0 && atResetPercent >= 100) {
-    // 窓の始まりから同じペースで100%まで進む時刻。リセットより後にはならない（上の条件）
-    projection.reachAt = Math.max(now, start + (elapsed * 100) / usedPercent);
+    // 窓の始まりから同じペースで100%まで進む時刻。リセットより後にはならない（上の条件）。
+    // 計測が古いと今より前になりうる（見込みではもう届いている）
+    projection.reachAt = start + (elapsed * 100) / usedPercent;
   }
   return projection;
 }
@@ -134,7 +140,10 @@ export function formatUsageProjection(window: McUsageWindow, now: number): strin
   if (projection.reachAt === undefined) {
     return percent;
   }
-  return `${percent}・100%到達 ${formatSkillTime(projection.reachAt, now)}（あと${formatElapsed(projection.reachAt - now)}）`;
+  const at = formatSkillTime(projection.reachAt, now);
+  return projection.reachAt <= now
+    ? `${percent}・100%到達 ${at}（見込みの時刻を過ぎた）`
+    : `${percent}・100%到達 ${at}（あと${formatElapsed(projection.reachAt - now)}）`;
 }
 
 /** 取得元1つの要約（ヘッダ用）。最も逼迫した窓だけを出す。 */

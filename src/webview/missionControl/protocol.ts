@@ -193,6 +193,11 @@ export interface McUsageWindow {
    * （Claudeの「セッション」など）と、古い版の拡張ホストでは無い。
    */
   windowMs?: number | undefined;
+  /**
+   * 使用率を計測した時刻（ms。Issue #2174）。見込みのペースはこの時点で測る。分からなければ
+   * 無く、画面の今の時刻で測る。
+   */
+  sampledAt?: number | undefined;
   /** 上限に達しているか。 */
   limited: boolean;
   /** リセット時刻を過ぎていて、使用率がもう今の値ではない。 */
