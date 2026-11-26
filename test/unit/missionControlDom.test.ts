@@ -750,6 +750,107 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
     expect(doc.querySelector('.turn-search-count')?.textContent).toBe('1 / 2件');
   });
 
+  describe('履歴の検索結果から詳細を開く（Issue #2178の受入基準3）', () => {
+    const historyItem = (overrides: Record<string, unknown>) => ({
+      provider: 'codex',
+      threadId: 't1',
+      title: '無関係な見出し',
+      repoKey: '/w/app',
+      repoLabel: 'app',
+      cwdFull: '/w/app',
+      updatedAt: 1,
+      archived: false,
+      ...overrides,
+    });
+    const openHistory = async () => {
+      const env = boot();
+      env.window.HTMLElement.prototype.scrollIntoView = () => undefined;
+      await tick();
+      env.deliver({ type: 'snapshot', snapshot: snapshot([]) });
+      await tick();
+      env.key('h');
+      await tick();
+      const request = env.posted.find((m) => m.type === 'history');
+      expect(request).toBeDefined();
+      return { ...env, request };
+    };
+    const enter = (window: DOMWindow): void => {
+      // 履歴のEnterは、ダイアログの中（検索欄）から上がってくるキーで受ける
+      window.document
+        .querySelector('.history-filter input[type=search]')
+        ?.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    };
+
+    it('会話記録が残るセッションは、検索語で絞って開くと選ばれ、会話内検索へ語が入る', async () => {
+      const { window, posted, deliver, request } = await openHistory();
+      deliver({
+        type: 'reply',
+        seq: request?.seq,
+        ok: true,
+        history: [
+          historyItem({ threadId: 't1', firstPrompt: '古いバグを直して' }),
+          historyItem({ threadId: 't2', firstPrompt: '別の依頼' }),
+        ],
+      });
+      await tick();
+      const doc = window.document;
+      expect(doc.querySelectorAll('[data-history]')).toHaveLength(2);
+      const input = doc.querySelector('.history-filter input[type=search]') as HTMLInputElement;
+      input.value = '古いバグ';
+      input.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await tick();
+      expect(doc.querySelectorAll('[data-history]')).toHaveLength(1);
+      expect(doc.querySelector('[data-history]')?.textContent).toContain('古いバグを直して');
+      enter(window);
+      await tick();
+      const open = posted.find((m) => m.type === 'historyOpen');
+      expect(open).toMatchObject({ provider: 'codex', threadId: 't1' });
+      deliver({ type: 'reply', seq: open?.seq, ok: true });
+      await tick();
+      deliver({ type: 'snapshot', snapshot: { ...snapshot([]), sessions: [runningSession] } });
+      await tick();
+      const turns = posted.filter((m) => m.action === 'recentTurns').at(-1);
+      expect(turns).toBeDefined();
+      deliver({
+        type: 'controlResult',
+        seq: turns?.seq,
+        ok: true,
+        turns: [{ role: 'user', text: '古いバグを直して', truncated: false }],
+        turnStart: 0,
+        turnTotal: 1,
+      });
+      await tick();
+      const search = doc.querySelector('.turn-search-input') as HTMLInputElement | null;
+      expect(search?.value).toBe('古いバグ');
+    });
+
+    it('会話記録が消えたセッションは、Enterでhandoff台帳が開き、台帳の条件にセッションidが入る', async () => {
+      const { window, posted, deliver, request } = await openHistory();
+      deliver({
+        type: 'reply',
+        seq: request?.seq,
+        ok: true,
+        history: [
+          historyItem({
+            threadId: 'gone-1',
+            firstPrompt: '消えた会話',
+            transcriptMissing: true,
+            handoffCount: 2,
+          }),
+        ],
+      });
+      await tick();
+      enter(window);
+      await tick();
+      expect(posted.some((m) => m.type === 'historyOpen')).toBe(false);
+      // 台帳の要求は入力の落ち着き待ち（300ms）の後に出る
+      await vi.advanceTimersByTimeAsync(400);
+      const ledger = posted.find((m) => m.type === 'handoffLedger');
+      expect(ledger).toBeDefined();
+      expect((ledger?.query as { session: string }).session).toBe('gone-1');
+    });
+  });
+
   describe('詳細の会話（Issue #2157）', () => {
     const userPage = (from: number, to: number) =>
       Array.from({ length: to - from }, (_, i) => ({
