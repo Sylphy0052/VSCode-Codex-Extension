@@ -1006,6 +1006,41 @@ describe('applyStreamEvent', () => {
     expect(skill?.detail).toBe('genshijin:help');
   });
 
+  it('plugin skillの本文が同じuuidで届き直しても種類・名前・起動時刻を保つ（Issue #2173）', () => {
+    const body = {
+      type: 'user',
+      uuid: 'u1',
+      isSynthetic: true,
+      message: { content: [{ type: 'text', text: 'リファレンスカードを表示する。\n' }] },
+    };
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'genshijin:help' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: genshijin:help' },
+          ],
+        },
+      },
+      { ...body, timestamp: '2026-11-26T01:02:03.000Z' },
+      { ...body, timestamp: '2026-11-26T01:05:00.000Z' },
+    ]);
+    const skills = state.items.filter((i) => i.id === 'u1');
+    expect(skills).toHaveLength(1);
+    expect(skills[0]?.kind).toBe('skillContext');
+    expect(skills[0]?.detail).toBe('genshijin:help');
+    expect(skills[0]?.skillLaunchedAt).toBe(Date.parse('2026-11-26T01:02:03.000Z'));
+  });
+
   it('Skillツールの結果の直後でもisSyntheticが無い発言はuserMessageのまま（issue #1968）', () => {
     const state = apply([
       {

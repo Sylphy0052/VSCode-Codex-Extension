@@ -282,6 +282,76 @@ describe('transcriptItems', () => {
     expect(items[0]?.text).toBe('SKILL.mdの内容');
   });
 
+  it('Skillツール経由のplugin skill本文は、sourceToolUseIDの指すSkillツールから名前を取る（Issue #2173）', () => {
+    const skillToolUse = (id: string, skill: string) =>
+      JSON.stringify({
+        type: 'assistant',
+        uuid: `a-${id}`,
+        timestamp: '2026-08-06T20:13:20.000Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id, name: 'Skill', input: { skill } }],
+        },
+      });
+    const skillResult = (id: string, text: string) =>
+      JSON.stringify({
+        type: 'user',
+        uuid: `r-${id}`,
+        timestamp: '2026-08-06T20:13:21.000Z',
+        message: {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: id, content: text, is_error: false }],
+        },
+      });
+    const meta = (source: string) => ({
+      isMeta: true,
+      sourceToolUseID: source,
+      userType: undefined,
+      origin: undefined,
+      timestamp: '2026-08-06T20:13:22.000Z',
+    });
+    const { items } = transcriptItems([
+      skillToolUse('t1', 'genshijin:genshijin-help'),
+      skillResult('t1', 'Launching skill: genshijin:genshijin-help'),
+      userLine('リファレンスカードを表示する。', meta('t1')),
+      // 結果がまだ無ければ呼び出しの見出しから取る
+      skillToolUse('t2', 'claude-dev-bundle:handoff'),
+      userLine('引き継ぎの手順。', meta('t2')),
+      // 指す先が無ければ名前は取れない（従来どおり）
+      userLine('出所不明の本文。', meta('t-missing')),
+    ]);
+    const skills = items.filter((i) => i.kind === 'skillContext');
+    expect(skills.map((i) => i.detail)).toEqual([
+      'genshijin:genshijin-help',
+      'claude-dev-bundle:handoff',
+      '',
+    ]);
+    expect(skills[0]?.skillLaunchedAt).toBe(Date.parse('2026-08-06T20:13:22.000Z'));
+  });
+
+  it('Skillツール経由の本文がBase directory形式でも、名前は名前空間付きのSkillツール側を使う（Issue #2173）', () => {
+    const { items } = transcriptItems([
+      JSON.stringify({
+        type: 'assistant',
+        uuid: 'a1',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'kf:review' } }],
+        },
+      }),
+      userLine(
+        'Base directory for this skill: /home/u/.claude/plugins/kf/skills/review\n\n# review',
+        {
+          isMeta: true,
+          sourceToolUseID: 't1',
+          userType: undefined,
+          origin: undefined,
+        },
+      ),
+    ]);
+    expect(items.find((i) => i.kind === 'skillContext')?.detail).toBe('kf:review');
+  });
+
   it('slash command起動でsourceToolUseIDが無くてもskillContextにする（issue #889）', () => {
     const { items } = transcriptItems([
       userLine(

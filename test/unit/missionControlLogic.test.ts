@@ -324,6 +324,19 @@ describe('セッションで使ったskill（Issue #2173）', () => {
     expect(formatSkillTime(new Date(2026, 10, 26, 9, 5).getTime(), now)).toBe('09:05');
     expect(formatSkillTime(new Date(2026, 10, 25, 23, 59).getTime(), now)).toBe('11/25 23:59');
   });
+
+  it('名前の空な要素はカードに出さず、0以下や表せない時刻は空文字にする', () => {
+    expect(
+      recentSkillNames([
+        { name: 'a', at: 1 },
+        { name: '', at: 2 },
+      ]),
+    ).toEqual(['a']);
+    const now = new Date(2026, 10, 26, 15, 0).getTime();
+    expect(formatSkillTime(0, now)).toBe('');
+    expect(formatSkillTime(Number.NaN, now)).toBe('');
+    expect(formatSkillTime(9e15, now)).toBe('');
+  });
 });
 
 describe('キー操作', () => {

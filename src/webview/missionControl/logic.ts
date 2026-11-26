@@ -215,7 +215,9 @@ export function recentSkillNames(
   skills: readonly McSkillUse[] | undefined,
   count: number = CARD_SKILL_COUNT,
 ): string[] {
+  // 拡張側で確かめ済みだが、名前の無い要素はカードに空欄を出すので念のため落とす
   return (skills ?? [])
+    .filter((skill) => typeof skill.name === 'string' && skill.name !== '')
     .slice(-count)
     .map((skill) => skill.name)
     .reverse();
@@ -223,10 +225,13 @@ export function recentSkillNames(
 
 /**
  * skillを起動した時刻を短く出す（Issue #2173）。`now`と同じ日なら`HH:MM`、違えば`M/D HH:MM`。
- * 時刻はwebviewの地方時で出す。
+ * 時刻はwebviewの地方時で出す。0以下や`Date`で表せない時刻は空文字にする（1970年や`NaN`を出さない）。
  */
 export function formatSkillTime(at: number, now: number): string {
   const time = new Date(at);
+  if (!(at > 0) || !Number.isFinite(time.getTime())) {
+    return '';
+  }
   const today = new Date(now);
   const hh = String(time.getHours()).padStart(2, '0');
   const mm = String(time.getMinutes()).padStart(2, '0');

@@ -117,15 +117,29 @@ export const MAX_SHARED_SKILL_NAME_CHARS = 80;
 const MAX_DATE_MS = 8.64e15;
 
 /**
+ * 起動時刻として受ける未来側の余裕（ms）。書き手と読み手は同じ機械だが、時刻の丸めや
+ * 書き込みの間に時計が進む分を見込む。
+ */
+const MAX_SHARED_SKILL_FUTURE_MS = 60_000;
+
+/**
  * 共有ファイルの`skills`を信用せずに読む（Issue #2173）。形の合わない要素だけを落とし、
  * 名前は1行へ畳んで長さを切り、新しい方から`MAX_SHARED_SKILLS`件に絞る。
+ * 時刻が0以下（1970年として出てしまう）や`now`より先のものも落とす。
+ * 新しい方から見て上限に達したら止め、配列が長くても全要素を無害化しない。
  */
-export function parseSharedSkills(value: unknown): SharedSkillUse[] | undefined {
+export function parseSharedSkills(
+  value: unknown,
+  now: number = Date.now(),
+): SharedSkillUse[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
   }
+  const maxAt = Math.min(now + MAX_SHARED_SKILL_FUTURE_MS, MAX_DATE_MS);
   const skills: SharedSkillUse[] = [];
-  for (const raw of value as unknown[]) {
+  const entries = value as unknown[];
+  for (let i = entries.length - 1; i >= 0 && skills.length < MAX_SHARED_SKILLS; i--) {
+    const raw = entries[i];
     if (typeof raw !== 'object' || raw === null) {
       continue;
     }
@@ -138,11 +152,11 @@ export function parseSharedSkills(value: unknown): SharedSkillUse[] | undefined 
         : '';
     const at = nonNegativeNumber(entry['at']);
     // Dateで表せない時刻は表示で`NaN`になるので落とす
-    if (name !== '' && at !== undefined && at <= MAX_DATE_MS) {
+    if (name !== '' && at !== undefined && at > 0 && at <= maxAt) {
       skills.push({ name, at });
     }
   }
-  return skills.length === 0 ? undefined : skills.slice(-MAX_SHARED_SKILLS);
+  return skills.length === 0 ? undefined : skills.reverse();
 }
 
 /**

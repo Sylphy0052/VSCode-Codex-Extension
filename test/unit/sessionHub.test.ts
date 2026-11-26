@@ -25,6 +25,7 @@ import {
   isSharedApprovalDecision,
   isSharedHandoffDecision,
   MAX_SHARED_PURPOSE_CHARS,
+  parseSharedSkills,
   SessionHubReader,
   SessionHubRequestPort,
   SessionHubRequestWatcher,
@@ -196,6 +197,36 @@ describe('補助関数', () => {
     expect(uses).toHaveLength(MAX_SHARED_SKILLS);
     expect(uses[0]?.name).toBe('s5');
     expect(uses.at(-1)?.name).toBe(`s${String(MAX_SHARED_SKILLS + 4)}`);
+  });
+
+  it('parseSharedSkillsは時刻が0以下や未来のものを落とす（Issue #2173）', () => {
+    const now = Date.parse('2026-11-26T12:00:00.000Z');
+    expect(
+      parseSharedSkills(
+        [
+          { name: 'zero', at: 0 },
+          { name: 'past', at: now - 1_000 },
+          { name: 'soon', at: now + 30_000 },
+          { name: 'future', at: now + 3_600_000 },
+        ],
+        now,
+      ),
+    ).toEqual([
+      { name: 'past', at: now - 1_000 },
+      { name: 'soon', at: now + 30_000 },
+    ]);
+  });
+
+  it('parseSharedSkillsは新しい方から有効な要素をMAX_SHARED_SKILLS件集めて止める（Issue #2173）', () => {
+    const valid = Array.from({ length: MAX_SHARED_SKILLS + 10 }, (_, i) => ({
+      name: `s${String(i)}`,
+      at: i + 1,
+    }));
+    // 末尾の壊れた要素は数えず、その手前から上限まで集める
+    const skills = parseSharedSkills([...valid, 'junk', { name: 1, at: 2 }], 1_000) ?? [];
+    expect(skills).toHaveLength(MAX_SHARED_SKILLS);
+    expect(skills[0]?.name).toBe('s10');
+    expect(skills.at(-1)?.name).toBe(`s${String(MAX_SHARED_SKILLS + 9)}`);
   });
 });
 

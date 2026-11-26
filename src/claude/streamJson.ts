@@ -358,10 +358,19 @@ function applyUser(received: ChatState, event: Record<string, unknown>): ChatSta
     .map((part) => str(part['text']))
     .join('');
   const images = readClaudeResultImages(content, '送った画像');
-  const launchedSkill = event['isSynthetic'] === true ? launchedSkillName(items) : '';
-  const isSkillContext = isSkillContextEntry(event, text) || launchedSkill !== '';
+  const id = str(event['uuid']) || `user-${items.length}`;
+  // 同じ本文が同じuuidで届き直したら、最初に決めた種類と名前を保つ。届き直した本文は
+  // 受け取り済みの本文として数えられ、`launchedSkillName` が空や別の名前を返すため
+  const delivered = items.find((i) => i.id === id && i.kind === 'skillContext');
+  const launchedSkill =
+    delivered !== undefined
+      ? delivered.detail
+      : event['isSynthetic'] === true
+        ? launchedSkillName(items)
+        : '';
+  const isSkillContext =
+    delivered !== undefined || isSkillContextEntry(event, text) || launchedSkill !== '';
   if (text !== '' || images.length > 0) {
-    const id = str(event['uuid']) || `user-${items.length}`;
     items = upsert(items, {
       ...(isSkillContext ? { skillLaunchedAt: skillLaunchTime(items, id, event) } : {}),
       id,
