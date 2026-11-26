@@ -18,6 +18,7 @@
 - PR作成後は自己レビュー必須。指摘があれば自分で修正してから次へ進む
 - CIのworkflow（`CI`、`checks` / `external-cli`）は2026-11-20から無効にしてある。CIの結果は確かめず、完了も待たない。CIを有効に戻すかどうかも尋ねない。他者レビューも不要で、下の「自己mergeの条件」を満たせば自己マージしてよい
 - 自己mergeの条件（CIの代わり）: 自己レビュー・修正が済み、手元で `npm run format:check`・`npm run typecheck`・`npm run lint`・変更に関わるテストが通っていること。自己レビューの指摘は`low`まで同じPRで直し、`critical`/`high`/`medium`が1件でも残っている間はmergeしない。直さずに残してよい例外（ユーザー本人が発話で許容した`low`、差分の外に前からある`[既存]`の指摘）と、その例外でもmergeを止める場合は、本人の個人規約 `~/.claude/docs/rules-details/development-workflow.md` の「レビューと自己マージ」に従う
+- 自己mergeの手順と制約
   - ブランチ保護は承認数0で自己merge可能な設定になっている（詳細: `docs/repository-hygiene.md`）
   - `gh pr merge` が `mergeStateStatus: BLOCKED` を返す場合は `--admin` を付けてstatus check待ちを迂回する
   - squash mergeはこのリポジトリで禁止されている（2026-08-24〜）。`--merge` か `--rebase` を使う
