@@ -1976,6 +1976,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         return (await imageGenerationConsent) ? undefined : '利用者が画像生成を許可しませんでした';
       },
       logWarn: (message) => log.warn(message),
+      logInfo: (message) => log.info(message),
     });
     imageGenerationHost
       .then((host) => {

@@ -1495,6 +1495,49 @@ describe('TaskStageRunner 引き継ぎ', () => {
     expect(await reportDone(t)).toMatchObject({ isError: false });
   });
 
+  describe('前の世代のセッションを工程の終わりに閉じる（Issue #2183）', () => {
+    it('報告で工程が終わると、今のセッションと一緒に前の世代もすべて閉じる', async () => {
+      const t = await started();
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(await delegateOf(t, 1)(HANDOFF)).toBe(true);
+      expect(t.sessions).toHaveLength(3);
+      // 閉じた前の世代が終了を通知しても、後片付けをやり直さない
+      t.session(0).dispose.mockImplementation(() => t.session(0).emitFinished('manual'));
+      expect(await reportDone(t)).toMatchObject({ isError: false });
+      t.session(2).emitState(false);
+      await flush();
+      expect(t.session(2).dispose).toHaveBeenCalledTimes(1);
+      expect(t.session(0).dispose).toHaveBeenCalledTimes(1);
+      expect(t.session(1).dispose).toHaveBeenCalledTimes(1);
+      await flush();
+      expect(t.session(2).dispose).toHaveBeenCalledTimes(1);
+      expect(t.task().stages.issuePlan.status).toBe('done');
+    });
+
+    it('工程を止めたら前の世代は閉じ、今のタブは残す', async () => {
+      const t = await started();
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(await t.runner.stopStage('run-1', 'T1')).toBe(true);
+      expect(t.session(0).dispose).toHaveBeenCalledTimes(1);
+      expect(t.session(1).dispose).not.toHaveBeenCalled();
+    });
+
+    it('拡張機能の終了でも前の世代を閉じ、1件が失敗しても残りの後片付けを続ける', async () => {
+      const t = await started();
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(await delegateOf(t, 1)(HANDOFF)).toBe(true);
+      t.session(0).dispose.mockImplementation(() => {
+        throw new Error('閉じられない');
+      });
+      t.runner.dispose();
+      expect(t.session(1).dispose).toHaveBeenCalledTimes(1);
+      expect(t.session(2).dispose).toHaveBeenCalledTimes(1);
+      expect(t.warnings.some((w) => w.includes('前の世代のセッションを閉じられませんでした'))).toBe(
+        true,
+      );
+    });
+  });
+
   describe('前の世代のプロセスを止める', () => {
     const haltOn =
       (halt: FakeSession['haltProcess']) =>

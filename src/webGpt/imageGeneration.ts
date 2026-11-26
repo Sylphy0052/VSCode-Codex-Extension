@@ -29,6 +29,8 @@ const COMPLETE_STABLE_POLLS = 3;
 /**
  * 画像がまだ1枚も無いまま完了と見えたときに待つ回数。ChatGPT側の描画が遅れて画像が
  * 後から出る場合に、「画像なし」と早まって報告しないようにする（Issue #1903）。
+ * 8回×2秒の約16秒は、実画面での遅れの計測が無いため据え置いている（Issue #1998）。
+ * 短くするなら、完了表示から画像出現までの遅れを実画面で複数回測ってからにする。
  */
 const COMPLETE_WITHOUT_IMAGE_POLLS = 8;
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
@@ -70,6 +72,8 @@ export interface GenerateImageDeps {
   /** 呼び出し元が待つのをやめたら中断し、タブを閉じる。 */
   signal?: AbortSignal;
   logWarn?: (message: string) => void;
+  /** 完了表示から画像が出るまでの遅れの記録など、通常の情報ログ（Issue #1998）。 */
+  logInfo?: ((message: string) => void) | undefined;
 }
 
 class GenerationError extends Error {}
@@ -198,6 +202,12 @@ async function runInTab(
   try {
     const answer = await waitForAnswer(evaluate, sleep);
     conversationUrl = answer.conversationUrl;
+    // 記録の失敗で、送信済みの生成を失敗扱いにしない
+    try {
+      deps.logInfo?.(formatImageTimingLog(answer.timing));
+    } catch {
+      // ログは補助なので握りつぶす
+    }
     if (
       request.conversationUrl !== undefined &&
       answer.conversationUrl !== request.conversationUrl
@@ -313,12 +323,46 @@ interface Answer {
   conversationUrl: string;
   images: string[];
   text: string;
+  /** 完了表示を初めて検知してから確定までの経過ミリ秒とポーリング回数、画像が初めて見えた時点の経過（画像なしならundefined）。 */
+  timing: ImageTiming;
+}
+
+export interface ImageTiming {
+  /** 完了表示を初めて検知してからの経過ミリ秒（確定時点）。 */
+  elapsedMs: number;
+  /** 完了表示を初めて検知してからのポーリング回数（確定時点）。 */
+  polls: number;
+  /** 画像が初めて見えるまでの経過ミリ秒。画像なしで確定したらundefined。 */
+  imageAfterMs: number | undefined;
+  /** 画像が初めて見えるまでのポーリング回数。画像なしで確定したらundefined。 */
+  imageAfterPolls: number | undefined;
+  imageCount: number;
+  /** 画像なしで確定したときの回答の文字数（本文は記録しない）。質問返しかの手がかり。 */
+  answerLength: number;
+}
+
+/**
+ * 完了表示から画像が出るまでの遅れを、1行の固定形式にする（Issue #1998）。
+ * プロンプトや回答の本文は含めない。集計例: grep '\[webgpt-image\] timing' | grep -o 'result=[a-z]*'
+ */
+export function formatImageTimingLog(timing: ImageTiming): string {
+  const result = timing.imageCount > 0 ? 'image' : 'no-image';
+  const field = (value: number | undefined): string => (value === undefined ? '-' : String(value));
+  return (
+    `[webgpt-image] timing result=${result} imageAfterMs=${field(timing.imageAfterMs)} ` +
+    `imageAfterPolls=${field(timing.imageAfterPolls)} settledMs=${timing.elapsedMs} ` +
+    `settledPolls=${timing.polls} images=${timing.imageCount} answerChars=${timing.answerLength}`
+  );
 }
 
 async function waitForAnswer(evaluate: Evaluate, sleep: Sleep): Promise<Answer> {
   const deadline = Date.now() + GENERATION_WAIT_LIMIT_MS;
   let stable = 0;
   let previousImages = '';
+  let firstDoneAt: number | undefined;
+  let donePolls = 0;
+  let imageAfterMs: number | undefined;
+  let imageAfterPolls: number | undefined;
   for (;;) {
     await sleep(POLL_INTERVAL_MS);
     const status = asRecord(await evaluate(answerStatusScript()));
@@ -335,12 +379,29 @@ async function waitForAnswer(evaluate: Evaluate, sleep: Sleep): Promise<Answer> 
     const imagesKey = images.join('\n');
     stable = done && imagesKey === previousImages ? stable + 1 : done ? 1 : 0;
     previousImages = imagesKey;
+    if (done) {
+      firstDoneAt ??= Date.now();
+      donePolls += 1;
+      if (images.length > 0 && imageAfterMs === undefined) {
+        imageAfterMs = Date.now() - firstDoneAt;
+        imageAfterPolls = donePolls;
+      }
+    }
     const required = images.length > 0 ? COMPLETE_STABLE_POLLS : COMPLETE_WITHOUT_IMAGE_POLLS;
     if (stable >= required) {
+      const text = typeof status['text'] === 'string' ? status['text'] : '';
       return {
         conversationUrl: `https://chatgpt.com${path}`,
         images,
-        text: typeof status['text'] === 'string' ? status['text'] : '',
+        text,
+        timing: {
+          elapsedMs: firstDoneAt === undefined ? 0 : Date.now() - firstDoneAt,
+          polls: donePolls,
+          imageAfterMs,
+          imageAfterPolls,
+          imageCount: images.length,
+          answerLength: text.length,
+        },
       };
     }
     if (Date.now() > deadline) {
