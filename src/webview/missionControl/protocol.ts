@@ -219,6 +219,38 @@ export interface McUsage {
   claude?: McUsageSource | undefined;
 }
 
+/** 利用枠の推移の1点（Issue #2176）。 */
+export interface McUsageHistoryPoint {
+  /** 使用率を計測した時刻（ms）。 */
+  at: number;
+  /** 使用率（%）。 */
+  usedPercent: number;
+}
+
+/** 利用枠の窓1つ分の推移（Issue #2176）。 */
+export interface McUsageHistorySeries {
+  provider: McProvider;
+  /** 窓の表示名。外部由来なので拡張ホストで1行にしてある。 */
+  label: string;
+  /** 窓の長さ（ms）。分からなければ無い。 */
+  windowMs?: number | undefined;
+  /** リセットごとに区切った推移。区切りの中も外も古い順。 */
+  segments: McUsageHistoryPoint[][];
+  /** 日別の使用量（窓の上限に対する%）。`McUsageHistory.days`と同じ並び。 */
+  daily: number[];
+}
+
+/** 作業履歴から組んだ利用枠の推移（Issue #2176）。 */
+export interface McUsageHistory {
+  /** 期間の始まり（ms。`days`の先頭の日の0時）。 */
+  since: number;
+  /** 期間の終わり（ms。組んだ時刻）。 */
+  until: number;
+  /** 期間の日（`YYYY-MM-DD`、拡張ホストの地方時）。古い順。 */
+  days: string[];
+  series: McUsageHistorySeries[];
+}
+
 /** MCから変えられる設定（Issue #2162）。キーは`agent.`を除いた設定名。 */
 export type McBooleanPrefKey =
   | 'notifications.approvalPending'
@@ -630,6 +662,8 @@ export type McHostMessage =
       attachments?: McAttachment[] | undefined;
       /** `pickAttachments`の応答: 画像以外のファイルの絶対パス。本文へ`@パス`で差し込む。 */
       paths?: string[] | undefined;
+      /** `usageHistory`の応答（Issue #2176）。 */
+      usageHistory?: McUsageHistory | undefined;
     }
   | {
       /** 詳細で選択中のセッションの直近のやり取り（ライブtail。Issue #2137の3）。 */
@@ -807,4 +841,6 @@ export type McWebviewMessage =
   /** 絞り込みに名前を付けて保存する。同じ名前があれば上書きする。 */
   | { type: 'saveFilter'; seq: number; name: string; filter: McFilterSpec }
   /** 保存した絞り込みを消す。 */
-  | { type: 'deleteFilter'; seq: number; name: string };
+  | { type: 'deleteFilter'; seq: number; name: string }
+  /** 作業履歴から利用枠の推移を組ませる（Issue #2176）。応答は`reply`の`usageHistory`。 */
+  | { type: 'usageHistory'; seq: number };

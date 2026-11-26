@@ -24,6 +24,7 @@ import type {
   McSnapshot,
   McTarget,
   McTurn,
+  McUsageHistory,
   McWorkUnit,
 } from './protocol';
 
@@ -67,6 +68,8 @@ export interface ReplyResult {
   message?: string | undefined;
   attachments?: McAttachment[] | undefined;
   paths?: string[] | undefined;
+  /** `usageHistory`の応答（Issue #2176）。 */
+  usageHistory?: McUsageHistory | undefined;
 }
 
 /** ライブtailで届いた直近のやり取り。 */
@@ -126,6 +129,8 @@ export interface Bridge {
   /** 絞り込みに名前を付けて保存する（Issue #2162）。 */
   saveFilter(name: string, filter: McFilterSpec): Promise<ReplyResult>;
   deleteFilter(name: string): Promise<ReplyResult>;
+  /** 作業履歴から利用枠の推移を組ませる（Issue #2176）。 */
+  usageHistory(): Promise<ReplyResult>;
   /** ライブtailの対象を伝える。`undefined`で止める。 */
   watch(target: McTarget | undefined): void;
   onLiveTurns(listener: (live: LiveTurns) => void): () => void;
@@ -227,6 +232,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           message: message.message,
           attachments: message.attachments,
           paths: message.paths,
+          usageHistory: message.usageHistory,
         });
       }
       return;
@@ -338,6 +344,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     setPref: (key, value) => call({ type: 'setPref', key, value }),
     saveFilter: (name, filter) => call({ type: 'saveFilter', name, filter }),
     deleteFilter: (name) => call({ type: 'deleteFilter', name }),
+    usageHistory: () => call({ type: 'usageHistory' }),
     watch(target) {
       api.postMessage({
         type: 'watch',
