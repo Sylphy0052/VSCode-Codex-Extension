@@ -49,6 +49,7 @@ vi.mock('node:timers/promises', () => ({
 
 import { CdpClosedError } from '../../src/webGpt/cdp';
 import {
+  formatImageTimingLog,
   generateImage,
   IMAGE_PROMPT_MAX_LENGTH,
   IMAGE_RETENTION_MS,
@@ -473,5 +474,37 @@ describe('pruneOldImages', () => {
     expect((await readdir(outDir)).sort()).toEqual(
       ['20200101-000000-000-2.png', '20991231-000000-000-1.png', 'keep.png'].sort(),
     );
+  });
+});
+
+describe('formatImageTimingLog', () => {
+  it('画像ありを固定形式の1行にする', async () => {
+    expect(
+      formatImageTimingLog({
+        elapsedMs: 6000,
+        polls: 3,
+        imageAfterMs: 2000,
+        imageAfterPolls: 1,
+        imageCount: 1,
+        answerLength: 12,
+      }),
+    ).toBe(
+      '[webgpt-image] timing result=image imageAfterMs=2000 imageAfterPolls=1 settledMs=6000 settledPolls=3 images=1 answerChars=12',
+    );
+  });
+
+  it('画像なしは-で埋め、本文を含めない', async () => {
+    const line = formatImageTimingLog({
+      elapsedMs: 16000,
+      polls: 8,
+      imageAfterMs: undefined,
+      imageAfterPolls: undefined,
+      imageCount: 0,
+      answerLength: 80,
+    });
+    expect(line).toBe(
+      '[webgpt-image] timing result=no-image imageAfterMs=- imageAfterPolls=- settledMs=16000 settledPolls=8 images=0 answerChars=80',
+    );
+    expect(line).not.toContain('\n');
   });
 });
