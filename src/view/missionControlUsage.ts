@@ -40,6 +40,7 @@ function codexSource(snapshot: UsageSnapshot | undefined, now: number): McUsageS
             snapshot.resetsAt,
             snapshot.usedPercent >= 100,
             now,
+            minutesToMs(snapshot.windowMinutes),
           ),
         ]
       : snapshot.windows.map((w) =>
@@ -49,6 +50,7 @@ function codexSource(snapshot: UsageSnapshot | undefined, now: number): McUsageS
             w.resetsAt,
             w.usedPercent >= 100,
             now,
+            minutesToMs(w.windowMinutes),
           ),
         );
   const source: McUsageSource = { windows };
@@ -69,11 +71,44 @@ function claudeSource(
 ): McUsageSource | undefined {
   const windows = entries
     .filter((e) => e.usedPercent !== undefined || e.resetsAt !== undefined || e.limited === true)
-    .map((e) => toWindow(e.label ?? '制限', e.usedPercent, e.resetsAt, e.limited === true, now));
+    .map((e) =>
+      toWindow(
+        e.label ?? '制限',
+        e.usedPercent,
+        e.resetsAt,
+        e.limited === true,
+        now,
+        claudeWindowMs(e.label),
+      ),
+    );
   if (windows.length === 0) {
     return undefined;
   }
   return receivedAt === undefined ? { windows } : { windows, capturedAt: receivedAt };
+}
+
+/**
+ * Claudeの枠の長さ（Issue #2174）。`ClaudeLimitEntry`は長さを持たないので、表示名から決まる
+ * ものだけを返す。表示名は`rate_limit_event`の種別を訳したもの（`streamJson.ts`の
+ * `limitLabelOf`）。`/usage`の「セッション」は5時間枠と同じかがCLIから分からない
+ * （`mergeClaudeUsage`）ので長さを決めず、見込みを出さない。
+ */
+const CLAUDE_WINDOW_MINUTES: Readonly<Record<string, number>> = {
+  '5時間': 5 * 60,
+  週次: 7 * 24 * 60,
+};
+
+function claudeWindowMs(label: string | undefined): number | undefined {
+  if (label === undefined || !Object.hasOwn(CLAUDE_WINDOW_MINUTES, label)) {
+    return undefined;
+  }
+  return minutesToMs(CLAUDE_WINDOW_MINUTES[label]);
+}
+
+function minutesToMs(minutes: number | undefined): number | undefined {
+  return minutes !== undefined && Number.isFinite(minutes) && minutes > 0
+    ? minutes * 60_000
+    : undefined;
 }
 
 /** `resetsAtSeconds`はepoch秒（Codex・Claudeとも同じ単位）。 */
@@ -83,6 +118,7 @@ function toWindow(
   resetsAtSeconds: number | undefined,
   limited: boolean,
   now: number,
+  windowMs: number | undefined,
 ): McUsageWindow {
   const resetsAt =
     resetsAtSeconds !== undefined && Number.isFinite(resetsAtSeconds)
@@ -101,6 +137,9 @@ function toWindow(
   }
   if (resetsAt !== undefined) {
     window.resetsAt = resetsAt;
+  }
+  if (windowMs !== undefined) {
+    window.windowMs = windowMs;
   }
   return window;
 }

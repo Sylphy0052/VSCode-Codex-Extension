@@ -188,6 +188,11 @@ export interface McUsageWindow {
   usedPercent?: number | undefined;
   /** リセット時刻（ms）。分からなければ無い。 */
   resetsAt?: number | undefined;
+  /**
+   * 窓の長さ（ms。Issue #2174）。現ペースでの到達見込みに使う。長さが決まらない窓
+   * （Claudeの「セッション」など）と、古い版の拡張ホストでは無い。
+   */
+  windowMs?: number | undefined;
   /** 上限に達しているか。 */
   limited: boolean;
   /** リセット時刻を過ぎていて、使用率がもう今の値ではない。 */

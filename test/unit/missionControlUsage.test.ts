@@ -43,7 +43,14 @@ describe('buildMcUsage', () => {
     );
     expect(usage.codex).toEqual({
       windows: [
-        { label: '週次', usedPercent: 40, resetsAt: NOW + 3_600_000, limited: false, stale: false },
+        {
+          label: '週次',
+          usedPercent: 40,
+          resetsAt: NOW + 3_600_000,
+          windowMs: 10080 * 60_000,
+          limited: false,
+          stale: false,
+        },
       ],
       capturedAt: NOW - 60_000,
       plan: 'pro X',
@@ -83,6 +90,8 @@ describe('buildMcUsage', () => {
       [false, false, 20],
     ]);
     expect(usage.codex?.windows[1]?.label).toBe('週次');
+    // 窓ごとの長さを見込みのために渡す（Issue #2174）
+    expect(usage.codex?.windows.map((w) => w.windowMs)).toEqual([300 * 60_000, 10080 * 60_000]);
   });
 
   it('Claudeは値のある枠だけを出し、受け取った時刻を付け、上限は解除の通知まで残す', () => {
@@ -101,12 +110,43 @@ describe('buildMcUsage', () => {
     );
     expect(usage.claude).toEqual({
       windows: [
-        { label: '5時間', usedPercent: 70, resetsAt: NOW + 60_000, limited: false, stale: false },
+        {
+          label: '5時間',
+          usedPercent: 70,
+          resetsAt: NOW + 60_000,
+          windowMs: 5 * 3_600_000,
+          limited: false,
+          stale: false,
+        },
         { label: '週次 偽', resetsAt: NOW - 1000, limited: true, stale: true },
         { label: 'x', limited: true, stale: false },
       ],
       capturedAt: NOW - 5000,
     });
+  });
+
+  it('Claudeは表示名から長さが決まる枠（5時間・週次）だけに窓の長さを付ける', () => {
+    const usage = buildMcUsage(
+      {
+        codex: undefined,
+        claude: [
+          { label: '5時間', usedPercent: 10, resetsAt: NOW_SEC + 60, limited: undefined },
+          { label: '週次', usedPercent: 20, resetsAt: NOW_SEC + 60, limited: undefined },
+          { label: 'セッション', usedPercent: 30, resetsAt: NOW_SEC + 60, limited: undefined },
+          { label: 'toString', usedPercent: 40, resetsAt: NOW_SEC + 60, limited: undefined },
+          { label: undefined, usedPercent: 50, resetsAt: NOW_SEC + 60, limited: undefined },
+        ],
+        claudeReceivedAt: undefined,
+      },
+      NOW,
+    );
+    expect(usage.claude?.windows.map((w) => [w.label, w.windowMs])).toEqual([
+      ['5時間', 5 * 3_600_000],
+      ['週次', 7 * 24 * 3_600_000],
+      ['セッション', undefined],
+      ['toString', undefined],
+      ['制限', undefined],
+    ]);
   });
 
   it('Claudeに値のある枠が無ければ返さない', () => {
