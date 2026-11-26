@@ -94,6 +94,7 @@ import {
   type EndReviewVerdict,
   type TaskRunEndReviewConfig,
 } from './taskRunEndReview';
+import { assessStagnation, formatStagnationLine } from './taskRunStagnation';
 import type { AnswererVerdict } from '../reflex/answererJudge';
 import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 
@@ -669,7 +670,9 @@ export class TaskRunOrchestrator {
     }
     const now = this.deps.now?.() ?? new Date();
     try {
-      await this.deps.controller.updateRun(run.runId, (r) => markEndReviewSent(r, finishedAt, now));
+      await this.deps.controller.updateRun(run.runId, (r) =>
+        markEndReviewSent(r, finishedAt, now, verdict),
+      );
     } catch (e: unknown) {
       // 記録できなければ再計画は受け付けない（今までどおり終わったまま）。レビューは届いている
       this.deps.log(
@@ -1685,15 +1688,22 @@ export function formatRecommendation(
   return `推奨: model=${recommendation.model} effort=${effort}${reasons === '' ? '' : `（${reasons}）`}`;
 }
 
-/** 停滞を疑うmerge数。目的を持つrunで、これだけmergeするごとに方式の見直しを促す。 */
-const STAGNATION_MERGE_INTERVAL = 3;
-
 /**
  * mergeのたびにOrchestratorへ送る見直しの促し（Issue #2088）。目的と完了条件があれば添え、
- * 完了条件を満たしていれば終了の提案、停滞していれば方式の見直しを求める。
+ * 完了条件を満たしていれば終了の提案を求める。
  * そのタスクのreviewの結果とrun全体の集計（Issue #2192）を添え、見直しの材料にする。
+ * 停滞の信号（Issue #2195）が立っていれば、goalの有無によらず根拠の数値付きで方式の見直しを求める。
  */
 export function mergeReviewBody(run: TaskRun, task: OrchestratedTask, label: string): string {
+  const lines = mergeReviewGuidanceLines(run, task, label);
+  const stagnation = formatStagnationLine(assessStagnation(run));
+  if (stagnation !== undefined) {
+    lines.push(stagnation);
+  }
+  return lines.join('\n');
+}
+
+function mergeReviewGuidanceLines(run: TaskRun, task: OrchestratedTask, label: string): string[] {
   const lines = [`${label}がmergeされました。`, ...mergeReviewResultLines(run, task)];
   // 目的の文は保存前に均してあるが、外部由来なので囲う（Issue #2193）。以前の版の固定文は目的なしと読む
   const goal = readTaskRunGoal(run);
@@ -1701,7 +1711,7 @@ export function mergeReviewBody(run: TaskRun, task: OrchestratedTask, label: str
     lines.push(
       '残りのタスクが上の集計に照らして最善か見直し、変えるなら propose_plan を出し直してください。',
     );
-    return lines.join('\n');
+    return lines;
   }
   lines.push(
     formatUntrusted(formatGoalLines(goal, EVENT_TEXT_MAX_LENGTH).join('\n'), {
@@ -1716,21 +1726,13 @@ export function mergeReviewBody(run: TaskRun, task: OrchestratedTask, label: str
     lines.push(
       '完了条件がありません。残りのタスクが目的に対して最善か見直し、変えるなら propose_plan を出し直してください。観測できる完了条件が分かればset_goalで置いてください。',
     );
-    return lines.join('\n');
+    return lines;
   }
   lines.push(
     '完了条件を満たしたか確かめ、満たしていれば残りのタスクがあっても終了を提案してください。',
     '満たしていなければ、残りのタスクが目的に対して最善か見直し、変えるなら propose_plan を出し直してください。',
   );
-  const merged = Object.values(run.tasks).filter(
-    (t) => t.stages.mergeCleanup.status === 'done' && t.closedWithoutMerge === undefined,
-  ).length;
-  if (merged > 0 && merged % STAGNATION_MERGE_INTERVAL === 0) {
-    lines.push(
-      `直近${String(STAGNATION_MERGE_INTERVAL)}件のmergeで完了条件に近づいていないなら、停滞です。方式そのものを見直してください。`,
-    );
-  }
-  return lines.join('\n');
+  return lines;
 }
 
 /** merge時の促しに載せる未実測の場面の文の長さの上限。 */
