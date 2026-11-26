@@ -1,4 +1,4 @@
-import { formatCost, formatElapsed, formatTokens, type McFilter } from './logic';
+import { formatCost, formatElapsed, formatSkillTime, formatTokens, type McFilter } from './logic';
 import type {
   McFilterSpec,
   McRunTask,
@@ -74,6 +74,76 @@ export function formatUsageWindow(window: McUsageWindow, now: number): string {
     bits.push(`・あと${formatElapsed(window.resetsAt - now)}`);
   }
   return bits.join(' ');
+}
+
+/**
+ * 窓の経過割合がこれより小さいうちは見込みを出さない（Issue #2174）。窓の始めは使用率の
+ * 1%の差が見込みを何倍にも振るため。5時間窓なら15分、週次なら約8時間。
+ */
+const MIN_ELAPSED_FRACTION = 0.05;
+
+/** 現ペースでの到達見込み（Issue #2174）。 */
+export interface McUsageProjection {
+  /** このペースのままリセット時刻を迎えたときの使用率（%）。 */
+  atResetPercent: number;
+  /** 100%に届く見込みの時刻（ms）。リセットまでに届かない見込みなら無い。 */
+  reachAt?: number | undefined;
+}
+
+/**
+ * 使用率 ÷ 窓の経過割合 で、リセット時点の使用率と、100%に届く時刻を見込む（Issue #2174）。
+ * 窓の始まりは`resetsAt - windowMs`とする。経過割合は使用率を計測した時刻（`sampledAt`。
+ * 無ければ`now`）で測る。`now`で測ると、新しい計測が無いまま時間が進むだけでペースが
+ * 下がって見える。`now`はリセット済みかの判定と残り時間にだけ使う。
+ * 長さ・リセット時刻・使用率のどれかが分からない窓、リセット済みの窓、上限に達した窓
+ * （`limited`か使用率100%以上。もう見込む先が無い）、計測時点の経過が短すぎる窓には出さない。
+ */
+export function projectUsage(window: McUsageWindow, now: number): McUsageProjection | undefined {
+  const { usedPercent, resetsAt, windowMs } = window;
+  if (
+    usedPercent === undefined ||
+    resetsAt === undefined ||
+    windowMs === undefined ||
+    !(windowMs > 0) ||
+    window.limited ||
+    // 到達の通知（Claudeは`rate_limit_event`）より先に使用率が100%に届くことがある
+    usedPercent >= 100 ||
+    isWindowStale(window, now)
+  ) {
+    return undefined;
+  }
+  const start = resetsAt - windowMs;
+  // 時計のずれで計測時刻が未来に見えても、今より先の時点では測らない
+  const sampledAt = Math.min(window.sampledAt ?? now, now);
+  const elapsed = sampledAt - start;
+  const fraction = elapsed / windowMs;
+  if (!Number.isFinite(fraction) || fraction < MIN_ELAPSED_FRACTION || fraction > 1) {
+    return undefined;
+  }
+  const atResetPercent = usedPercent / fraction;
+  const projection: McUsageProjection = { atResetPercent };
+  if (usedPercent > 0 && atResetPercent >= 100) {
+    // 窓の始まりから同じペースで100%まで進む時刻。リセットより後にはならない（上の条件）。
+    // 計測が古いと今より前になりうる（見込みではもう届いている）
+    projection.reachAt = start + (elapsed * 100) / usedPercent;
+  }
+  return projection;
+}
+
+/** 窓1つの見込みの表示（詳細パネル用）。見込みが出せなければ空文字。 */
+export function formatUsageProjection(window: McUsageWindow, now: number): string {
+  const projection = projectUsage(window, now);
+  if (projection === undefined) {
+    return '';
+  }
+  const percent = `見込み リセット時${String(Math.round(projection.atResetPercent))}%`;
+  if (projection.reachAt === undefined) {
+    return percent;
+  }
+  const at = formatSkillTime(projection.reachAt, now);
+  return projection.reachAt <= now
+    ? `${percent}・100%到達 ${at}（見込みの時刻を過ぎた）`
+    : `${percent}・100%到達 ${at}（あと${formatElapsed(projection.reachAt - now)}）`;
 }
 
 /** 取得元1つの要約（ヘッダ用）。最も逼迫した窓だけを出す。 */

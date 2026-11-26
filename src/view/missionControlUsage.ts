@@ -1,3 +1,4 @@
+import type { ProbedSlots } from '../claude/usageProbe';
 import type { ClaudeLimitEntry } from '../claude/usageText';
 import { formatWindow, formatWindowLabel, type UsageSnapshot } from '../codex/usage';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
@@ -20,7 +21,7 @@ export function buildMcUsage(state: UsageState, now: number): McUsage {
   if (codex !== undefined) {
     usage.codex = codex;
   }
-  const claude = claudeSource(state.claude, state.claudeReceivedAt, now);
+  const claude = claudeSource(state, now);
   if (claude !== undefined) {
     usage.claude = claude;
   }
@@ -40,6 +41,7 @@ function codexSource(snapshot: UsageSnapshot | undefined, now: number): McUsageS
             snapshot.resetsAt,
             snapshot.usedPercent >= 100,
             now,
+            minutesToMs(snapshot.windowMinutes),
           ),
         ]
       : snapshot.windows.map((w) =>
@@ -49,10 +51,12 @@ function codexSource(snapshot: UsageSnapshot | undefined, now: number): McUsageS
             w.resetsAt,
             w.usedPercent >= 100,
             now,
+            minutesToMs(w.windowMinutes),
           ),
         );
-  const source: McUsageSource = { windows };
   const capturedAt = parseTime(snapshot.capturedAt);
+  // 使用率はAPI応答の時刻のもの。見込みのペースはこの時点で測る（Issue #2174）
+  const source: McUsageSource = { windows: windows.map((w) => withSampledAt(w, capturedAt)) };
   if (capturedAt !== undefined) {
     source.capturedAt = capturedAt;
   }
@@ -62,18 +66,124 @@ function codexSource(snapshot: UsageSnapshot | undefined, now: number): McUsageS
   return source;
 }
 
-function claudeSource(
-  entries: readonly ClaudeLimitEntry[],
-  receivedAt: number | undefined,
-  now: number,
-): McUsageSource | undefined {
+function claudeSource(state: UsageState, now: number): McUsageSource | undefined {
+  const { entries, fromSlots } = withProbedSlots(state.claude, state.claudeSlots, now);
+  const slotsUsed = fromSlots.size > 0;
   const windows = entries
     .filter((e) => e.usedPercent !== undefined || e.resetsAt !== undefined || e.limited === true)
-    .map((e) => toWindow(e.label ?? '制限', e.usedPercent, e.resetsAt, e.limited === true, now));
+    .map((e) =>
+      withSampledAt(
+        toWindow(
+          e.label ?? '制限',
+          e.usedPercent,
+          e.resetsAt,
+          e.limited === true,
+          now,
+          claudeWindowMs(e.label),
+        ),
+        // `/usage`から重ねた枠だけ計測時刻が分かる（Issue #2174）
+        fromSlots.has(e) ? state.claudeSlots?.readAt : undefined,
+      ),
+    );
   if (windows.length === 0) {
     return undefined;
   }
+  const receivedAt = oldest(
+    state.claudeReceivedAt,
+    slotsUsed ? state.claudeSlots?.readAt : undefined,
+  );
   return receivedAt === undefined ? { windows } : { windows, capturedAt: receivedAt };
+}
+
+/**
+ * `/usage`から読んだ5時間枠と週次（Issue #2174）を、同じ表示名の枠へ重ねる。
+ *
+ * ステータスバーの枠は、`rate_limit_event`由来の「5時間」「週次」がリセット時刻と到達だけを、
+ * `/usage`由来の「セッション」が使用率だけを持ち、見込みに要る組（使用率とリセット時刻）が
+ * 揃わない。`parseUsageSlots`は`Current session`を5時間枠、`Current week (all models)`を
+ * 週次として使用率とリセット時刻を組で読むので、それを使う。到達はステータスバーの枠の値を残す。
+ * 読んだ値のリセット時刻を過ぎていれば、今の窓の値ではないのでステータスバーの枠をそのまま使う。
+ * 「セッション」の枠は従来どおり出す（長さは決めない）。
+ */
+function withProbedSlots(
+  entries: readonly ClaudeLimitEntry[],
+  probed: ProbedSlots | undefined,
+  now: number,
+): { entries: ClaudeLimitEntry[]; fromSlots: ReadonlySet<ClaudeLimitEntry> } {
+  if (probed === undefined) {
+    return { entries: [...entries], fromSlots: new Set() };
+  }
+  const slotEntries: ClaudeLimitEntry[] = [];
+  for (const [label, slot] of [
+    ['5時間', probed.slots.fiveHour],
+    ['週次', probed.slots.weekly],
+  ] as const) {
+    if (slot !== undefined) {
+      slotEntries.push({
+        label,
+        usedPercent: slot.pct,
+        // `UsageSlot.resetsAt`はms。ステータスバーの枠（epoch秒）に揃える
+        resetsAt: slot.resetsAt === undefined ? undefined : slot.resetsAt / 1000,
+        limited: undefined,
+      });
+    }
+  }
+  const fromSlots = new Set<ClaudeLimitEntry>();
+  const merged = entries.map((entry) => {
+    const index = slotEntries.findIndex((s) => s.label === entry.label);
+    if (index < 0) {
+      return entry;
+    }
+    const [slot] = slotEntries.splice(index, 1);
+    if (slot?.resetsAt === undefined || slot.resetsAt * 1000 <= now) {
+      return entry;
+    }
+    const used = { ...slot, limited: entry.limited };
+    fromSlots.add(used);
+    return used;
+  });
+  for (const slot of slotEntries) {
+    fromSlots.add(slot);
+  }
+  return { entries: [...merged, ...slotEntries], fromSlots };
+}
+
+function oldest(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined) {
+    return b;
+  }
+  return b === undefined ? a : Math.min(a, b);
+}
+
+/**
+ * Claudeの枠の長さ（Issue #2174）。`ClaudeLimitEntry`は長さを持たないので、表示名から決まる
+ * ものだけを返す。表示名は`rate_limit_event`の種別を訳したもの（`streamJson.ts`の
+ * `limitLabelOf`）と、`withProbedSlots`が付けるもの。`/usage`の「セッション」の枠は
+ * `parseUsageReport`の表記のままで、長さを決めず見込みを出さない。
+ */
+const CLAUDE_WINDOW_MINUTES: Readonly<Record<string, number>> = {
+  '5時間': 5 * 60,
+  週次: 7 * 24 * 60,
+};
+
+function claudeWindowMs(label: string | undefined): number | undefined {
+  if (label === undefined || !Object.hasOwn(CLAUDE_WINDOW_MINUTES, label)) {
+    return undefined;
+  }
+  return minutesToMs(CLAUDE_WINDOW_MINUTES[label]);
+}
+
+/** 使用率を計測した時刻を付ける（Issue #2174）。分からない・使用率が無い窓には付けない。 */
+function withSampledAt(window: McUsageWindow, sampledAt: number | undefined): McUsageWindow {
+  return sampledAt === undefined || window.usedPercent === undefined
+    ? window
+    : { ...window, sampledAt };
+}
+
+function minutesToMs(minutes: number | undefined): number | undefined {
+  return minutes !== undefined && Number.isFinite(minutes) && minutes > 0
+    ? minutes * 60_000
+    : undefined;
 }
 
 /** `resetsAtSeconds`はepoch秒（Codex・Claudeとも同じ単位）。 */
@@ -83,6 +193,7 @@ function toWindow(
   resetsAtSeconds: number | undefined,
   limited: boolean,
   now: number,
+  windowMs: number | undefined,
 ): McUsageWindow {
   const resetsAt =
     resetsAtSeconds !== undefined && Number.isFinite(resetsAtSeconds)
@@ -101,6 +212,9 @@ function toWindow(
   }
   if (resetsAt !== undefined) {
     window.resetsAt = resetsAt;
+  }
+  if (windowMs !== undefined) {
+    window.windowMs = windowMs;
   }
   return window;
 }

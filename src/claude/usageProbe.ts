@@ -14,7 +14,7 @@ import { killWithEscalation } from '../process/childProcess';
 import type { ChatUsage } from '../appserver/chatState';
 import type { Logger } from '../log';
 import { probeIntervalMs } from './accountPolicy';
-import { parseUsageReport, parseUsageSlots, type UsageSlots } from './usageText';
+import { parseUsageReport, parseUsageSlots, type UsageSlot, type UsageSlots } from './usageText';
 
 /** 応答が返らないまま居座らせない。使用量は無くても困らない情報なので短く切る。 */
 const TIMEOUT_MS = 20_000;
@@ -82,6 +82,14 @@ interface SharedUsageRecord {
   failures: number;
   /** `readAt`の時点の、5時間枠と週次のうち高い方の使用率。次の取得間隔を決める（Issue #1924）。 */
   highestPct?: number;
+  /** 直近に読めた5時間枠と週次（Issue #2174）。取得中の印を書くときも前回の値を残す。 */
+  slots?: ProbedSlots;
+}
+
+/** `/usage`から読んだ5時間枠と週次と、読んだ時刻（ms。Issue #2174）。 */
+export interface ProbedSlots {
+  slots: UsageSlots;
+  readAt: number;
 }
 
 /**
@@ -134,6 +142,11 @@ export class ClaudeUsageProbe {
   private freshRequested = false;
   /** 進行中の取得。終われば解決する（失敗しても拒否しない）。 */
   private inFlight: Promise<void> = Promise.resolve();
+  /**
+   * 進行中の`readOnce`で受け取り先へ渡すもの（Issue #2174）。`undefined`なら渡さない（前の値を
+   * 残す）。`{ probed: undefined }`なら、今の値が無いことを渡す（前の値を消させる）。
+   */
+  private readSlots: { probed: ProbedSlots | undefined } | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -145,6 +158,14 @@ export class ClaudeUsageProbe {
     private readonly sharedDir?: string,
     /** 取得した枠の記録先と自動切り替えの呼び出し先（Issue #1924）。未指定なら記録しない。 */
     private readonly accounts?: UsageProbeAccounts,
+    /**
+     * 5時間枠と週次の使用率・リセット時刻を読めたら呼ぶ（Issue #2174。Mission Controlの見込み用）。
+     * 他のウィンドウの結果を使ったときも呼ぶ。切り替え前のアカウントの値は渡さない。
+     * `undefined`は「今の値が無い」で、受け取り先は持っている値を捨てる。`requestFresh`
+     * （アカウントの切り替えの前後）と、5時間枠と週次の無い共有の結果を使ったとき・自分の取得で
+     * 読めず共有にも残っていなかったときに渡す。
+     */
+    private readonly onSlots?: (probed: ProbedSlots | undefined) => void,
   ) {}
 
   /** 取得した枠を稼働中だったアカウントへ記録し、自動切り替えの判断を呼ぶ。失敗しても取得は成功扱い。 */
@@ -198,6 +219,9 @@ export class ClaudeUsageProbe {
    */
   requestFresh(): void {
     this.freshRequested = true;
+    // 持っている5時間枠と週次は切り替え前のアカウントのものでありうる。取り直しが失敗しても
+    // 切り替え前の値を今の値として出し続けないよう、先に捨てさせる（Issue #2174）
+    this.deliverSlots(undefined);
   }
 
   /**
@@ -237,12 +261,40 @@ export class ClaudeUsageProbe {
     this.running = true;
     // 取得中に切り替えられたら、他のウィンドウの結果を使った場合も含めて切り替え前の
     // アカウントの値なので、画面へは出さない
-    const run = this.readOnce(now).then((usage) => (this.freshRequested ? undefined : usage));
+    this.readSlots = undefined;
+    const run = this.readOnce(now).then((usage) => {
+      if (this.freshRequested) {
+        return undefined;
+      }
+      this.emitSlots();
+      return usage;
+    });
     this.inFlight = run.then(
       () => undefined,
       () => undefined,
     );
     return run;
+  }
+
+  private emitSlots(): void {
+    const result = this.readSlots;
+    this.readSlots = undefined;
+    if (result !== undefined) {
+      this.deliverSlots(result.probed);
+    }
+  }
+
+  private deliverSlots(probed: ProbedSlots | undefined): void {
+    if (this.onSlots === undefined) {
+      return;
+    }
+    try {
+      this.onSlots(probed);
+    } catch (e) {
+      this.log.warn(
+        `使用率の受け渡しで止まりました: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   private async readOnce(now: number): Promise<ChatUsage | undefined> {
@@ -273,9 +325,18 @@ export class ClaudeUsageProbe {
           : now - previous.readAt >= STALE_FAILURES_MS
             ? 0
             : previous.failures;
+      // 前回の5時間枠と週次（Issue #2174）。強制取得はアカウントの切り替え直後に、切り替え前の
+      // 値を使わないために行うので、前回の値を引き継がない（他のウィンドウがadoptすると、
+      // 切り替え前のアカウントの値を今の値として渡してしまう）
+      const carriedSlots = forced ? undefined : previous?.slots;
       // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする。
       // 取得中にadoptした他のウィンドウへ割合が届くよう、前回の値は残す
-      await this.writeShared({ readAt: now, usage: previous?.usage, failures });
+      await this.writeShared({
+        readAt: now,
+        usage: previous?.usage,
+        failures,
+        ...(carriedSlots === undefined ? {} : { slots: carriedSlots }),
+      });
       // 稼働中を読む直前に下ろす。取得中に切り替わって再度求められたら、次の`read`で取り直す
       this.freshRequested = false;
       const startedAccount = await this.accounts?.currentId().catch(() => undefined);
@@ -290,6 +351,14 @@ export class ClaudeUsageProbe {
       }
       const slots = output === undefined ? undefined : parseUsageSlots(output, now);
       const highestPct = slots === undefined ? undefined : highestOf(slots);
+      if (slots !== undefined) {
+        this.readSlots = { probed: { slots, readAt: now } };
+      } else if (previous !== undefined && !forced) {
+        // 読めなければ共有に残っていた値に揃える。他のウィンドウがアカウントを切り替えて強制取得した
+        // 後の記録には5時間枠と週次が無いので、手元の切り替え前の値をここで捨てさせる（Issue #2174）。
+        // 強制取得なら`requestFresh`で捨てさせ済み
+        this.readSlots = { probed: carriedSlots };
+      }
       // 保存値で代わりに記録できても、新しい値は取れていないので失敗として数え、再試行の
       // 間隔を延ばす。CLIは429を約32分覚えて再要求しないため、短い間隔で取り直しても取れない
       const nextFailures = usage === undefined ? failures + 1 : 0;
@@ -299,6 +368,11 @@ export class ClaudeUsageProbe {
         usage,
         failures: nextFailures,
         ...(highestPct === undefined ? {} : { highestPct }),
+        ...(slots !== undefined
+          ? { slots: { slots, readAt: now } }
+          : carriedSlots === undefined
+            ? {}
+            : { slots: carriedSlots }),
       });
       if (slots !== undefined) {
         await this.recordSlots(startedAccount, slots, now);
@@ -328,6 +402,9 @@ export class ClaudeUsageProbe {
   private adopt(record: SharedUsageRecord): ChatUsage | undefined {
     this.failures = record.failures;
     this.nextReadAt = record.readAt + intervalAfter(record.failures, record.highestPct);
+    // 5時間枠と週次の無い記録は、強制取得の途中か失敗（切り替え前の値を引き継がない）、
+    // まだ読めていない、旧版が書いた、のどれか。どれも今の値が無いので、前の値を捨てさせる
+    this.readSlots = { probed: record.slots };
     return record.usage;
   }
 
@@ -555,12 +632,49 @@ function parseSharedUsageRecord(raw: string): SharedUsageRecord | undefined {
       : 0;
   const highestPct =
     typeof v.highestPct === 'number' && Number.isFinite(v.highestPct) ? v.highestPct : undefined;
+  const slots = parseSharedSlots(v.slots);
   return {
     readAt: v.readAt,
     usage: parseSharedUsage(v.usage),
     failures,
     ...(highestPct === undefined ? {} : { highestPct }),
+    ...(slots === undefined ? {} : { slots }),
   };
+}
+
+/** 共有ファイルの5時間枠と週次（Issue #2174）。旧版は書かない。形の違う枠は捨てる。 */
+function parseSharedSlots(value: unknown): ProbedSlots | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.readAt !== 'number' || !Number.isFinite(v.readAt)) {
+    return undefined;
+  }
+  const raw = v.slots;
+  if (typeof raw !== 'object' || raw === null) {
+    return undefined;
+  }
+  const r = raw as Record<string, unknown>;
+  const fiveHour = parseSharedSlot(r.fiveHour);
+  const weekly = parseSharedSlot(r.weekly);
+  if (fiveHour === undefined && weekly === undefined) {
+    return undefined;
+  }
+  return { slots: { fiveHour, weekly }, readAt: v.readAt };
+}
+
+function parseSharedSlot(value: unknown): UsageSlot | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.pct !== 'number' || !Number.isFinite(v.pct)) {
+    return undefined;
+  }
+  const resetsAt =
+    typeof v.resetsAt === 'number' && Number.isFinite(v.resetsAt) ? v.resetsAt : undefined;
+  return { pct: v.pct, resetsAt };
 }
 
 function parseSharedUsage(value: unknown): ChatUsage | undefined {
