@@ -1,10 +1,10 @@
 ---
 name: parallel-pr-completion-check
-description: 並列PRをマージした後は、main先頭のCI結論と統合後の全テストを確かめてから完了と報告する。subagentの「既存エラー」報告と行番号は、そのまま信じない
-updated: 2026-11-15
+description: 並列PRをマージした後は、統合後のmainの検証（2026-11-20以降はCIが無効なので手元のtypecheck・lint・format:check・全テスト）を確かめてから完了と報告する。subagentの「既存エラー」報告と行番号は、そのまま信じない
+updated: 2026-11-27
 ---
 
-# 並列PRのマージ後は、main先頭のCIを確かめるまで完了と言わない
+# 並列PRのマージ後は、統合後のmainの検証を確かめるまで完了と言わない
 
 ## 何が起きたか
 
@@ -26,6 +26,7 @@ updated: 2026-11-15
 
 - 並列PRをマージした後、「完了」と報告する前に `gh run list --branch main --workflow CI` でmain先頭のCI結論を見る。赤なら、失敗したstepのログを読む。Typecheckで止まっているときは、後続のstepが隠れていると考える
 - 全ユニットテストは、統合後 (最後のPRをmainへ取り込んだ状態) で1回回す。個別のPRのテストだけで済ませない
+- 2026-11-20からCIのworkflowは無効なので、上のCI結論の確認はできない。代わりに統合後のmainで`npm run typecheck`・`npm run lint`・`npm run format:check`と全テスト (`npx vitest run --maxWorkers=2`) を手元で回す。オーケストレータのrunで並列にmergeした後の後片付けでも同じ (2026-11-26のrunの18本では、後片付けの時点で回しておらず、翌日の最終チェックで回した)
 - subagentが「既存」「無関係」と報告した失敗は、変更前のコミットのCIログか、変更前のcheckoutで再現してから採る
 - レビューagentの指摘は、`file:line` を実ファイルで確かめてから直す。行が存在しなければ、その指摘は根拠を取り直す
 - マージ前に、規約が求める自己レビューの巡を済ませる。省いたまま、マージ済みの後から埋めない
