@@ -22,6 +22,7 @@ import { IssueStartDialog, orderRuns, RunsPane } from './runs';
 import { McHeader, PrefsDialog, SaveFilterDialog, UsageDialog } from './globalPanels';
 import { UsageHistoryDialog } from './usageHistory';
 import { WorkUnitsDialog } from './workUnits';
+import { WorkCalendarDialog } from './workCalendar';
 import {
   activeSavedFilter,
   cycleSavedFilter,
@@ -335,6 +336,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   /** 利用枠の推移グラフ（Issue #2176）。 */
   const [usageHistoryOpen, setUsageHistoryOpen] = useState(false);
   const [workUnitsOpen, setWorkUnitsOpen] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [saveFilterOpen, setSaveFilterOpen] = useState(false);
   /** 複数選択（`x`）したセッションの`McSession.key`（Issue #2149の1）。 */
@@ -929,6 +931,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       case 'workUnits':
         setWorkUnitsOpen(true);
         return;
+      case 'workCalendar':
+        setCalendarOpen(true);
+        return;
       case 'prefs':
         setPrefsOpen(true);
         return;
@@ -1375,7 +1380,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     ledgerOpen: ledger !== undefined,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
-    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen,
+    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen || calendarOpen,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1390,7 +1395,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     ledgerOpen: ledger !== undefined,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
-    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen,
+    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen || calendarOpen,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1448,6 +1453,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           setPrefsOpen(false);
           setSaveFilterOpen(false);
           setWorkUnitsOpen(false);
+          setCalendarOpen(false);
           setPalette(undefined);
         } else if (resolved?.command.kind === 'escape' && event.target instanceof HTMLElement) {
           if (state.paletteOpen) {
@@ -1909,6 +1915,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       ) : null}
       {workUnitsOpen ? (
         <WorkUnitsDialog bridge={bridge} onClose={() => setWorkUnitsOpen(false)} />
+      ) : null}
+      {calendarOpen ? (
+        <WorkCalendarDialog bridge={bridge} onClose={() => setCalendarOpen(false)} />
       ) : null}
       {prefsOpen ? (
         <PrefsDialog

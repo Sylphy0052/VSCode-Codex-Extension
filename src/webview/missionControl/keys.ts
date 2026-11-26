@@ -66,7 +66,9 @@ export type McKeyCommand =
   // 利用枠の推移グラフ（Issue #2176）
   | { kind: 'usageHistory' }
   // 作業単位（Issue番号ごと）の使用量（Issue #2177）
-  | { kind: 'workUnits' };
+  | { kind: 'workUnits' }
+  // 作業履歴カレンダー（Issue #2179）
+  | { kind: 'workCalendar' };
 
 /** 選んだセッションへの操作（Issue #2160）。`pin`はピン留めの付け外しを切り替える。 */
 export type McSessionOp = 'rename' | 'fork' | 'pin' | 'clear' | 'handoff' | 'rewind';
@@ -378,6 +380,13 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     keys: ['#'],
     label: '作業単位（Issue番号ごと）の使用量を開く（sで並べ替え、pで期間、↑ / ↓で移動）',
     command: { kind: 'workUnits' },
+  },
+  {
+    // 月（month）の`m`（Issue #2179）
+    keys: ['m'],
+    label:
+      '作業履歴カレンダーを開く（← / →で日、↑ / ↓で週、[ / ]で月、n / pでセッション、Enterで開く）',
+    command: { kind: 'workCalendar' },
   },
   {
     keys: [','],

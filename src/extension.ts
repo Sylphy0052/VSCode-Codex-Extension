@@ -323,6 +323,7 @@ import { buildMcUsage } from './view/missionControlUsage';
 import { normalizeRetentionDays, readWorkHistory, WorkHistoryStore } from './view/workHistory';
 import { loadUsageHistory } from './view/usageHistory';
 import { aggregateWorkUnits } from './view/workUnits';
+import { buildWorkCalendar } from './view/workCalendar';
 import {
   setWorkHistoryHandoffSink,
   WORK_HISTORY_OBSERVE_INTERVAL_MS,
@@ -2343,6 +2344,13 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         // （期間の境界をまたぐセッションの、期間前の分を数えないため）
         const records = await readWorkHistory(context.globalStorageUri.fsPath);
         return aggregateWorkUnits(records, { since });
+      },
+      workCalendar: async (year, month) => {
+        // 費用・トークンの差し引きのため、その月より前の記録も読む（workUnitsと同じ）
+        const records = await readWorkHistory(context.globalStorageUri.fsPath, {
+          until: new Date(year, month, 1).getTime(),
+        });
+        return buildWorkCalendar(records, year, month);
       },
       historyOpen: async (provider, threadId) => {
         // webviewから届いたidは、直前に渡した履歴に載っていたものだけを開く
