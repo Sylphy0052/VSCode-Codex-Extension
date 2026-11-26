@@ -25,6 +25,8 @@ export type McKeyCommand =
   | { kind: 'toggleMark' }
   | { kind: 'lifecycle'; op: McLifecycleOp }
   | { kind: 'history' }
+  // Issue #2178: handoff台帳
+  | { kind: 'ledger' }
   // Issue #2150: Runsタブ・roadmapからの起動
   | { kind: 'tab' }
   | { kind: 'runOp'; op: McRunOp }
@@ -61,6 +63,8 @@ export type McKeyCommand =
   | { kind: 'deleteFilter' }
   | { kind: 'task'; delta: 1 | -1 }
   | { kind: 'taskOp'; op: McRunTaskOp }
+  // 利用枠の推移グラフ（Issue #2176）
+  | { kind: 'usageHistory' }
   // 作業単位（Issue番号ごと）の使用量（Issue #2177）
   | { kind: 'workUnits' }
   // 作業履歴カレンダー（Issue #2179）
@@ -186,8 +190,13 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
   },
   {
     keys: ['h'],
-    label: '履歴を開く（↑ / ↓で移動、Enterで再開）',
+    label: '履歴を開く（見出し・依頼文で全期間を検索。↑ / ↓で移動、Enterで再開）',
     command: { kind: 'history' },
+  },
+  {
+    keys: ['l'],
+    label: 'handoff台帳を開く（本文の部分一致・日付・契機で絞る。Enterで本文を開く）',
+    command: { kind: 'ledger' },
   },
   { keys: ['t'], label: 'セッション / Runsのタブを切り替える', command: { kind: 'tab' } },
   {
@@ -359,6 +368,12 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     keys: ['Shift+u'],
     label: '費用と利用枠の詳細を開く / 閉じる',
     command: { kind: 'usage' },
+  },
+  // Issue #2176: 英字はShift付きも埋まっているので記号にする（使用率の「%」）
+  {
+    keys: ['%'],
+    label: '利用枠の推移グラフ（窓ごとの使用率・日別の使用量）を開く / 閉じる',
+    command: { kind: 'usageHistory' },
   },
   {
     // Shift付きの英字は埋まっているので、Issue番号の`#`にする（Issue #2177）

@@ -20,6 +20,7 @@ import {
 import { KindIcon, ProviderIcon, StatusIcon } from './icons';
 import { IssueStartDialog, orderRuns, RunsPane } from './runs';
 import { McHeader, PrefsDialog, SaveFilterDialog, UsageDialog } from './globalPanels';
+import { UsageHistoryDialog } from './usageHistory';
 import { WorkUnitsDialog } from './workUnits';
 import { WorkCalendarDialog } from './workCalendar';
 import {
@@ -95,6 +96,7 @@ import { SessionSettingsPanel } from './sessionSettings';
 import { SessionOpDialog, type McSessionOpDialog } from './sessionOps';
 import { MC_EXTENSION_COMMANDS } from './extensionCommands';
 import { Conversation, type ConversationKeysRef, type TurnLogState } from './conversation';
+import { HandoffLedgerDialog } from './ledger';
 import { hasOlderTurns, logFromPage, mergeTurnPage, TURN_PAGE_SIZE, type TurnLog } from './turnLog';
 import type {
   McActivity,
@@ -310,6 +312,17 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const autoSelect = useRef(true);
   const [launchOpen, setLaunchOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // 履歴を開いたときの検索語（handoff台帳から来たとき。Issue #2178）
+  const [historyQuery, setHistoryQuery] = useState<string | undefined>(undefined);
+  // handoff台帳（Issue #2178）。`session`は開いたときのセッションの絞り込み
+  const [ledger, setLedger] = useState<{ session?: string | undefined } | undefined>(undefined);
+  // 履歴から開き直したセッション。一覧に現れたら選び、会話内検索へ検索語を入れる
+  const [historyFocus, setHistoryFocus] = useState<
+    { provider: McProvider; threadId: string; query: string; at: number } | undefined
+  >(undefined);
+  const [conversationSeed, setConversationSeed] = useState<
+    { key: string; query: string } | undefined
+  >(undefined);
   // 名前変更・クリア・巻き戻しのダイアログ（Issue #2160）。対象は開いた時点のセッションに固定する
   const [opDialog, setOpDialog] = useState<
     { op: McSessionOpDialog; session: McSession } | undefined
@@ -320,6 +333,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const [issuesOpen, setIssuesOpen] = useState(false);
   // 費用・利用枠の詳細、MCの設定、絞り込みの保存（Issue #2162）
   const [usageOpen, setUsageOpen] = useState(false);
+  /** 利用枠の推移グラフ（Issue #2176）。 */
+  const [usageHistoryOpen, setUsageHistoryOpen] = useState(false);
   const [workUnitsOpen, setWorkUnitsOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
@@ -405,6 +420,29 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       setSelected(next);
     }
   }, [snapshot, rowIds, selected]);
+
+  // 履歴から開き直したセッション（Issue #2178）。一覧に現れたら選び、開いたときの検索語を
+  // 会話内検索（#2157）へ入れて該当位置へ飛ばす。現れないまま1分経ったら諦める
+  useEffect(() => {
+    if (historyFocus === undefined) {
+      return;
+    }
+    const same = (s: McSession): boolean =>
+      s.provider === historyFocus.provider && s.threadId === historyFocus.threadId;
+    const found =
+      sessions.find((s) => same(s) && s.isCurrentWindow) ?? sessions.find((s) => same(s));
+    if (found === undefined) {
+      const left = historyFocus.at + 60_000 - Date.now();
+      const timer = setTimeout(() => setHistoryFocus(undefined), Math.max(left, 0));
+      return () => clearTimeout(timer);
+    }
+    setHistoryFocus(undefined);
+    setConversationSeed(
+      historyFocus.query === '' ? undefined : { key: targetKey(found), query: historyFocus.query },
+    );
+    setSelected(sessionRowId(found));
+    return undefined;
+  }, [sessions, historyFocus]);
 
   // 複数選択は、一覧に見えているセッションだけに保つ（絞り込みで隠れたものへ操作が届かない）
   useEffect(() => {
@@ -521,9 +559,17 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     fetchBefore(now.value.start ?? 0);
   };
 
+  const openHistory = (query: string | undefined): void => {
+    setHistoryQuery(query);
+    setHistoryOpen(true);
+  };
+
   const conversationFor = (target: McTarget): JSX.Element => (
     <Conversation
       key={targetKey(target)}
+      initialQuery={
+        conversationSeed?.key === targetKey(target) ? conversationSeed.query : undefined
+      }
       log={turns[targetKey(target)]}
       keysRef={conversationKeys}
       onReload={() => loadTurns(target)}
@@ -875,7 +921,12 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     // 費用・利用枠・設定・絞り込みの保存はどのタブでも効く（Issue #2162）
     switch (command.kind) {
       case 'usage':
+        setUsageHistoryOpen(false);
         setUsageOpen((open) => !open);
+        return;
+      case 'usageHistory':
+        setUsageOpen(false);
+        setUsageHistoryOpen((open) => !open);
         return;
       case 'workUnits':
         setWorkUnitsOpen(true);
@@ -1076,6 +1127,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           setHelpOpen(false);
         } else if (usageOpen) {
           setUsageOpen(false);
+        } else if (usageHistoryOpen) {
+          setUsageHistoryOpen(false);
         } else if (ctx.editable && ctx.target instanceof HTMLElement) {
           // 入力欄から出たら、そのペインにフォーカスを残す（フォーカス位置を見失わないように）
           const pane = ctx.target.closest<HTMLElement>('[data-pane]');
@@ -1095,7 +1148,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         runLifecycle(command.op);
         return;
       case 'history':
-        setHistoryOpen(true);
+        openHistory(undefined);
+        return;
+      case 'ledger':
+        setLedger({});
         return;
       case 'sessionOp':
         runSessionOp(command.op);
@@ -1318,8 +1374,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const latest = useRef({
     helpOpen,
     usageOpen,
+    usageHistoryOpen,
     launchOpen,
     historyOpen,
+    ledgerOpen: ledger !== undefined,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
     globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen || calendarOpen,
@@ -1331,8 +1389,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   latest.current = {
     helpOpen,
     usageOpen,
+    usageHistoryOpen,
     launchOpen,
     historyOpen,
+    ledgerOpen: ledger !== undefined,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
     globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen || calendarOpen,
@@ -1365,6 +1425,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       const dialogOpen =
         state.launchOpen ||
         state.historyOpen ||
+        state.ledgerOpen ||
         state.issuesOpen ||
         state.opDialogOpen ||
         state.globalDialogOpen ||
@@ -1386,6 +1447,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           event.preventDefault();
           setLaunchOpen(false);
           setHistoryOpen(false);
+          setLedger(undefined);
           setIssuesOpen(false);
           setOpDialog(undefined);
           setPrefsOpen(false);
@@ -1419,10 +1481,12 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       ) {
         return;
       }
-      // 利用枠の詳細もヘルプと同じく、開閉とEscだけを効かせる（Issue #2162）
+      // 利用枠の詳細と推移グラフ（Issue #2176）もヘルプと同じく、開閉・互いの切替とEscだけを
+      // 効かせる（Issue #2162）
       if (
-        state.usageOpen &&
+        (state.usageOpen || state.usageHistoryOpen) &&
         resolved?.command.kind !== 'usage' &&
+        resolved?.command.kind !== 'usageHistory' &&
         resolved?.command.kind !== 'escape'
       ) {
         return;
@@ -1653,11 +1717,20 @@ export function App(props: { bridge: Bridge }): JSX.Element {
               <button
                 type="button"
                 class="btn"
-                onClick={() => setHistoryOpen(true)}
+                onClick={() => openHistory(undefined)}
                 title="履歴から再開（h）"
                 data-key-label="h"
               >
                 履歴
+              </button>
+              <button
+                type="button"
+                class="btn"
+                onClick={() => setLedger({})}
+                title="handoff台帳（l）"
+                data-key-label="l"
+              >
+                台帳
               </button>
               <button
                 type="button"
@@ -1831,7 +1904,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           usage={snapshot.usage}
           now={now}
           onClose={() => setUsageOpen(false)}
+          onHistory={() => {
+            setUsageOpen(false);
+            setUsageHistoryOpen(true);
+          }}
         />
+      ) : null}
+      {usageHistoryOpen ? (
+        <UsageHistoryDialog bridge={bridge} onClose={() => setUsageHistoryOpen(false)} />
       ) : null}
       {workUnitsOpen ? (
         <WorkUnitsDialog bridge={bridge} onClose={() => setWorkUnitsOpen(false)} />
@@ -1888,10 +1968,32 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       {historyOpen ? (
         <HistoryDialog
           bridge={bridge}
+          initialQuery={historyQuery}
           onClose={() => setHistoryOpen(false)}
-          onOpened={(message) => {
+          onOpened={(message, item, query) => {
             setHistoryOpen(false);
             setToast(message);
+            setHistoryFocus({
+              provider: item.provider,
+              threadId: item.threadId,
+              query,
+              at: Date.now(),
+            });
+          }}
+          onShowHandoffs={(sessionId) => {
+            setHistoryOpen(false);
+            setLedger({ session: sessionId });
+          }}
+        />
+      ) : null}
+      {ledger !== undefined ? (
+        <HandoffLedgerDialog
+          bridge={bridge}
+          initialSession={ledger.session}
+          onClose={() => setLedger(undefined)}
+          onShowSession={(sessionId) => {
+            setLedger(undefined);
+            openHistory(sessionId);
           }}
         />
       ) : null}

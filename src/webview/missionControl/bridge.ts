@@ -3,6 +3,8 @@ import type {
   McAttachment,
   McControlAction,
   McHandoffDetail,
+  McHandoffListing,
+  McHandoffQuery,
   McHistoryItem,
   McHostMessage,
   McIssueListing,
@@ -24,6 +26,7 @@ import type {
   McSnapshot,
   McTarget,
   McTurn,
+  McUsageHistory,
   McWorkCalendar,
   McWorkUnit,
 } from './protocol';
@@ -63,12 +66,16 @@ export interface ReplyResult {
   choices?: McLaunchChoices | undefined;
   outcomes?: McLifecycleOutcome[] | undefined;
   history?: McHistoryItem[] | undefined;
+  historyOmitted?: number | undefined;
+  handoffs?: McHandoffListing | undefined;
   workUnits?: McWorkUnit[] | undefined;
   calendar?: McWorkCalendar | undefined;
   issues?: McIssueListing | undefined;
   message?: string | undefined;
   attachments?: McAttachment[] | undefined;
   paths?: string[] | undefined;
+  /** `usageHistory`の応答（Issue #2176）。 */
+  usageHistory?: McUsageHistory | undefined;
 }
 
 /** ライブtailで届いた直近のやり取り。 */
@@ -94,6 +101,10 @@ export interface Bridge {
   history(): Promise<ReplyResult>;
   /** 履歴の1件を開き直す。 */
   historyOpen(provider: McProvider, threadId: string): Promise<ReplyResult>;
+  /** handoff台帳を絞り込んで取り寄せる（Issue #2178）。 */
+  handoffLedger(query: McHandoffQuery): Promise<ReplyResult>;
+  /** handoff本文をエディタで開かせる。 */
+  handoffOpen(name: string): Promise<ReplyResult>;
   /** 作業単位の集計を取り寄せる（Issue #2177）。`days`は直近何日分か（0なら全部）。 */
   workUnits(days: number): Promise<ReplyResult>;
   /** 作業履歴カレンダーの1か月分を取り寄せる（Issue #2179）。`month`は1〜12。 */
@@ -130,6 +141,8 @@ export interface Bridge {
   /** 絞り込みに名前を付けて保存する（Issue #2162）。 */
   saveFilter(name: string, filter: McFilterSpec): Promise<ReplyResult>;
   deleteFilter(name: string): Promise<ReplyResult>;
+  /** 作業履歴から利用枠の推移を組ませる（Issue #2176）。 */
+  usageHistory(): Promise<ReplyResult>;
   /** ライブtailの対象を伝える。`undefined`で止める。 */
   watch(target: McTarget | undefined): void;
   onLiveTurns(listener: (live: LiveTurns) => void): () => void;
@@ -226,12 +239,15 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           choices: message.choices,
           outcomes: message.outcomes,
           history: message.history,
+          historyOmitted: message.historyOmitted,
+          handoffs: message.handoffs,
           workUnits: message.workUnits,
           calendar: message.calendar,
           issues: message.issues,
           message: message.message,
           attachments: message.attachments,
           paths: message.paths,
+          usageHistory: message.usageHistory,
         });
       }
       return;
@@ -313,6 +329,8 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     lifecycle: (op, targets) => call({ type: 'lifecycle', op, targets: targets.map(targetOnly) }),
     history: () => call({ type: 'history' }),
     historyOpen: (provider, threadId) => call({ type: 'historyOpen', provider, threadId }),
+    handoffLedger: (query) => call({ type: 'handoffLedger', query }),
+    handoffOpen: (name) => call({ type: 'handoffOpen', name }),
     workUnits: (days) => call({ type: 'workUnits', days }),
     workCalendar: (year, month) => call({ type: 'workCalendar', year, month }),
     openDiff: (to, file) => call({ type: 'openDiff', ...targetOnly(to), path: file }),
@@ -344,6 +362,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     setPref: (key, value) => call({ type: 'setPref', key, value }),
     saveFilter: (name, filter) => call({ type: 'saveFilter', name, filter }),
     deleteFilter: (name) => call({ type: 'deleteFilter', name }),
+    usageHistory: () => call({ type: 'usageHistory' }),
     watch(target) {
       api.postMessage({
         type: 'watch',

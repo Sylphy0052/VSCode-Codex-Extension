@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import type { Logger } from '../log';
 import { formatSessionTarget } from '../orchestrator/sessionBridge';
 import type {
+  McHandoffListing,
+  McHandoffQuery,
   McHistoryItem,
   McLaunchChoices,
   McLaunchRepo,
@@ -11,6 +13,7 @@ import type {
   McProvider,
   McSnapshot,
   McTarget,
+  McUsageHistory,
   McWorkCalendar,
   McWorkUnit,
 } from '../webview/missionControl/protocol';
@@ -31,6 +34,7 @@ import { parseRunCommand } from './missionControlCommands';
 import { applyDeleteFilter, applySaveFilter, parseSetPref } from './missionControlPrefs';
 import type { McSettingsPort } from './missionControlSettings';
 import {
+  parseHandoffQuery,
   parseLifecycleRequest,
   ReadMarker,
   type McLifecycleRunResult,
@@ -106,8 +110,14 @@ export interface McSessionPort {
   lifecycle(op: McLifecycleOp, targets: readonly McTarget[]): Promise<McLifecycleRunResult>;
   /** archive済みを含む過去のセッション（新しい順）。 */
   history(): Promise<McHistoryItem[]>;
+  /** 直前の`history`で、件数の上限により載せなかった古いセッションの数（Issue #2178）。 */
+  historyOmitted?(): number;
   /** 履歴の1件をこのウィンドウで開き直す。失敗したら理由の文を返す。 */
   historyOpen(provider: McProvider, threadId: string): Promise<string | undefined>;
+  /** handoff台帳を絞り込む（Issue #2178）。 */
+  handoffLedger?(query: McHandoffQuery): Promise<McHandoffListing>;
+  /** handoff本文をエディタで開く。失敗したら理由の文を返す。 */
+  handoffOpen?(name: string): Promise<string | undefined>;
   /**
    * 作業履歴を作業単位にまとめたもの（Issue #2177）。`days`は直近何日分か（0なら保持期間の
    * 全部）。並べ替えはwebviewが行う。
@@ -156,6 +166,8 @@ export class MissionControlViewManager implements vscode.Disposable {
     private readonly runsPort?: () => McRunsPort | undefined,
     /** MCの設定の変更と絞り込みの保存（Issue #2162）。 */
     private readonly settingsPort?: McSettingsPort,
+    /** 作業履歴から利用枠の推移を組む（Issue #2176）。 */
+    private readonly usageHistory?: () => Promise<McUsageHistory>,
   ) {}
 
   /** webviewの設定。`createWebviewPanel`と、Reload後の復元の両方で使う。 */
@@ -357,6 +369,8 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'lifecycle':
       case 'history':
       case 'historyOpen':
+      case 'handoffLedger':
+      case 'handoffOpen':
       case 'workUnits':
       case 'workCalendar':
         this.handleSessions(m);
@@ -373,6 +387,9 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'saveFilter':
       case 'deleteFilter':
         this.handleSettings(m);
+        return;
+      case 'usageHistory':
+        this.handleUsageHistory(m);
         return;
       default:
         return;
@@ -500,7 +517,8 @@ export class MissionControlViewManager implements vscode.Disposable {
     }
     const run = async (): Promise<Record<string, unknown>> => {
       if (message.type === 'history') {
-        return { ok: true, history: await port.history() };
+        const history = await port.history();
+        return { ok: true, history, historyOmitted: port.historyOmitted?.() };
       }
       if (message.type === 'workUnits') {
         const { days } = message;
@@ -535,6 +553,21 @@ export class MissionControlViewManager implements vscode.Disposable {
         const error = await port.historyOpen(provider, threadId);
         return error === undefined ? { ok: true } : { ok: false, error };
       }
+      if (message.type === 'handoffLedger') {
+        const query = parseHandoffQuery(message.query);
+        if (query === undefined || port.handoffLedger === undefined) {
+          return { ok: false, error: 'handoff台帳の条件が正しくありません' };
+        }
+        return { ok: true, handoffs: await port.handoffLedger(query) };
+      }
+      if (message.type === 'handoffOpen') {
+        const { name } = message;
+        if (typeof name !== 'string' || name === '' || port.handoffOpen === undefined) {
+          return { ok: false, error: '開くhandoffが正しくありません' };
+        }
+        const error = await port.handoffOpen(name);
+        return error === undefined ? { ok: true } : { ok: false, error };
+      }
       const request = parseLifecycleRequest(message);
       if (typeof request === 'string') {
         return { ok: false, error: request };
@@ -555,6 +588,25 @@ export class MissionControlViewManager implements vscode.Disposable {
           `Mission Control: 操作に失敗しました（${String(message.type)}）: ${String(e)}`,
         );
         this.postReply(seq, { ok: false, error: '操作に失敗しました' });
+      });
+  }
+
+  /** 利用枠の推移の要求（Issue #2176）。応答は`reply`の`usageHistory`で返す。 */
+  private handleUsageHistory(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const load = this.usageHistory;
+    if (load === undefined) {
+      this.postReply(seq, { ok: false, error: 'この操作はこの画面では使えません' });
+      return;
+    }
+    void load()
+      .then((usageHistory) => this.postReply(seq, { ok: true, usageHistory }))
+      .catch((e: unknown) => {
+        this.log.warn(`Mission Control: 利用枠の推移を読めませんでした: ${String(e)}`);
+        this.postReply(seq, { ok: false, error: '作業履歴を読めませんでした' });
       });
   }
 

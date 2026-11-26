@@ -103,6 +103,15 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .help-box { min-width: 280px; padding: 12px 16px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border)); border-radius: 6px; }
 .help-box table { border-collapse: collapse; }
 .help-box td { padding: 2px 10px 2px 0; }
+.help-box.usage-history { width: min(560px, 92vw); max-height: 86vh; overflow-y: auto; }
+.usage-history-series { margin: 4px 0 12px; }
+.usage-history-series h4 { margin: 6px 0 2px; }
+.usage-chart { display: block; width: 100%; max-width: 520px; height: auto; }
+.usage-chart-grid { stroke: var(--vscode-panel-border, var(--vscode-descriptionForeground)); stroke-width: 1; }
+.usage-chart-line { fill: none; stroke: var(--vscode-charts-blue, var(--vscode-foreground)); stroke-width: 1.5; }
+.usage-chart-dot { fill: var(--vscode-charts-blue, var(--vscode-foreground)); }
+.usage-chart-bar { fill: var(--vscode-charts-green, var(--vscode-charts-blue)); }
+.usage-chart-text { fill: var(--vscode-descriptionForeground); font-size: 9px; }
 .help-box kbd { font-family: var(--vscode-editor-font-family, monospace); }
 .toast { position: fixed; right: 12px; bottom: 12px; padding: 6px 10px; border-radius: 4px; color: var(--vscode-notifications-foreground, var(--vscode-foreground)); background: var(--vscode-notifications-background, var(--vscode-editorWidget-background)); border: 1px solid var(--vscode-notifications-border, var(--vscode-panel-border)); }
 .toast:empty { display: none; }
@@ -140,6 +149,8 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .issue-box { width: min(640px, 94vw); }
 .history-box { width: min(720px, 94vw); display: grid; gap: 8px; }
 .history-filter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto; gap: 6px; }
+.ledger-filter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1.5fr) auto auto auto; gap: 6px; }
+.history-list .row-sub.prompt { font-style: italic; }
 .history-list { max-height: 50vh; overflow: auto; border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
 /* フォーカスのあるペインを枠で示す。枠はペインの状態で描き、ペイン自身の標準の枠は消す */
 .pane:focus { outline: none; }
