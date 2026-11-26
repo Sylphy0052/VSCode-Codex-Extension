@@ -15,6 +15,7 @@ import {
   severityOf,
   type UsageSnapshot,
 } from '../codex/usage';
+import type { ProbedSlots } from '../claude/usageProbe';
 import { formatAbsoluteTime } from './relativeTime';
 
 /** `UsageStatusBar.current()`の戻り値。 */
@@ -22,6 +23,11 @@ export interface UsageState {
   codex: UsageSnapshot | undefined;
   claude: readonly ClaudeLimitEntry[];
   claudeReceivedAt: number | undefined;
+  /**
+   * `/usage`から読んだ5時間枠と週次（Issue #2174）。Mission Controlの見込みだけに使い、
+   * ステータスバーの表示には使わない。まだ読めていなければ無い。
+   */
+  claudeSlots?: ProbedSlots | undefined;
 }
 
 /** 残り時間の表記を進めるための再描画の間隔（issue #1224。分未満は表示に出ない）。 */
@@ -49,6 +55,8 @@ export class UsageStatusBar implements vscode.Disposable {
    * 通知は1枠ずつ届くので、1つの時刻で全枠を新しく見せない。
    */
   private readonly claudeReceivedAt = new Map<string | undefined, number>();
+  /** `/usage`から読んだ5時間枠と週次（Issue #2174）。表示には使わない。 */
+  private claudeSlots: ProbedSlots | undefined;
   private readonly ticker: ReturnType<typeof setInterval>;
   private readonly changed = new vscode.EventEmitter<void>();
   /** 値が届いたら発火する（Mission Controlが同じ取得元を読むため。Issue #2162）。 */
@@ -106,6 +114,20 @@ export class UsageStatusBar implements vscode.Disposable {
   }
 
   /**
+   * `/usage`から読んだ5時間枠と週次を持つ（Issue #2174）。Mission Controlが現ペースでの
+   * 見込みを出すためだけに使う。ステータスバーの表示は変えない（`claudeLimits`へ重ねると
+   * 見出しとツールチップの枠が増える）。`undefined`は今の値が無いことで、持っている値を捨てる
+   * （アカウントを切り替えた後に、切り替え前の値を見込みに使い続けないため）。
+   */
+  updateClaudeSlots(probed: ProbedSlots | undefined): void {
+    if (probed === undefined && this.claudeSlots === undefined) {
+      return;
+    }
+    this.claudeSlots = probed;
+    this.changed.fire();
+  }
+
+  /**
    * 保持している値（Issue #2162）。Mission Controlはこれを読み、`/api/oauth/usage`などを
    * 別に取りに行かない。取得できていなければ`codex`は`undefined`、`claude`は空。
    */
@@ -114,6 +136,7 @@ export class UsageStatusBar implements vscode.Disposable {
       codex: this.snapshot,
       claude: this.claudeLimits,
       claudeReceivedAt: this.oldestClaudeReceivedAt(),
+      claudeSlots: this.claudeSlots,
     };
   }
 
