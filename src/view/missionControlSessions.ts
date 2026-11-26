@@ -509,6 +509,42 @@ export function resolveHistoryOpen(
   };
 }
 
+export interface McHistoryOpenDeps {
+  /** archiveを解除する（`codex unarchive`）。 */
+  unarchive(threadId: string): Promise<{ code: number | null; stderr: string }>;
+  /** 解除できた。持っている履歴の印を外す。 */
+  unarchived(session: SessionSummary): void;
+  open(session: SessionSummary): void;
+}
+
+/**
+ * 決めた対象を開く。失敗したら理由の文を返す。archive済みのCodexのセッションは、app-serverが
+ * 再開を断る（「unarchiveしてから」と返す。実測）ので、先にarchiveを解除する。一覧に無い
+ * スレッド（状態DBでarchive済みと分かったもの）も同じ（Issue #2178）。
+ */
+export async function openHistoryTarget(
+  target: McHistoryOpenTarget,
+  deps: McHistoryOpenDeps,
+): Promise<string | undefined> {
+  if (target.kind === 'error') {
+    return target.message;
+  }
+  const session = target.session;
+  if (session.provider === 'codex' && session.archived) {
+    try {
+      const run = await deps.unarchive(session.id);
+      if (run.code !== 0) {
+        return `archiveを解除できませんでした: ${run.stderr.trim()}`;
+      }
+    } catch (e: unknown) {
+      return `archiveを解除できませんでした: ${String(e)}`;
+    }
+    deps.unarchived(session);
+  }
+  deps.open(session);
+  return undefined;
+}
+
 const HANDOFF_QUERY_MAX = 200;
 
 function optionalMs(value: unknown): number | undefined | false {

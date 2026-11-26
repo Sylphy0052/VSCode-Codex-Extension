@@ -10,6 +10,7 @@ import { parseHandoffText, type HandoffLedgerEntry } from '../../src/view/handof
 import {
   buildAllPeriodHistory,
   MAX_ALL_PERIOD_HISTORY_ITEMS,
+  openHistoryTarget,
   parseHandoffQuery,
   resolveHistoryOpen,
   toHandoffListing,
@@ -174,6 +175,45 @@ describe('一覧に無いセッションを開く', () => {
     const arch = resolveHistoryOpen([], built.offList, 'codex', 'arch');
     expect(arch.kind === 'offList' && arch.session.archived).toBe(true);
     expect(built.omitted).toBe(0);
+  });
+
+  it('一覧に無いarchive済みのCodexは、archiveを解除してから開き、解除に失敗したら開かない', async () => {
+    const offList = [
+      {
+        provider: 'codex' as const,
+        threadId: 'arch',
+        title: '古い',
+        cwd: '/w',
+        transcriptMissing: false,
+        archived: true,
+      },
+    ];
+    const calls: string[] = [];
+    const deps = (code: number) => ({
+      unarchive: (id: string) => {
+        calls.push(`unarchive:${id}`);
+        return Promise.resolve({ code, stderr: 'refused\n' });
+      },
+      unarchived: (s: SessionSummary) => calls.push(`unarchived:${s.id}`),
+      open: (s: SessionSummary) => calls.push(`open:${s.id}:${String(s.archived)}`),
+    });
+    const target = resolveHistoryOpen([], offList, 'codex', 'arch');
+    expect(await openHistoryTarget(target, deps(0))).toBeUndefined();
+    expect(calls).toEqual(['unarchive:arch', 'unarchived:arch', 'open:arch:true']);
+
+    calls.length = 0;
+    expect(await openHistoryTarget(target, deps(1))).toBe('archiveを解除できませんでした: refused');
+    expect(calls).toEqual(['unarchive:arch']);
+
+    calls.length = 0;
+    const live = resolveHistoryOpen(
+      [],
+      [{ ...offList[0]!, threadId: 'live', archived: false }],
+      'codex',
+      'live',
+    );
+    expect(await openHistoryTarget(live, deps(0))).toBeUndefined();
+    expect(calls).toEqual(['open:live:false']);
   });
 
   it('件数の上限を超えたら古い方を落とし、落とした数を返す', () => {

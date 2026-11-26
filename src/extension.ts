@@ -272,6 +272,7 @@ import {
   isLifecycleOp,
   LIFECYCLE_UNSUPPORTED_MESSAGE,
   mergeArchivedSessions,
+  openHistoryTarget,
   resolveHistoryOpen,
   runLifecycle,
   supportsArchive,
@@ -2341,34 +2342,21 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           provider,
           threadId,
         );
-        if (target.kind === 'error') {
-          return target.message;
-        }
-        const session = target.session;
-        // archive済みのCodexのセッションは、app-serverが再開を断る（「unarchiveしてから」と
-        // 返す。実測）。再開の操作なので、先にarchiveを解除する。一覧に無いスレッド（状態DBで
-        // archive済みと分かったもの）も同じ
-        if (session.provider === 'codex' && session.archived) {
-          try {
-            const run = await actions.run('unarchive', session.id);
-            if (run.code !== 0) {
-              return `archiveを解除できませんでした: ${run.stderr.trim()}`;
-            }
-          } catch (e: unknown) {
-            return `archiveを解除できませんでした: ${String(e)}`;
-          }
-          log.info(`Mission Control: 履歴から再開するためarchiveを解除しました（${session.id}）`);
-          missionControlHistory = missionControlHistory.map((s) =>
-            s === session ? { ...s, archived: false } : s,
-          );
-          missionControlOffList = missionControlOffList.map((s) =>
-            s.provider === session.provider && s.threadId === session.id
-              ? { ...s, archived: false }
-              : s,
-          );
-        }
-        openSession(chat, claudeChat, log, session);
-        return undefined;
+        return openHistoryTarget(target, {
+          unarchive: (id) => actions.run('unarchive', id),
+          unarchived: (session) => {
+            log.info(`Mission Control: 履歴から再開するためarchiveを解除しました（${session.id}）`);
+            missionControlHistory = missionControlHistory.map((s) =>
+              s === session ? { ...s, archived: false } : s,
+            );
+            missionControlOffList = missionControlOffList.map((s) =>
+              s.provider === session.provider && s.threadId === session.id
+                ? { ...s, archived: false }
+                : s,
+            );
+          },
+          open: (session) => openSession(chat, claudeChat, log, session),
+        });
       },
       handoffLedger: async (query) =>
         toHandoffListing(await handoffLedger.search(query), missionControlHistoryRepoResolver),
