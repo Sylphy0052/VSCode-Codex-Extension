@@ -13,6 +13,8 @@ import type {
   McProvider,
   McSnapshot,
   McTarget,
+  McUsageHistory,
+  McWorkUnit,
 } from '../webview/missionControl/protocol';
 import { MISSION_CONTROL_STYLES } from '../webview/missionControl/styles';
 import type { SessionControlResult } from './chatManagerBase';
@@ -114,7 +116,15 @@ export interface McSessionPort {
   handoffLedger?(query: McHandoffQuery): Promise<McHandoffListing>;
   /** handoff本文をエディタで開く。失敗したら理由の文を返す。 */
   handoffOpen?(name: string): Promise<string | undefined>;
+  /**
+   * 作業履歴を作業単位にまとめたもの（Issue #2177）。`days`は直近何日分か（0なら保持期間の
+   * 全部）。並べ替えはwebviewが行う。
+   */
+  workUnits?(days: number): Promise<McWorkUnit[]>;
 }
+
+/** 作業単位の集計で受け付ける日数の上限（保持期間の上限と同じ）。 */
+const MAX_WORK_UNIT_DAYS = 3650;
 
 /**
  * Mission Control（Issue #2136）のエディタタブ。
@@ -152,6 +162,8 @@ export class MissionControlViewManager implements vscode.Disposable {
     private readonly runsPort?: () => McRunsPort | undefined,
     /** MCの設定の変更と絞り込みの保存（Issue #2162）。 */
     private readonly settingsPort?: McSettingsPort,
+    /** 作業履歴から利用枠の推移を組む（Issue #2176）。 */
+    private readonly usageHistory?: () => Promise<McUsageHistory>,
   ) {}
 
   /** webviewの設定。`createWebviewPanel`と、Reload後の復元の両方で使う。 */
@@ -355,6 +367,7 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'historyOpen':
       case 'handoffLedger':
       case 'handoffOpen':
+      case 'workUnits':
         this.handleSessions(m);
         return;
       case 'runOp':
@@ -369,6 +382,9 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'saveFilter':
       case 'deleteFilter':
         this.handleSettings(m);
+        return;
+      case 'usageHistory':
+        this.handleUsageHistory(m);
         return;
       default:
         return;
@@ -499,6 +515,21 @@ export class MissionControlViewManager implements vscode.Disposable {
         const history = await port.history();
         return { ok: true, history, historyOmitted: port.historyOmitted?.() };
       }
+      if (message.type === 'workUnits') {
+        const { days } = message;
+        if (
+          typeof days !== 'number' ||
+          !Number.isInteger(days) ||
+          days < 0 ||
+          days > MAX_WORK_UNIT_DAYS
+        ) {
+          return { ok: false, error: '集計する期間が正しくありません' };
+        }
+        if (port.workUnits === undefined) {
+          return { ok: false, error: '作業単位の集計はこの画面では使えません' };
+        }
+        return { ok: true, workUnits: await port.workUnits(days) };
+      }
       if (message.type === 'historyOpen') {
         const { provider, threadId } = message;
         if ((provider !== 'codex' && provider !== 'claude') || typeof threadId !== 'string') {
@@ -542,6 +573,25 @@ export class MissionControlViewManager implements vscode.Disposable {
           `Mission Control: 操作に失敗しました（${String(message.type)}）: ${String(e)}`,
         );
         this.postReply(seq, { ok: false, error: '操作に失敗しました' });
+      });
+  }
+
+  /** 利用枠の推移の要求（Issue #2176）。応答は`reply`の`usageHistory`で返す。 */
+  private handleUsageHistory(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const load = this.usageHistory;
+    if (load === undefined) {
+      this.postReply(seq, { ok: false, error: 'この操作はこの画面では使えません' });
+      return;
+    }
+    void load()
+      .then((usageHistory) => this.postReply(seq, { ok: true, usageHistory }))
+      .catch((e: unknown) => {
+        this.log.warn(`Mission Control: 利用枠の推移を読めませんでした: ${String(e)}`);
+        this.postReply(seq, { ok: false, error: '作業履歴を読めませんでした' });
       });
   }
 

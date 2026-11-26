@@ -219,6 +219,38 @@ export interface McUsage {
   claude?: McUsageSource | undefined;
 }
 
+/** 利用枠の推移の1点（Issue #2176）。 */
+export interface McUsageHistoryPoint {
+  /** 使用率を計測した時刻（ms）。 */
+  at: number;
+  /** 使用率（%）。 */
+  usedPercent: number;
+}
+
+/** 利用枠の窓1つ分の推移（Issue #2176）。 */
+export interface McUsageHistorySeries {
+  provider: McProvider;
+  /** 窓の表示名。外部由来なので拡張ホストで1行にしてある。 */
+  label: string;
+  /** 窓の長さ（ms）。分からなければ無い。 */
+  windowMs?: number | undefined;
+  /** リセットごとに区切った推移。区切りの中も外も古い順。 */
+  segments: McUsageHistoryPoint[][];
+  /** 日別の使用量（窓の上限に対する%）。`McUsageHistory.days`と同じ並び。 */
+  daily: number[];
+}
+
+/** 作業履歴から組んだ利用枠の推移（Issue #2176）。 */
+export interface McUsageHistory {
+  /** 期間の始まり（ms。`days`の先頭の日の0時）。 */
+  since: number;
+  /** 期間の終わり（ms。組んだ時刻）。 */
+  until: number;
+  /** 期間の日（`YYYY-MM-DD`、拡張ホストの地方時）。古い順。 */
+  days: string[];
+  series: McUsageHistorySeries[];
+}
+
 /** MCから変えられる設定（Issue #2162）。キーは`agent.`を除いた設定名。 */
 export type McBooleanPrefKey =
   | 'notifications.approvalPending'
@@ -510,6 +542,57 @@ export interface McHandoffListing {
   truncated: boolean;
 }
 
+/** 作業単位の利用枠の消費の概算（窓1つ分。Issue #2177）。 */
+export interface McWorkUnitUsage {
+  provider: McProvider;
+  /** 窓の名前（`5h`・`週`など）。 */
+  label: string;
+  /** この作業単位に割り当てた使用率の増分の合計（%ポイント）。 */
+  percent: number;
+}
+
+/**
+ * 作業単位1つ（Mission Control 段階21。Issue #2177）。作業履歴（`work-history/*.jsonl`）から
+ * `aggregateWorkUnits`（`src/view/workUnits.ts`）が作る。
+ *
+ * - 単位はIssue番号。Issue番号の無いセッションは、handoffの連鎖でつながったセッションと
+ *   同じ単位に入る（連鎖のどこかにIssue番号があればその番号の単位、無ければ連鎖で1単位）。
+ *   別々のIssue番号の単位どうしは、番号の無いセッションを挟んでもつながない
+ * - 費用・トークンはセッションの累計値の記録なので、セッションごとに「集計する期間内の最大値
+ *   − 期間より前の最大値」を出して合計したもの
+ */
+export interface McWorkUnit {
+  /** `issue:<番号>`か、Issue番号の無い連鎖なら`chain:<provider>:<最初のthreadId>`。 */
+  key: string;
+  /** 代表のIssue番号（単位の中で最も多くのセッションが持つ番号）。無ければ無い。 */
+  issue?: number | undefined;
+  /** 単位に含まれるIssue番号（昇順）。1つの単位に別々の番号は入れないので、要素は高々1つ。 */
+  issues: number[];
+  /** 最後に記録されたタイトル（1行化済み）。無ければ空文字。 */
+  title: string;
+  /** 最後に記録されたブランチ（1行化済み）。 */
+  branch?: string | undefined;
+  providers: McProvider[];
+  /** 最初と最後の記録の時刻（ms）。 */
+  firstAt: number;
+  lastAt: number;
+  /** 記録のあった日（ローカル時刻の`YYYY-MM-DD`、昇順）。 */
+  days: string[];
+  /** セッションの数（provider＋threadIdで数える）。 */
+  sessionCount: number;
+  /** 推定費用の合計（USD。Claude Codeだけ）。どのセッションにも無ければ無い。 */
+  costUsd?: number | undefined;
+  /** トークンの合計（Codexだけ）。どのセッションにも無ければ無い。 */
+  tokens?: number | undefined;
+  /** 利用枠の消費の概算（provider・窓ごと。消費の多い順）。 */
+  usage: McWorkUnitUsage[];
+  /** `usage`の`percent`の合計。並べ替えに使う目安で、窓の長さの違いは考えない。 */
+  usageScore: number;
+}
+
+/** 作業単位の並べ替えの基準。どれも多い順（`recent`は新しい順）。 */
+export type McWorkUnitSort = 'cost' | 'tokens' | 'usage' | 'sessions' | 'period' | 'recent';
+
 /** AskUserQuestionの質問1件（`SharedAskUserQuestion`と同じ形）。 */
 export interface McQuestion {
   question: string;
@@ -624,6 +707,8 @@ export type McHostMessage =
       historyOmitted?: number | undefined;
       /** `handoffLedger`の応答（Issue #2178）。 */
       handoffs?: McHandoffListing | undefined;
+      /** `workUnits`の応答（Issue #2177）。並べ替えはwebviewが行う。 */
+      workUnits?: McWorkUnit[] | undefined;
       /** `issueList`の応答（Issue #2150）。 */
       issues?: McIssueListing | undefined;
       /** run・roadmapの操作の結果の説明（Issue #2150）。 */
@@ -632,6 +717,8 @@ export type McHostMessage =
       attachments?: McAttachment[] | undefined;
       /** `pickAttachments`の応答: 画像以外のファイルの絶対パス。本文へ`@パス`で差し込む。 */
       paths?: string[] | undefined;
+      /** `usageHistory`の応答（Issue #2176）。 */
+      usageHistory?: McUsageHistory | undefined;
     }
   | {
       /** 詳細で選択中のセッションの直近のやり取り（ライブtail。Issue #2137の3）。 */
@@ -767,6 +854,8 @@ export type McWebviewMessage =
   | { type: 'historyOpen'; seq: number; provider: McProvider; threadId: string }
   | { type: 'handoffLedger'; seq: number; query: McHandoffQuery }
   | { type: 'handoffOpen'; seq: number; name: string }
+  /** 作業単位の集計（Issue #2177）。`days`は直近何日分か（0なら保持期間の全部）。 */
+  | { type: 'workUnits'; seq: number; days: number }
   /** ライブtailの対象。`target`が無ければ止める。 */
   | { type: 'watch'; target?: McTarget | undefined }
   /** レビュー待ちの1ファイルをdiffエディタで開く（Issue #2138の1）。 */
@@ -809,4 +898,6 @@ export type McWebviewMessage =
   /** 絞り込みに名前を付けて保存する。同じ名前があれば上書きする。 */
   | { type: 'saveFilter'; seq: number; name: string; filter: McFilterSpec }
   /** 保存した絞り込みを消す。 */
-  | { type: 'deleteFilter'; seq: number; name: string };
+  | { type: 'deleteFilter'; seq: number; name: string }
+  /** 作業履歴から利用枠の推移を組ませる（Issue #2176）。応答は`reply`の`usageHistory`。 */
+  | { type: 'usageHistory'; seq: number };

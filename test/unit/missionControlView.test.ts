@@ -302,6 +302,49 @@ describe('MissionControlViewManager（Issue #2136）', () => {
     view.dispose();
   });
 
+  it('usageHistory: 作業履歴から組んだ推移を返し、読めなければ理由を返す（Issue #2176）', async () => {
+    const history = { since: 0, until: 1, days: ['2026-11-26'], series: [] };
+    const load = vi.fn().mockResolvedValueOnce(history).mockRejectedValueOnce(new Error('EIO'));
+    const view = new MissionControlViewManager(
+      () => snapshot(0),
+      vi.fn(),
+      Uri.file('/ext') as never,
+      log,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      load,
+    );
+    view.show();
+    const panel = __mock.lastCreatedPanel() as FakeWebviewPanel;
+    panel.webview.simulateMessage({ type: 'usageHistory', seq: 1 });
+    await vi.waitFor(() =>
+      expect(panel.webview.sent.at(-1)).toMatchObject({
+        type: 'reply',
+        seq: 1,
+        ok: true,
+        usageHistory: history,
+      }),
+    );
+    panel.webview.simulateMessage({ type: 'usageHistory', seq: 2 });
+    await vi.waitFor(() =>
+      expect(panel.webview.sent.at(-1)).toMatchObject({
+        type: 'reply',
+        seq: 2,
+        ok: false,
+        error: '作業履歴を読めませんでした',
+      }),
+    );
+    view.dispose();
+    // 読み出しを渡していない画面では断る
+    const { view: plain, panel: plainPanel } = open(() => snapshot(0));
+    plainPanel.webview.simulateMessage({ type: 'usageHistory', seq: 3 });
+    expect(plainPanel.webview.sent.at(-1)).toMatchObject({ type: 'reply', seq: 3, ok: false });
+    plain.dispose();
+  });
+
   it('停滞の設定は既定5分で、範囲外・数値でない値は既定へ丸める（Issue #2137の5）', () => {
     const cases: Array<[unknown, number]> = [
       [undefined, 300_000],
