@@ -12,6 +12,7 @@ import {
 } from '../../src/codex/stateDbThreads';
 import {
   buildAllPeriodHistory,
+  resolveHistoryOpen,
   transcriptPathsToCheck,
 } from '../../src/view/missionControlSessions';
 import { missingFiles, SessionCatalog } from '../../src/view/sessionCatalog';
@@ -44,6 +45,7 @@ function createDb(file: string, rows: Row[], columns = COLUMNS): void {
     `INSERT INTO threads (id, rollout_path, created_at, updated_at, source, cwd, title,
       first_user_message, thread_source, name) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  db.exec('BEGIN');
   for (const r of rows) {
     insert.run(
       r.id,
@@ -57,6 +59,7 @@ function createDb(file: string, rows: Row[], columns = COLUMNS): void {
       r.name ?? null,
     );
   }
+  db.exec('COMMIT');
   db.close();
 }
 
@@ -167,6 +170,37 @@ describe('readStateDbThreads', () => {
     expect(hits.map((i) => i.threadId)).toEqual(['ancient']);
     expect(hits[0]).toMatchObject({ title: '昔の会話', transcriptMissing: true });
     expect(built.offList.find((s) => s.threadId === 'ancient')?.transcriptMissing).toBe(true);
+  });
+
+  it('一覧に無いセッションは、会話記録が残れば開き、消えていれば理由を返す', async () => {
+    const kept = join(dir, 'rollout-kept.jsonl');
+    await writeFile(kept, '{}\n');
+    createDb(join(dir, 'state_5.sqlite'), [
+      { id: 'kept', name: '残る会話', cwd: '/w/a' },
+      { id: 'gone', name: '消えた会話' },
+    ]);
+    const db = await readStateDbThreads(dir);
+    const sessions = db.map((s) => (s.id === 'kept' ? { ...s, rolloutPath: kept } : s));
+    const catalog = await new SessionCatalog(join(dir, 'catalog.json')).merge(sessions);
+    const missing = await missingFiles(transcriptPathsToCheck([], catalog, []));
+    const { offList } = buildAllPeriodHistory({
+      listed: [],
+      catalog,
+      handoffs: [],
+      missing,
+      resolveRepo: (cwd) => ({ key: cwd ?? '', label: cwd ?? '', full: cwd ?? '' }),
+    });
+    expect(resolveHistoryOpen([], offList, 'codex', 'kept')).toMatchObject({
+      kind: 'offList',
+      session: { id: 'kept', provider: 'codex', threadName: '残る会話', cwd: '/w/a' },
+    });
+    expect(resolveHistoryOpen([], offList, 'codex', 'gone')).toMatchObject({
+      kind: 'error',
+      message: expect.stringContaining('会話記録が残っていない') as unknown,
+    });
+    expect(resolveHistoryOpen([], offList, 'claude', 'kept').kind).toBe('error');
+    expect(resolveHistoryOpen([], offList, 'codex', 'unknown').kind).toBe('error');
+    expect(resolveHistoryOpen(sessions, offList, 'codex', 'gone').kind).toBe('listed');
   });
 
   it('DBが無い・壊れている・列が足りないときは空を返し、警告だけ残す', async () => {

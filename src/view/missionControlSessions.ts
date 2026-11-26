@@ -453,6 +453,52 @@ export function buildAllPeriodHistory(input: {
   return { items: items.slice(0, MAX_ALL_PERIOD_HISTORY_ITEMS), offList };
 }
 
+export type McHistoryOpenTarget =
+  | { kind: 'listed'; session: SessionSummary }
+  | { kind: 'offList'; session: SessionSummary }
+  | { kind: 'error'; message: string };
+
+/**
+ * 履歴から開く対象を決める（Issue #2178）。webviewから届いたidは、直前に渡した履歴（一覧、
+ * または一覧に無い目録・handoffの分）に載っていたものだけを開く。会話記録が消えたものは開かない。
+ */
+export function resolveHistoryOpen(
+  listed: readonly SessionSummary[],
+  offList: readonly McOffListSession[],
+  provider: string,
+  threadId: string,
+): McHistoryOpenTarget {
+  const session = listed.find((s) => s.provider === provider && s.id === threadId);
+  if (session !== undefined) {
+    return { kind: 'listed', session };
+  }
+  const off = offList.find((s) => s.provider === provider && s.threadId === threadId);
+  if (off === undefined) {
+    return {
+      kind: 'error',
+      message: '履歴にこのセッションが見つかりません。履歴を開き直してください',
+    };
+  }
+  if (off.transcriptMissing === true) {
+    return {
+      kind: 'error',
+      message:
+        '会話記録が残っていないため開き直せません。handoff台帳（l）で引き継ぎの本文を読めます',
+    };
+  }
+  return {
+    kind: 'offList',
+    session: {
+      id: off.threadId,
+      provider: off.provider,
+      threadName: off.title,
+      updatedAt: '',
+      cwd: off.cwd,
+      archived: false,
+    },
+  };
+}
+
 const HANDOFF_QUERY_MAX = 200;
 
 function optionalMs(value: unknown): number | undefined | false {

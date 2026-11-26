@@ -272,6 +272,7 @@ import {
   isLifecycleOp,
   LIFECYCLE_UNSUPPORTED_MESSAGE,
   mergeArchivedSessions,
+  resolveHistoryOpen,
   runLifecycle,
   supportsArchive,
   toHandoffListing,
@@ -2325,29 +2326,20 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       },
       historyOpen: async (provider, threadId) => {
         // webviewから届いたidは、直前に渡した履歴に載っていたものだけを開く
-        const session = missionControlHistory.find(
-          (s) => s.provider === provider && s.id === threadId,
+        const target = resolveHistoryOpen(
+          missionControlHistory,
+          missionControlOffList,
+          provider,
+          threadId,
         );
-        if (session === undefined) {
-          const offList = missionControlOffList.find(
-            (s) => s.provider === provider && s.threadId === threadId,
-          );
-          if (offList === undefined) {
-            return '履歴にこのセッションが見つかりません。履歴を開き直してください';
-          }
-          if (offList.transcriptMissing === true) {
-            return '会話記録が残っていないため開き直せません。handoff台帳（l）で引き継ぎの本文を読めます';
-          }
-          openSession(chat, claudeChat, log, {
-            id: offList.threadId,
-            provider: offList.provider,
-            threadName: offList.title,
-            updatedAt: '',
-            cwd: offList.cwd,
-            archived: false,
-          });
+        if (target.kind === 'error') {
+          return target.message;
+        }
+        if (target.kind === 'offList') {
+          openSession(chat, claudeChat, log, target.session);
           return undefined;
         }
+        const session = target.session;
         // archive済みのCodexのセッションは、app-serverが再開を断る（「unarchiveしてから」と
         // 返す。実測）。再開の操作なので、先にarchiveを解除する
         if (session.provider === 'codex' && session.archived) {
