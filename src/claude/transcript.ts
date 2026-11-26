@@ -308,12 +308,18 @@ function appendUserEntry(
   // 直前の発言が `/<名前>` だったことを目印に拾い、名前もそちらから取る
   if (entry['isMeta'] === true) {
     const skillText = cleanText(messageText(entry));
+    // 起動の時刻はMission Controlのskill履歴（Issue #2173）に使う。`invoked_skills`の注入には付けない
+    const launchedAt = entryTime(entry);
     if (skillText !== '' && isSkillContextEntry(entry, skillText)) {
-      items.push(
-        item(entry, 'skillContext', { text: skillText, detail: skillContextName(skillText) }),
-      );
+      items.push({
+        ...item(entry, 'skillContext', { text: skillText, detail: skillContextName(skillText) }),
+        ...(launchedAt === undefined ? {} : { skillLaunchedAt: launchedAt }),
+      });
     } else if (isSlashSkillBody(entry, skillText, slashCommand)) {
-      items.push(item(entry, 'skillContext', { text: skillText, detail: slashCommand }));
+      items.push({
+        ...item(entry, 'skillContext', { text: skillText, detail: slashCommand }),
+        ...(launchedAt === undefined ? {} : { skillLaunchedAt: launchedAt }),
+      });
     }
     return '';
   }
@@ -767,6 +773,12 @@ function reinvocationSkillName(head: string): string {
     }
   }
   return '';
+}
+
+/** 行の`timestamp`（ISO 8601）をmsにしたもの。無い・読めないときは`undefined`。 */
+function entryTime(entry: Record<string, unknown>): number | undefined {
+  const time = Date.parse(str(entry['timestamp']));
+  return Number.isFinite(time) ? time : undefined;
 }
 
 function item(

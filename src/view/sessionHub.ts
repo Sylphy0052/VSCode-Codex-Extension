@@ -6,6 +6,7 @@ import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
 import { stripControlChars } from '../orchestrator/sanitize';
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import { isApprovalLevel, type ApprovalLevel } from '../provider/approvalLevel';
 import { parseAttachmentInputs, type AttachmentInput } from '../provider/attachments';
 import {
@@ -92,6 +93,69 @@ export interface SharedSession {
   purpose?: string | undefined;
   /** 目的を要約したときの作業ディレクトリのブランチ名（Issue #2172）。似た要約を見分けるのに使う。 */
   branch?: string | undefined;
+  /**
+   * セッションで起動したskill（Issue #2173。Claude Codeだけ）。古い順。skill名は外部由来の
+   * テキストなので、読み手は1行へ畳んで文字列として表示するだけにする。古い版のファイルには無い。
+   */
+  skills?: SharedSkillUse[] | undefined;
+}
+
+/** セッションで起動したskillの1件（Issue #2173）。 */
+export interface SharedSkillUse {
+  name: string;
+  /** 起動した時刻（ms）。 */
+  at: number;
+}
+
+/** `skills`に載せる件数の上限（新しい方から残す）。 */
+export const MAX_SHARED_SKILLS = 50;
+
+/** skill名の上限（文字数）。 */
+export const MAX_SHARED_SKILL_NAME_CHARS = 80;
+
+/** `Date`で表せる時刻の上限（ms）。 */
+const MAX_DATE_MS = 8.64e15;
+
+/**
+ * 共有ファイルの`skills`を信用せずに読む（Issue #2173）。形の合わない要素だけを落とし、
+ * 名前は1行へ畳んで長さを切り、新しい方から`MAX_SHARED_SKILLS`件に絞る。
+ */
+export function parseSharedSkills(value: unknown): SharedSkillUse[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const skills: SharedSkillUse[] = [];
+  for (const raw of value as unknown[]) {
+    if (typeof raw !== 'object' || raw === null) {
+      continue;
+    }
+    const entry = raw as Record<string, unknown>;
+    const rawName = entry['name'];
+    // 外部由来のskill名は制御文字・不可視文字を除いて1行に均し、長さを切る
+    const name =
+      typeof rawName === 'string'
+        ? sanitizeInlineText(rawName, MAX_SHARED_SKILL_NAME_CHARS).replace(/\s+/gu, ' ').trim()
+        : '';
+    const at = nonNegativeNumber(entry['at']);
+    // Dateで表せない時刻は表示で`NaN`になるので落とす
+    if (name !== '' && at !== undefined && at <= MAX_DATE_MS) {
+      skills.push({ name, at });
+    }
+  }
+  return skills.length === 0 ? undefined : skills.slice(-MAX_SHARED_SKILLS);
+}
+
+/**
+ * 会話の項目から、起動したskillを古い順に集める（Issue #2173）。起動時刻を持つ`skillContext`
+ * だけを数える（圧縮後の付け直しは時刻を持たない）。名前が空の項目は落とす。
+ */
+export function collectSkillUses(
+  items: readonly { kind: string; detail: string; skillLaunchedAt?: number | undefined }[],
+): SharedSkillUse[] | undefined {
+  const uses = items
+    .filter((item) => item.kind === 'skillContext' && item.skillLaunchedAt !== undefined)
+    .map((item) => ({ name: item.detail, at: item.skillLaunchedAt }));
+  return parseSharedSkills(uses);
 }
 
 /** `purpose`の上限（文字数）。書き手の上限（`MAX_SESSION_PURPOSE_CHARS`）に省略記号の分を足す。 */
@@ -253,6 +317,8 @@ function normalizeSharedSession(session: SharedSession, windowId: string): Share
   // 目的の1文要約とブランチ名（Issue #2172）も1行へ畳んで長さを切る
   const purpose = inlineText(session.purpose, MAX_SHARED_PURPOSE_CHARS);
   const branch = inlineText(session.branch, MAX_SHARED_BRANCH_CHARS);
+  // 起動したskill（Issue #2173）は要素ごとに確かめる
+  const skills = parseSharedSkills(session.skills);
   return {
     ...session,
     loop,
@@ -267,6 +333,7 @@ function normalizeSharedSession(session: SharedSession, windowId: string): Share
     unread,
     purpose,
     branch,
+    skills,
   };
 }
 

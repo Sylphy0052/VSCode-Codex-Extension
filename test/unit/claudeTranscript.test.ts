@@ -362,6 +362,18 @@ describe('transcriptItems', () => {
     ]);
     expect(items.map((i) => i.kind)).toEqual(['skillContext']);
     expect(items[0]?.detail).toBe('gitlab-cleanup');
+    // 圧縮後の付け直しなので起動時刻は付けない（Issue #2173）
+    expect(items[0]?.skillLaunchedAt).toBeUndefined();
+  });
+
+  it('Skill注入の行の時刻を起動時刻として持たせる（Issue #2173）', () => {
+    const { items } = transcriptItems([
+      userLine(
+        'Base directory for this skill: /home/u/.claude/skills/gitlab-cleanup\n\n# gitlab-cleanup',
+        { isMeta: true, userType: undefined, origin: undefined },
+      ),
+    ]);
+    expect(items[0]?.skillLaunchedAt).toBe(Date.parse('2026-08-06T20:13:18.257Z'));
   });
 
   it('sourceToolUseID無しのisMeta（caveat等）は従来どおり非表示にする', () => {

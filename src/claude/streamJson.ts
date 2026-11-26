@@ -361,8 +361,10 @@ function applyUser(received: ChatState, event: Record<string, unknown>): ChatSta
   const launchedSkill = event['isSynthetic'] === true ? launchedSkillName(items) : '';
   const isSkillContext = isSkillContextEntry(event, text) || launchedSkill !== '';
   if (text !== '' || images.length > 0) {
+    const id = str(event['uuid']) || `user-${items.length}`;
     items = upsert(items, {
-      id: str(event['uuid']) || `user-${items.length}`,
+      ...(isSkillContext ? { skillLaunchedAt: skillLaunchTime(items, id, event) } : {}),
+      id,
       kind: isSkillContext ? 'skillContext' : 'userMessage',
       text,
       // どのskillが動いたかを項目に残す（issue #889）。本文の `Base directory` から取る名前には
@@ -377,6 +379,23 @@ function applyUser(received: ChatState, event: Record<string, unknown>): ChatSta
   }
 
   return items === state.items ? state : { ...state, items };
+}
+
+/**
+ * skillを起動した時刻（ms、Issue #2173）。同じ項目が届き直したら最初の時刻を保つ。イベントに
+ * `timestamp`（ISO 8601）があればそれを、無ければ受け取った時刻を使う。
+ */
+function skillLaunchTime(
+  items: readonly ChatItem[],
+  id: string,
+  event: Record<string, unknown>,
+): number {
+  const existing = items.find((i) => i.id === id)?.skillLaunchedAt;
+  if (existing !== undefined) {
+    return existing;
+  }
+  const stamped = Date.parse(str(event['timestamp']));
+  return Number.isFinite(stamped) ? stamped : Date.now();
 }
 
 /** Skillツールの結果に返る文面（実測、issue #1968）。 */

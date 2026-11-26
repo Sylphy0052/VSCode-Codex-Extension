@@ -19,7 +19,9 @@ import type { Logger } from '../../src/log';
 import { readTurnPage } from '../../src/view/chatManagerBase';
 import { parseAction } from '../../src/view/sessionControlMessage';
 import {
+  collectSkillUses,
   generateWindowId,
+  MAX_SHARED_SKILLS,
   isSharedApprovalDecision,
   isSharedHandoffDecision,
   MAX_SHARED_PURPOSE_CHARS,
@@ -167,6 +169,33 @@ describe('補助関数', () => {
     }
     expect(isSharedHandoffDecision('abort')).toBe(false);
     expect(isSharedHandoffDecision(1)).toBe(false);
+  });
+
+  it('collectSkillUsesは起動時刻を持つskillContextだけを古い順に集める（Issue #2173）', () => {
+    const items = [
+      { kind: 'skillContext', detail: 'first', skillLaunchedAt: 1 },
+      { kind: 'skillContext', detail: 'reinjected' },
+      { kind: 'userMessage', detail: '', skillLaunchedAt: 2 },
+      { kind: 'skillContext', detail: '', skillLaunchedAt: 3 },
+      { kind: 'skillContext', detail: 'second', skillLaunchedAt: 4 },
+    ];
+    expect(collectSkillUses(items)).toEqual([
+      { name: 'first', at: 1 },
+      { name: 'second', at: 4 },
+    ]);
+    expect(collectSkillUses([])).toBeUndefined();
+  });
+
+  it('collectSkillUsesは新しい方からMAX_SHARED_SKILLS件に絞る（Issue #2173）', () => {
+    const items = Array.from({ length: MAX_SHARED_SKILLS + 5 }, (_, i) => ({
+      kind: 'skillContext',
+      detail: `s${String(i)}`,
+      skillLaunchedAt: i,
+    }));
+    const uses = collectSkillUses(items) ?? [];
+    expect(uses).toHaveLength(MAX_SHARED_SKILLS);
+    expect(uses[0]?.name).toBe('s5');
+    expect(uses.at(-1)?.name).toBe(`s${String(MAX_SHARED_SKILLS + 4)}`);
   });
 });
 
@@ -430,6 +459,35 @@ describe('SessionHubReader', () => {
     const s = reader.getOthers()[0]?.sessions[0];
     expect(s?.purpose).toBe('A B CDE');
     expect(s?.branch).toBe('x yz');
+  });
+
+  it('起動したskillは要素ごとに確かめ、名前を1行へ均す（Issue #2173）', async () => {
+    const { reader, internals } = makeReader();
+    const other = randomUUID();
+    const rlo = String.fromCodePoint(0x202e);
+    await putSessionFile(
+      other,
+      fileBody(other, [
+        session('ok', {
+          skills: [
+            { name: `a${rlo}b\nc`, at: 10 },
+            { name: 1, at: 20 },
+            { name: 'x', at: -1 },
+            { name: 'y', at: 9e15 },
+            'junk',
+            { name: 'z', at: 30 },
+          ] as never,
+        }),
+        session('junk', { skills: 'nope' as never }),
+      ]),
+    );
+    await internals.reconcileAll();
+    const sessions = reader.getOthers()[0]?.sessions ?? [];
+    expect(sessions[0]?.skills).toEqual([
+      { name: 'ab c', at: 10 },
+      { name: 'z', at: 30 },
+    ]);
+    expect(sessions[1]?.skills).toBeUndefined();
   });
 
   it('stale（mtimeまたはupdatedAtが45秒超）のウィンドウは除外する', async () => {

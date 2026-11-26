@@ -296,6 +296,7 @@ import {
   SessionHubRequestWatcher,
   SessionHubWriter,
   LONG_REPLY_TIMEOUT_MS,
+  collectSkillUses,
   type SharedSession,
 } from './view/sessionHub';
 import { ForgeHubViewManager } from './view/forgeHubView';
@@ -1553,6 +1554,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         // セッションの目的の1文要約（Issue #2172）。まだ無ければ載せない
         purpose: session.purpose,
         branch: session.branch,
+        // 起動したskill（Issue #2173）。Codexは起動を見分けるイベントが無いので集まらない
+        skills: state === undefined ? undefined : collectSkillUses(state.items),
         pending:
           state === undefined
             ? []
