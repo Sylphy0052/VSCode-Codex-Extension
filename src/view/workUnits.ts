@@ -116,6 +116,12 @@ class UnionFind {
 export interface WorkUnitRange {
   since?: number | undefined;
   until?: number | undefined;
+  /**
+   * trueなら、`since`より前の最後の使用率の計測を範囲の最初の区間の始点に使う。区間は終点の計測が
+   * 入る範囲のものとして数えるので、隣り合う範囲（カレンダーの日ごと。Issue #2179）に分けても、
+   * 境目をまたぐ区間の消費を落とさず、二重にも数えない。既定（false）は範囲内の計測どうしだけ。
+   */
+  usageCarryIn?: boolean | undefined;
 }
 
 interface CumulativeBase {
@@ -256,6 +262,8 @@ interface UsageSample {
   t: number;
   used: number;
   resetsAt: number | undefined;
+  /** 範囲内の記録の計測か。範囲より前の計測は区間の始点にだけ使う（`usageCarryIn`）。 */
+  inRange: boolean;
 }
 
 /** 隣り合う計測の間の消費（%ポイント）。リセットをまたぐときは後の計測値そのもの。 */
@@ -270,6 +278,7 @@ function usageDelta(prev: UsageSample, cur: UsageSample): number {
 
 function collectUsageSamples(
   records: readonly WorkHistoryRecord[],
+  since: number | undefined,
 ): Map<string, { provider: McProvider; label: string; samples: UsageSample[] }> {
   const series = new Map<string, { provider: McProvider; label: string; samples: UsageSample[] }>();
   for (const record of records) {
@@ -286,6 +295,7 @@ function collectUsageSamples(
         t: window.sampledAt ?? record.capturedAt ?? record.at,
         used: window.usedPercent,
         resetsAt: window.resetsAt,
+        inRange: since === undefined || record.at >= since,
       });
     }
   }
@@ -300,6 +310,8 @@ function collectUsageSamples(
 /** 単位ごとの利用枠の消費を割り当てる。戻り値は単位のroot → (provider・窓 → %ポイント)。 */
 function attributeUsage(
   records: readonly WorkHistoryRecord[],
+  usageRecords: readonly WorkHistoryRecord[],
+  since: number | undefined,
   unitOf: (provider: McProvider, threadId: string) => string | undefined,
 ): Map<string, Map<string, McWorkUnitUsage>> {
   const sessionRecords = records.filter((r): r is WorkHistorySessionRecord => r.kind === 'session');
@@ -318,14 +330,15 @@ function attributeUsage(
       current.percent += percent;
     }
   };
-  for (const { provider, label, samples } of collectUsageSamples(records).values()) {
+  for (const { provider, label, samples } of collectUsageSamples(usageRecords, since).values()) {
     // 時刻順のセッション記録を、計測の区間ごとに1回だけ走査する
     const own = sessionRecords.filter((r) => r.provider === provider);
     let cursor = 0;
     for (let i = 1; i < samples.length; i++) {
       const prev = samples[i - 1];
       const cur = samples[i];
-      if (prev === undefined || cur === undefined) continue;
+      // 終点が範囲より前の区間は前の範囲の分（`usageCarryIn`のときだけ来る）
+      if (prev === undefined || cur === undefined || !cur.inRange) continue;
       while (cursor < own.length && (own[cursor]?.at ?? Infinity) <= prev.t) cursor++;
       const turns = new Map<string, number>();
       const active = new Set<string>();
@@ -405,7 +418,12 @@ export function aggregateWorkUnits(
   for (const [root, members] of groups) {
     for (const m of members) rootOf.set(m.key, root);
   }
-  const usage = attributeUsage(ordered, (provider, threadId) =>
+  // 境目をまたぐ区間を数えるときは、範囲より前の計測も区間の始点として渡す（範囲より後は渡さない）
+  const usageRecords =
+    range.usageCarryIn === true && since !== undefined
+      ? all.filter((r) => r.kind === 'usage' && (until === undefined || r.at < until))
+      : ordered;
+  const usage = attributeUsage(ordered, usageRecords, since, (provider, threadId) =>
     rootOf.get(sessionKey(provider, threadId)),
   );
   const units: McWorkUnit[] = [];

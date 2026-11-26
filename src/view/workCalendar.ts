@@ -17,7 +17,8 @@ import { aggregateWorkUnits, localDay, validIssueNumber } from './workUnits';
  *
  * - 日の境目はローカル時刻の0時（`localDay`と同じ。夏時間の日は23・25時間になる）
  * - 作業単位・費用・トークン・利用枠の概算は、`aggregateWorkUnits`をその日の範囲で呼んだ結果
- *   （費用・トークンは累計値なので、その日より前の記録を差し引いた増分）
+ *   （費用・トークンは累計値なので、その日より前の記録を差し引いた増分。利用枠は`usageCarryIn`で
+ *   0時をまたぐ区間を終点の日に入れる）
  * - セッションはprovider＋threadIdで1つと数え、その日に記録のあったものを全部出す（閉じたものも）
  *
  * vscodeに依らない。
@@ -216,7 +217,12 @@ export function buildWorkCalendar(
   for (const [dayKey, day] of [...days.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
     const accs = [...day.sessions.values()];
     const sessions = accs.map(toSession).sort((a, b) => a.firstAt - b.firstAt);
-    const units = aggregateWorkUnits(sorted, { since: day.start, until: day.end });
+    // 0時をまたぐ利用枠の区間は終点の日に入れる（前日にも翌日にも入らず落ちるのを防ぐ）
+    const units = aggregateWorkUnits(sorted, {
+      since: day.start,
+      until: day.end,
+      usageCarryIn: true,
+    });
     result.push({
       day: dayKey,
       sessionCount: sessions.length,

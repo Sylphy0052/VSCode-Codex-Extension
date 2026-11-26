@@ -1232,4 +1232,138 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       });
     });
   });
+
+  describe('作業履歴カレンダー（Issue #2179）', () => {
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const dayKey = (d: Date): string =>
+      `${String(d.getFullYear())}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const calendarSession = (threadId: string, title: string) => ({
+      provider: 'claude' as const,
+      threadId,
+      title,
+      issue: undefined,
+      branch: undefined,
+      firstAt: 0,
+      lastAt: 0,
+      ended: threadId === 'c2',
+      turns: 1,
+      skills: [],
+      costUsd: undefined,
+      tokens: undefined,
+    });
+
+    it('ダイアログ内のh / l / k / j / t / n / p / [ / ]は日・月・セッションの移動にだけ使い、全体のキー（h=履歴、l=台帳、t=タブ）を発火させない', async () => {
+      const { window, posted, deliver, key } = boot();
+      window.HTMLElement.prototype.scrollIntoView = () => undefined;
+      await tick();
+      deliver({ type: 'snapshot', snapshot: snapshot([]) });
+      await tick();
+      key('m');
+      await tick();
+      const doc = window.document;
+      const request = posted.filter((m) => m.type === 'workCalendar').at(-1);
+      const now = new Date();
+      expect(request).toMatchObject({ year: now.getFullYear(), month: now.getMonth() + 1 });
+      deliver({
+        type: 'reply',
+        seq: request?.seq,
+        ok: true,
+        calendar: {
+          year: now.getFullYear(),
+          month: now.getMonth() + 1,
+          days: [
+            {
+              day: dayKey(now),
+              sessionCount: 2,
+              units: [],
+              skills: [],
+              costUsd: undefined,
+              tokens: undefined,
+              usage: [],
+              sessions: [calendarSession('c1', '一つ目'), calendarSession('c2', '二つ目')],
+            },
+          ],
+        },
+      });
+      await tick();
+      const dialog = (): HTMLElement =>
+        doc.querySelector('[aria-label="作業履歴カレンダー"]') as HTMLElement;
+      const box = dialog().querySelector('.calendar-box') as HTMLElement;
+      expect(doc.activeElement).toBe(box);
+      const heading = (): string => dialog().querySelector('h3')?.textContent ?? '';
+      const press = (k: string): void => {
+        (doc.activeElement ?? doc.body).dispatchEvent(
+          new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }),
+        );
+      };
+      const before = posted.length;
+      expect(heading()).toBe(`${String(now.getMonth() + 1)}月${String(now.getDate())}日`);
+      expect(dialog().querySelectorAll('[role="option"]')).toHaveLength(2);
+      // 月表示のマスに日ごとの作業量（セッション数と塗りの段階）が出る
+      const todayCell = dialog().querySelector('.calendar-cell.today');
+      expect(todayCell?.textContent).toContain('2件');
+      expect(todayCell?.classList.contains('level-4')).toBe(true);
+      expect(dialog().querySelectorAll('.calendar-cell.level-0').length).toBeGreaterThan(0);
+      // 閉じたセッションも並ぶ
+      expect(dialog().querySelector('[data-calendar-session="1"]')?.textContent).toContain(
+        '閉じた',
+      );
+      // n / pでその日のセッションを選ぶ
+      press('n');
+      await tick();
+      expect(
+        dialog().querySelector('[role="option"][aria-selected="true"]')?.textContent,
+      ).toContain('二つ目');
+      press('p');
+      await tick();
+      expect(
+        dialog().querySelector('[role="option"][aria-selected="true"]')?.textContent,
+      ).toContain('一つ目');
+      // h / lで前後の日、k / jで前後の週、tで今日
+      const shifted = (delta: number): string => {
+        const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + delta);
+        return `${String(d.getMonth() + 1)}月${String(d.getDate())}日`;
+      };
+      press('h');
+      await tick();
+      expect(heading()).toBe(shifted(-1));
+      // キーは1つずつ別のタスクで届く（同じタスクで続けて送ると描画前の日から数える）
+      press('l');
+      await tick();
+      press('l');
+      await tick();
+      expect(heading()).toBe(shifted(1));
+      press('t');
+      await tick();
+      expect(heading()).toBe(shifted(0));
+      press('k');
+      await tick();
+      expect(heading()).toBe(shifted(-7));
+      press('j');
+      await tick();
+      expect(heading()).toBe(shifted(0));
+      // [ / ]は月を替えて取り寄せ直す（全体の[ / ]の操作は走らない）
+      press(']');
+      await tick();
+      press('[');
+      await tick();
+      expect(heading()).toBe(shifted(0));
+      // 履歴・台帳・タブの切替は起きず、ダイアログはカレンダーの1つだけ
+      const sent = posted.slice(before).map((m) => m.type ?? m.action);
+      expect(sent).toEqual(['workCalendar', 'workCalendar']);
+      expect(doc.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+      expect(dialog()).not.toBeNull();
+      // フォーカスがダイアログの外へ出ていても、hとlで履歴・台帳は開かない
+      box.blur();
+      key('h');
+      key('l');
+      key('t');
+      await tick();
+      expect(posted.slice(before).map((m) => m.type ?? m.action)).toEqual([
+        'workCalendar',
+        'workCalendar',
+      ]);
+      expect(doc.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    });
+  });
 });
