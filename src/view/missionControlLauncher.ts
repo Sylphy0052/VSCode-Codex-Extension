@@ -69,12 +69,16 @@ export interface MissionControlLauncherDeps {
   sessionCwds(): Array<string | undefined>;
   /** 履歴に出るセッションのcwd（新しい順）。 */
   historyCwds(): Promise<Array<string | undefined>>;
-  /** 既存の`openNew` / `openNewWithPrompt`で会話を開く。`settings`があればその設定で開く。 */
+  /**
+   * 既存の`openNew` / `openNewWithPrompt`で会話を開く。`settings`があればその設定で開く。
+   * `draft`があれば送らずに入力欄へ入れる（Issue #2180）。
+   */
   open(
     provider: McProvider,
     cwd: string,
     prompt: string,
     settings?: EffectiveLaunchSettings,
+    draft?: string,
   ): Promise<string | undefined>;
   /** model・プリセット・拡張機能の設定（起動オプションの候補と検証に使う）。 */
   catalog(): Promise<LaunchCatalog>;

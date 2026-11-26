@@ -288,7 +288,8 @@ import {
   SESSION_CATALOG_FILE,
   SessionCatalog,
 } from './view/sessionCatalog';
-import type { McLifecycleOp } from './webview/missionControl/protocol';
+import type { McLifecycleOp, McProvider } from './webview/missionControl/protocol';
+import type { EffectiveLaunchSettings } from './view/missionControlLaunchOptions';
 import { setupTaskRun } from './view/taskRunSetup';
 import type { TaskRunPendingPort } from './view/taskRunPending';
 import type { McRunsPort } from './view/missionControlRuns';
@@ -324,6 +325,8 @@ import { normalizeRetentionDays, readWorkHistory, WorkHistoryStore } from './vie
 import { loadUsageHistory } from './view/usageHistory';
 import { aggregateWorkUnits } from './view/workUnits';
 import { buildWorkCalendar } from './view/workCalendar';
+import { TodoStore } from './view/missionControlTodos';
+import { openSessionWithDraft } from './view/missionControlLaunch';
 import {
   setWorkHistoryHandoffSink,
   WORK_HISTORY_OBSERVE_INTERVAL_MS,
@@ -2136,6 +2139,42 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       },
     },
   );
+  /** Mission Controlからの新規起動で会話を開く（Issue #2137。`prompt`が空なら開くだけ）。 */
+  const openMissionControlChat = (
+    provider: McProvider,
+    cwd: string,
+    prompt: string,
+    launchSettings: EffectiveLaunchSettings | undefined,
+  ): Promise<string | undefined> => {
+    // 起動オプション（Issue #2149の2）は`agent.openPresetChat`と同じく`taskConfig`で渡す
+    if (provider === 'codex') {
+      const config: CodexConfig | undefined =
+        launchSettings === undefined
+          ? undefined
+          : {
+              ...readConfig().codex,
+              model: launchSettings.model,
+              reasoningEffort: launchSettings.effort,
+              approvalMode: launchSettings.approvalMode,
+              sandbox: launchSettings.sandbox || readConfig().codex.sandbox,
+            };
+      return prompt.trim() === ''
+        ? chat.openNew(cwd, config)
+        : chat.openNewWithPrompt(cwd, prompt, undefined, config);
+    }
+    const config: ClaudeConfig | undefined =
+      launchSettings === undefined
+        ? undefined
+        : {
+            ...readClaudeConfig().claude,
+            model: launchSettings.model,
+            effort: launchSettings.effort,
+            permissionMode: launchSettings.approvalMode,
+          };
+    return prompt.trim() === ''
+      ? claudeChat.openNew(cwd, config)
+      : claudeChat.openNewWithPrompt(cwd, prompt, config);
+  };
   const missionControl: MissionControlViewManager = new MissionControlViewManager(
     () => {
       const sessions = [
@@ -2192,36 +2231,21 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         (await store.list({ scope: 'all', workspaceFolders: [], maxEntries: 200 })).sessions.map(
           (session) => session.cwd,
         ),
-      open: (provider, cwd, prompt, launchSettings) => {
-        // 起動オプション（Issue #2149の2）は`agent.openPresetChat`と同じく`taskConfig`で渡す
-        if (provider === 'codex') {
-          const config: CodexConfig | undefined =
-            launchSettings === undefined
-              ? undefined
-              : {
-                  ...readConfig().codex,
-                  model: launchSettings.model,
-                  reasoningEffort: launchSettings.effort,
-                  approvalMode: launchSettings.approvalMode,
-                  sandbox: launchSettings.sandbox || readConfig().codex.sandbox,
-                };
-          return prompt.trim() === ''
-            ? chat.openNew(cwd, config)
-            : chat.openNewWithPrompt(cwd, prompt, undefined, config);
-        }
-        const config: ClaudeConfig | undefined =
-          launchSettings === undefined
-            ? undefined
-            : {
-                ...readClaudeConfig().claude,
-                model: launchSettings.model,
-                effort: launchSettings.effort,
-                permissionMode: launchSettings.approvalMode,
-              };
-        return prompt.trim() === ''
-          ? claudeChat.openNew(cwd, config)
-          : claudeChat.openNewWithPrompt(cwd, prompt, config);
-      },
+      // Todoからの起動（Issue #2180）は送らずに入力欄へ入れる。先に会話を開いてから入れる
+      open: (provider, cwd, prompt, launchSettings, draft) =>
+        openSessionWithDraft(
+          {
+            open: openMissionControlChat,
+            insertDraft: (p, id, text) =>
+              (p === 'codex' ? chat : claudeChat).insertComposerDraft(id, text),
+            warn: (message) => log.warn(message),
+          },
+          provider,
+          cwd,
+          prompt,
+          launchSettings,
+          draft,
+        ),
       catalog: async () => {
         const codexConfig = readConfig().codex;
         const claudeConfig = readClaudeConfig().claude;
@@ -2345,6 +2369,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         const records = await readWorkHistory(context.globalStorageUri.fsPath);
         return aggregateWorkUnits(records, { since });
       },
+      todos: new TodoStore(context.globalState),
       workCalendar: async (year, month) => {
         // 費用・トークンの差し引きのため、その月より前の記録も読む（workUnitsと同じ）
         const records = await readWorkHistory(context.globalStorageUri.fsPath, {

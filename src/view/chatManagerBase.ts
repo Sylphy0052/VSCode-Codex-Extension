@@ -163,6 +163,13 @@ export interface BaseChatPanel {
    */
   inputLock: boolean;
   /**
+   * webviewが`ready`を送ってから、HTMLを入れ直すまでの間か（Issue #2180）。`false`の間に
+   * 入力欄へ入れたい文は`pendingComposerText`に溜め、`ready`で送る（読み込み前に送ると消える）。
+   */
+  webviewReady?: boolean;
+  /** `webviewReady`になったら入力欄へ入れる文（Issue #2180）。 */
+  pendingComposerText?: string | undefined;
+  /**
    * 自動引き継ぎを発火させないタブか（Issue #1465 分割案8b、`TaskSessionInput.disableAutoHandoff`）。
    * ロードマップ実行のOrchestratorは世代をKanbanから開き直すため、別タブへの引き継ぎを始めない。
    */
@@ -1187,6 +1194,14 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * `dispatchMessage`へ渡す。画面で隠すだけだと、古いwebviewや細工したメッセージで送れてしまう。
    */
   private receiveWebviewMessage(entry: TPanel, message: unknown): void {
+    if (
+      typeof message === 'object' &&
+      message !== null &&
+      (message as Record<string, unknown>)['type'] === 'ready'
+    ) {
+      entry.webviewReady = true;
+      this.flushPendingComposerText(entry);
+    }
     if (!entry.inputLock) {
       this.dispatchMessage(entry, message);
       return;
@@ -1426,6 +1441,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
     panel.title = entry.title;
     panel.webview.options = { enableScripts: true };
+    entry.webviewReady = false;
     panel.webview.html = this.renderPanelHtml(entry, panel);
     const onMessage = panel.webview.onDidReceiveMessage((message: unknown) =>
       this.receiveWebviewMessage(entry, message),
@@ -2277,6 +2293,33 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     question: string,
     signal: AbortSignal,
   ): Promise<string>;
+
+  /**
+   * `id`の会話の入力欄へ`text`を入れる（送信しない。Issue #2180のTodoからの起動）。
+   * 開いた直後でwebviewがまだ読み込み中なら、`ready`が届いてから入れる。会話が無い・入力欄を
+   * 閉じたタブなら`false`。
+   */
+  insertComposerDraft(id: string, text: string): boolean {
+    const entry = this.panels.get(id);
+    if (entry === undefined || entry.panel === undefined || entry.inputLock) {
+      return false;
+    }
+    entry.pendingComposerText =
+      entry.pendingComposerText === undefined ? text : `${entry.pendingComposerText}\n${text}`;
+    if (entry.webviewReady === true) {
+      this.flushPendingComposerText(entry);
+    }
+    return true;
+  }
+
+  private flushPendingComposerText(entry: TPanel): void {
+    const text = entry.pendingComposerText;
+    if (text === undefined || entry.panel === undefined) {
+      return;
+    }
+    entry.pendingComposerText = undefined;
+    void entry.panel.webview.postMessage({ type: 'insertComposerText', text });
+  }
 
   /**
    * エディタの選択範囲（issue #292）を送る先。最後にアクティブだった画面を返す

@@ -2,7 +2,9 @@ import type { JSX } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import type { Bridge } from './bridge';
 import { ProviderIcon } from './icons';
-import type { McWorkCalendar } from './protocol';
+import type { McTodo, McTodoInput, McWorkCalendar } from './protocol';
+import { emptyTodoInput, formatCellTodos, orderTodos, todosByDay } from './todoLogic';
+import { TodoFormDialog, TodoNotices, TodoRows, useTodoKeys, useTodos } from './todos';
 import {
   WEEKDAY_LABELS,
   calendarDayKey,
@@ -34,13 +36,23 @@ type CalendarState =
  *
  * キー: ← / →（h / l）で前後の日、↑ / ↓（k / j）で前後の週、[ / ]で前後の月、tで今日、
  * n / pでその日のセッションを選び、Enterで開く。Escは`App`のキー処理が受け持つ。
+ *
+ * 期日付きのTodo（段階24。Issue #2180）も期日の日に出す。Shift+N / Shift+PでTodoを選び、
+ * aで選んだ日に追加、eで編集、xで完了、Shift+Dで削除、sでそのTodoから新規セッションを始める。
  */
-export function WorkCalendarDialog(props: { bridge: Bridge; onClose: () => void }): JSX.Element {
+export function WorkCalendarDialog(props: {
+  bridge: Bridge;
+  onClose: () => void;
+  onStartTodo: (todo: McTodo) => void;
+}): JSX.Element {
   const { bridge } = props;
   const [selected, setSelected] = useState<CalendarDate>(() => todayDate());
   const [state, setState] = useState<CalendarState>({ status: 'loading' });
   const [cursor, setCursor] = useState(0);
   const [openError, setOpenError] = useState<string | undefined>(undefined);
+  const [todoCursor, setTodoCursor] = useState(0);
+  const [todoForm, setTodoForm] = useState<McTodoInput | undefined>(undefined);
+  const todoOps = useTodos(bridge);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const { year, month } = selected;
@@ -62,8 +74,9 @@ export function WorkCalendarDialog(props: { bridge: Bridge; onClose: () => void 
   }, [bridge, year, month]);
 
   useEffect(() => {
-    boxRef.current?.focus();
-  }, []);
+    // Todoのフォームを閉じたら、カレンダーのキーへ戻す
+    if (todoForm === undefined) boxRef.current?.focus();
+  }, [todoForm]);
 
   const calendar = state.status === 'ok' ? state.calendar : undefined;
   const dayMap = useMemo(() => calendarDayMap(calendar), [calendar]);
@@ -76,6 +89,19 @@ export function WorkCalendarDialog(props: { bridge: Bridge; onClose: () => void 
   const day = dayMap.get(calendarDayKey(selected));
   const sessions = day?.sessions ?? [];
   const index = Math.min(cursor, Math.max(sessions.length - 1, 0));
+  const todoMap = useMemo(() => todosByDay(todoOps.todos), [todoOps.todos]);
+  const dayTodos = useMemo(
+    () => orderTodos(todoMap.get(calendarDayKey(selected)) ?? []),
+    [todoMap, selected],
+  );
+  const todoIndex = Math.min(todoCursor, Math.max(dayTodos.length - 1, 0));
+  const todoKeys = useTodoKeys({
+    ops: todoOps,
+    selected: dayTodos[todoIndex],
+    newDue: () => calendarDayKey(selected),
+    onEdit: setTodoForm,
+    onStart: props.onStartTodo,
+  });
 
   useEffect(() => {
     listRef.current
@@ -86,6 +112,7 @@ export function WorkCalendarDialog(props: { bridge: Bridge; onClose: () => void 
   const select = (next: CalendarDate): void => {
     setSelected(next);
     setCursor(0);
+    setTodoCursor(0);
     setOpenError(undefined);
   };
 
@@ -118,6 +145,7 @@ export function WorkCalendarDialog(props: { bridge: Bridge; onClose: () => void 
     }
     const plain = !e.shiftKey;
     const last = Math.max(sessions.length - 1, 0);
+    const lastTodo = Math.max(dayTodos.length - 1, 0);
     let handled = true;
     if (e.key === 'ArrowLeft' || (e.key === 'h' && plain)) {
       select(shiftDay(selected, -1));
@@ -137,137 +165,185 @@ export function WorkCalendarDialog(props: { bridge: Bridge; onClose: () => void 
       setCursor((c) => Math.min(Math.min(c, last) + 1, last));
     } else if (e.key === 'p' && plain) {
       setCursor((c) => Math.max(Math.min(c, last) - 1, 0));
+    } else if (e.key === 'N' && e.shiftKey) {
+      setTodoCursor(Math.min(todoIndex + 1, lastTodo));
+    } else if (e.key === 'P' && e.shiftKey) {
+      setTodoCursor(Math.max(todoIndex - 1, 0));
     } else if (e.key === 'Enter' && e.target === boxRef.current) {
       openSession(index);
     } else {
-      handled = false;
+      handled = todoKeys.handle(e);
     }
     if (handled) e.preventDefault();
   };
 
   return (
-    <div
-      class="help"
-      role="dialog"
-      aria-label="作業履歴カレンダー"
-      data-reserved-keys="hjkltnp"
-      onKeyDown={onKeyDown}
-    >
-      <div class="help-box history-box calendar-box" ref={boxRef} tabIndex={-1}>
-        <h2>
-          作業履歴カレンダー {String(year)}年{String(month)}月
-        </h2>
-        <p class="notice">
-          ← / →（h / l）で日、↑ / ↓（k / j）で週、[ / ]で月、tで今日。n / pでセッションを選び、
-          Enterで開く。
-        </p>
-        {state.status === 'loading' ? <p class="notice">作業履歴を読み込み中…</p> : null}
-        {state.status === 'error' ? <p class="error">{state.error}</p> : null}
-        <table class="calendar" role="grid" aria-label={`${String(year)}年${String(month)}月`}>
-          <thead>
-            <tr>
-              {WEEKDAY_LABELS.map((w) => (
-                <th key={w} scope="col">
-                  {w}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {weeks.map((week, wi) => (
-              <tr key={wi}>
-                {week.map((d, di) => {
-                  if (d === undefined) return <td key={di} class="calendar-cell outside" />;
-                  const date = { year, month, day: d };
-                  const key = calendarDayKey(date);
-                  const info = dayMap.get(key);
-                  const classes = [
-                    'calendar-cell',
-                    `level-${String(workLevel(info, maxSessions))}`,
-                    d === selected.day ? 'selected' : '',
-                    key === today ? 'today' : '',
-                  ]
-                    .filter((c) => c !== '')
-                    .join(' ');
-                  return (
-                    <td
-                      key={di}
-                      class={classes}
-                      role="gridcell"
-                      aria-selected={d === selected.day}
-                      title={formatCellLabel(date, info)}
-                      onClick={() => select(date)}
-                    >
-                      <span class="calendar-date">{String(d)}</span>
-                      <span class="calendar-summary">{formatCellSummary(info)}</span>
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <h3>
-          {String(month)}月{String(selected.day)}日
-        </h3>
-        {day === undefined ? (
-          <p class="empty">{state.status === 'ok' ? 'この日の作業履歴はありません。' : ''}</p>
-        ) : (
-          <>
-            <p class="notice">{formatDaySummary(day)}</p>
-            <p class="notice">skill: {formatDaySkills(day)}</p>
-            {day.units.length > 0 ? (
-              <ul class="calendar-units" aria-label="この日の作業単位">
-                {day.units.map((unit) => (
-                  <li key={unit.key}>
-                    {workUnitHeading(unit)} — {formatWorkUnitConsumption(unit)}
-                  </li>
+    <>
+      <div
+        class="help"
+        role="dialog"
+        aria-label="作業履歴カレンダー"
+        data-reserved-keys="hjkltnpaexds"
+        onKeyDown={onKeyDown}
+      >
+        <div class="help-box history-box calendar-box" ref={boxRef} tabIndex={-1}>
+          <h2>
+            作業履歴カレンダー {String(year)}年{String(month)}月
+          </h2>
+          <p class="notice">
+            ← / →（h / l）で日、↑ / ↓（k / j）で週、[ / ]で月、tで今日。n / pでセッションを選び、
+            Enterで開く。Todoは Shift+N / Shift+P で選び、aで追加、eで編集、xで完了、Shift+Dで削除、
+            sで新規セッションを始める。
+          </p>
+          {state.status === 'loading' ? <p class="notice">作業履歴を読み込み中…</p> : null}
+          {state.status === 'error' ? <p class="error">{state.error}</p> : null}
+          <table class="calendar" role="grid" aria-label={`${String(year)}年${String(month)}月`}>
+            <thead>
+              <tr>
+                {WEEKDAY_LABELS.map((w) => (
+                  <th key={w} scope="col">
+                    {w}
+                  </th>
                 ))}
-              </ul>
-            ) : null}
-            {openError !== undefined ? <p class="error">{openError}</p> : null}
-            <div class="history-list" ref={listRef} role="listbox" aria-label="この日のセッション">
-              {sessions.map((session, i) => (
-                <div
-                  key={`${session.provider}:${session.threadId}`}
-                  data-calendar-session={String(i)}
-                  class={i === index ? 'row selected' : 'row'}
-                  role="option"
-                  aria-selected={i === index}
-                  onClick={() => setCursor(i)}
-                  onDblClick={() => openSession(i)}
-                >
-                  <ProviderIcon provider={session.provider} />
-                  <span class="row-title">{calendarSessionHeading(session)}</span>
-                  <span class="row-meta">{session.ended ? '閉じた' : ''}</span>
-                  <span class="row-sub" title={session.branch}>
-                    {formatCalendarSession(session)}
-                  </span>
-                </div>
+              </tr>
+            </thead>
+            <tbody>
+              {weeks.map((week, wi) => (
+                <tr key={wi}>
+                  {week.map((d, di) => {
+                    if (d === undefined) return <td key={di} class="calendar-cell outside" />;
+                    const date = { year, month, day: d };
+                    const key = calendarDayKey(date);
+                    const info = dayMap.get(key);
+                    const cellTodos = formatCellTodos(todoMap.get(key));
+                    const classes = [
+                      'calendar-cell',
+                      `level-${String(workLevel(info, maxSessions))}`,
+                      d === selected.day ? 'selected' : '',
+                      key === today ? 'today' : '',
+                    ]
+                      .filter((c) => c !== '')
+                      .join(' ');
+                    return (
+                      <td
+                        key={di}
+                        class={classes}
+                        role="gridcell"
+                        aria-selected={d === selected.day}
+                        title={
+                          cellTodos === ''
+                            ? formatCellLabel(date, info)
+                            : `${formatCellLabel(date, info)} ${cellTodos}`
+                        }
+                        onClick={() => select(date)}
+                      >
+                        <span class="calendar-date">{String(d)}</span>
+                        <span class="calendar-summary">{formatCellSummary(info)}</span>
+                        {cellTodos === '' ? null : (
+                          <span class="calendar-summary calendar-todo">{cellTodos}</span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
               ))}
-            </div>
-          </>
-        )}
-        <div class="actions">
-          <button type="button" class="btn" onClick={() => select(shiftMonth(selected, -1))}>
-            前の月（[）
-          </button>
-          <button type="button" class="btn" onClick={() => select(shiftMonth(selected, 1))}>
-            次の月（]）
-          </button>
-          <button
-            type="button"
-            class="btn"
-            disabled={sessions.length === 0}
-            onClick={() => openSession(index)}
-          >
-            セッションを開く（Enter）
-          </button>
-          <button type="button" class="btn" onClick={props.onClose}>
-            閉じる（Esc）
-          </button>
+            </tbody>
+          </table>
+          <h3>
+            {String(month)}月{String(selected.day)}日
+          </h3>
+          <TodoNotices ops={todoOps} confirmDelete={todoKeys.confirmDelete} />
+          {dayTodos.length > 0 ? (
+            <TodoRows
+              todos={dayTodos}
+              index={todoIndex}
+              label="この日が期日のTodo"
+              onSelect={setTodoCursor}
+              onStart={props.onStartTodo}
+            />
+          ) : null}
+          {day === undefined ? (
+            <p class="empty">{state.status === 'ok' ? 'この日の作業履歴はありません。' : ''}</p>
+          ) : (
+            <>
+              <p class="notice">{formatDaySummary(day)}</p>
+              <p class="notice">skill: {formatDaySkills(day)}</p>
+              {day.units.length > 0 ? (
+                <ul class="calendar-units" aria-label="この日の作業単位">
+                  {day.units.map((unit) => (
+                    <li key={unit.key}>
+                      {workUnitHeading(unit)} — {formatWorkUnitConsumption(unit)}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {openError !== undefined ? <p class="error">{openError}</p> : null}
+              <div
+                class="history-list"
+                ref={listRef}
+                role="listbox"
+                aria-label="この日のセッション"
+              >
+                {sessions.map((session, i) => (
+                  <div
+                    key={`${session.provider}:${session.threadId}`}
+                    data-calendar-session={String(i)}
+                    class={i === index ? 'row selected' : 'row'}
+                    role="option"
+                    aria-selected={i === index}
+                    onClick={() => setCursor(i)}
+                    onDblClick={() => openSession(i)}
+                  >
+                    <ProviderIcon provider={session.provider} />
+                    <span class="row-title">{calendarSessionHeading(session)}</span>
+                    <span class="row-meta">{session.ended ? '閉じた' : ''}</span>
+                    <span class="row-sub" title={session.branch}>
+                      {formatCalendarSession(session)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          <div class="actions">
+            <button type="button" class="btn" onClick={() => select(shiftMonth(selected, -1))}>
+              前の月（[）
+            </button>
+            <button type="button" class="btn" onClick={() => select(shiftMonth(selected, 1))}>
+              次の月（]）
+            </button>
+            <button
+              type="button"
+              class="btn"
+              disabled={sessions.length === 0}
+              onClick={() => openSession(index)}
+            >
+              セッションを開く（Enter）
+            </button>
+            <button
+              type="button"
+              class="btn"
+              onClick={() => setTodoForm({ ...emptyTodoInput(calendarDayKey(selected)) })}
+            >
+              Todoを追加（a）
+            </button>
+            <button type="button" class="btn" onClick={props.onClose}>
+              閉じる（Esc）
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+      {todoForm !== undefined ? (
+        <TodoFormDialog
+          bridge={bridge}
+          initial={todoForm}
+          onSaved={(next) => {
+            todoOps.apply(next);
+            setTodoForm(undefined);
+          }}
+          onClose={() => setTodoForm(undefined)}
+        />
+      ) : null}
+    </>
   );
 }

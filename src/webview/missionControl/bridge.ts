@@ -27,6 +27,8 @@ import type {
   McTarget,
   McTurn,
   McUsageHistory,
+  McTodo,
+  McTodoInput,
   McWorkCalendar,
   McWorkUnit,
 } from './protocol';
@@ -70,6 +72,7 @@ export interface ReplyResult {
   handoffs?: McHandoffListing | undefined;
   workUnits?: McWorkUnit[] | undefined;
   calendar?: McWorkCalendar | undefined;
+  todos?: McTodo[] | undefined;
   issues?: McIssueListing | undefined;
   message?: string | undefined;
   attachments?: McAttachment[] | undefined;
@@ -109,6 +112,11 @@ export interface Bridge {
   workUnits(days: number): Promise<ReplyResult>;
   /** 作業履歴カレンダーの1か月分を取り寄せる（Issue #2179）。`month`は1〜12。 */
   workCalendar(year: number, month: number): Promise<ReplyResult>;
+  /** 期日付きのTodoの一覧（Issue #2180）。変更の応答も`todos`に変更後の一覧を返す。 */
+  todos(): Promise<ReplyResult>;
+  todoSave(todo: McTodoInput): Promise<ReplyResult>;
+  todoDone(id: string, done: boolean): Promise<ReplyResult>;
+  todoDelete(id: string): Promise<ReplyResult>;
   /** レビュー待ちの1ファイルをdiffエディタで開かせる（Issue #2138の1）。 */
   openDiff(target: McTarget, path: string): Promise<ReplyResult>;
   /** レビュー待ちを「確認済み」にする。 */
@@ -243,6 +251,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           handoffs: message.handoffs,
           workUnits: message.workUnits,
           calendar: message.calendar,
+          todos: message.todos,
           issues: message.issues,
           message: message.message,
           attachments: message.attachments,
@@ -321,6 +330,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
         provider: request.provider,
         prompt: request.prompt,
         worktree: request.worktree,
+        draft: request.draft,
         model: request.model,
         effort: request.effort,
         approval: request.approval,
@@ -333,6 +343,10 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     handoffOpen: (name) => call({ type: 'handoffOpen', name }),
     workUnits: (days) => call({ type: 'workUnits', days }),
     workCalendar: (year, month) => call({ type: 'workCalendar', year, month }),
+    todos: () => call({ type: 'todos' }),
+    todoSave: (todo) => call({ type: 'todoSave', todo }),
+    todoDone: (id, done) => call({ type: 'todoDone', id, done }),
+    todoDelete: (id) => call({ type: 'todoDelete', id }),
     openDiff: (to, file) => call({ type: 'openDiff', ...targetOnly(to), path: file }),
     reviewAck: (to) => call({ type: 'reviewAck', ...targetOnly(to) }),
     resume: (to) => call({ type: 'resume', ...targetOnly(to) }),

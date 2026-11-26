@@ -30,7 +30,7 @@ export const MAX_RECENT_LAUNCH_REPOS = 10;
  * （実在の確認は`launchMissionControlSession`が非同期に行う）。不正なら理由の文を返す。
  */
 export function parseLaunchRequest(message: Record<string, unknown>): McLaunchRequest | string {
-  const { cwd, provider, prompt, worktree } = message;
+  const { cwd, provider, prompt, worktree, draft } = message;
   if (typeof cwd !== 'string' || cwd === '' || /[\0\r\n]/u.test(cwd)) {
     return '作業ディレクトリが不正です';
   }
@@ -49,11 +49,30 @@ export function parseLaunchRequest(message: Record<string, unknown>): McLaunchRe
   if (typeof worktree !== 'boolean') {
     return 'worktreeの指定が不正です';
   }
+  if (draft !== undefined && typeof draft !== 'string') {
+    return '入力欄へ入れる文が不正です';
+  }
+  if (draft !== undefined && draft.length > MAX_LAUNCH_PROMPT_CHARS) {
+    return '入力欄へ入れる文が長すぎます';
+  }
+  if (draft !== undefined && draft.trim() !== '' && prompt.trim() !== '') {
+    return '最初の指示と入力欄へ入れる文は同時に指定できません';
+  }
   const settings = parseLaunchSettings(message);
   if (typeof settings === 'string') {
     return settings;
   }
-  return { ...settings, cwd: path.resolve(cwd), provider, prompt, worktree };
+  const request: McLaunchRequest = {
+    ...settings,
+    cwd: path.resolve(cwd),
+    provider,
+    prompt,
+    worktree,
+  };
+  if (draft !== undefined && draft.trim() !== '') {
+    request.draft = draft;
+  }
+  return request;
 }
 
 export interface McLaunchDeps {
@@ -67,13 +86,51 @@ export interface McLaunchDeps {
   /**
    * 会話を開き、`prompt`が空でなければ最初の指示として送る。開いた会話のidを返す。
    * `settings`があればmodel・effort・承認方針をその値で起動する（Issue #2149の2）。
+   * `draft`があれば送らずに入力欄へ入れる（Issue #2180）。
    */
   open(
     provider: McProvider,
     cwd: string,
     prompt: string,
     settings?: EffectiveLaunchSettings,
+    draft?: string,
   ): Promise<string | undefined>;
+}
+
+/** `openSessionWithDraft`が使う会話の操作（`extension.ts`がCodex / Claude Codeの画面を渡す）。 */
+export interface McOpenWithDraftDeps {
+  /** 会話を開き、`prompt`が空でなければ最初の指示として送る。開いた会話のidを返す。 */
+  open(
+    provider: McProvider,
+    cwd: string,
+    prompt: string,
+    settings: EffectiveLaunchSettings | undefined,
+  ): Promise<string | undefined>;
+  /** 開いた会話の入力欄へ文を入れる（送信しない）。入れられなければ`false`。 */
+  insertDraft(provider: McProvider, id: string, text: string): boolean;
+  warn(message: string): void;
+}
+
+/**
+ * 会話を開く。`draft`があれば（Todoからの起動。Issue #2180）最初の指示は送らずに開き、
+ * 開いた会話の入力欄へ`draft`を入れる。
+ */
+export async function openSessionWithDraft(
+  deps: McOpenWithDraftDeps,
+  provider: McProvider,
+  cwd: string,
+  prompt: string,
+  settings: EffectiveLaunchSettings | undefined,
+  draft: string | undefined,
+): Promise<string | undefined> {
+  if (draft === undefined || draft.trim() === '') {
+    return deps.open(provider, cwd, prompt, settings);
+  }
+  const opened = await deps.open(provider, cwd, '', settings);
+  if (opened !== undefined && !deps.insertDraft(provider, opened, draft)) {
+    deps.warn('Mission Control: 開いた会話の入力欄へTodoの内容を入れられませんでした');
+  }
+  return opened;
 }
 
 export type McLaunchResult =
@@ -95,7 +152,10 @@ export async function launchMissionControlSession(
     }
     cwd = created.cwd;
   }
-  const threadId = await deps.open(request.provider, cwd, request.prompt, settings);
+  const threadId =
+    request.draft === undefined
+      ? await deps.open(request.provider, cwd, request.prompt, settings)
+      : await deps.open(request.provider, cwd, request.prompt, settings, request.draft);
   if (threadId === undefined) {
     return { ok: false, error: '会話を開けませんでした' };
   }
