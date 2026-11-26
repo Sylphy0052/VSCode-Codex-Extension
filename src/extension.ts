@@ -307,6 +307,12 @@ import { FavoritesTreeProvider } from './view/favoritesTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildMcUsage } from './view/missionControlUsage';
+import { normalizeRetentionDays, WorkHistoryStore } from './view/workHistory';
+import {
+  setWorkHistoryHandoffSink,
+  WORK_HISTORY_OBSERVE_INTERVAL_MS,
+  WorkHistoryRecorder,
+} from './view/workHistoryRecorder';
 import { createMcSettingsPort } from './view/missionControlSettings';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
 import {
@@ -2059,6 +2065,36 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 早く復元されうるので、MCより先に作っておく
   const usageBar = new UsageStatusBar();
   context.subscriptions.push(usageBar);
+  // 作業履歴（Issue #2175）。自ウィンドウのセッションのイベントと、利用枠の値を取得のたびに残す
+  const workHistory = new WorkHistoryRecorder({
+    store: new WorkHistoryStore(context.globalStorageUri.fsPath, (message) => log.warn(message)),
+    windowId,
+    retentionDays: () =>
+      normalizeRetentionDays(
+        vscode.workspace
+          .getConfiguration('agent')
+          .get<unknown>('missionControl.historyRetentionDays'),
+      ),
+  });
+  void workHistory.pruneIfDue(true);
+  setWorkHistoryHandoffSink((provider, parentThreadId, childThreadId) => {
+    workHistory.recordHandoff(provider, parentThreadId, childThreadId);
+  });
+  const workHistoryTimer = setInterval(() => {
+    workHistory.observeSessions(currentWindowSessions());
+  }, WORK_HISTORY_OBSERVE_INTERVAL_MS);
+  context.subscriptions.push(
+    usageBar.onDidChange(() => {
+      workHistory.observeUsage(buildMcUsage(usageBar.current(), Date.now()));
+    }),
+    {
+      dispose: () => {
+        clearInterval(workHistoryTimer);
+        setWorkHistoryHandoffSink(undefined);
+        workHistory.stop();
+      },
+    },
+  );
   const missionControl: MissionControlViewManager = new MissionControlViewManager(
     () => {
       const sessions = [
@@ -2296,6 +2332,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     // 実行中のターンを書き残し、走り出した会話は再開待ちから外す（Issue #2138の3）
     const managed = currentWindowManagedSessions();
     runningTurnJournal.observe(managed);
+    workHistory.observeSessions(currentWindowSessions());
     for (const session of managed) {
       if (isRunningTurn(session.activity)) {
         missionControlResumable.delete(resumeKey(session));

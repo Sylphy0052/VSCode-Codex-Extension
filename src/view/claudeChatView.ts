@@ -293,6 +293,7 @@ import {
   describeProfile,
 } from './handoffTrace';
 import { appendHandoffLog } from './handoffLog';
+import { reportWorkHistoryHandoff } from './workHistoryRecorder';
 import {
   applyHandoffReflexThresholds,
   describeHandoffBoundaryMaterial,
@@ -1736,6 +1737,8 @@ export class ClaudeChatViewManager
         : withHandoffAcceptance(`${attemptText}\n\n${factsSection}`, handoffId, asksChecklist);
       // 開いて初回プロンプトを送るまで。model/effortがズレたときの作り直し（Issue #2016）でも
       // 同じ内容をもう一度送るため、まとめておく。開けない・送れないときは`undefined`
+      // 作業履歴の親子（Issue #2175）に使う、開けた引き継ぎ先のid
+      let launchedSessionId: string | undefined;
       const launch = async (): Promise<HandoffDestination<ClaudePanel> | undefined> => {
         const newSessionId = await this.openNew(
           entry.cwd,
@@ -1854,6 +1857,7 @@ export class ClaudeChatViewManager
           this.teardown(newEntry);
           return undefined;
         }
+        launchedSessionId = newSessionId;
         return { entry: newEntry, firstResponse, abandon: () => giveUp.abort(), launchMismatch };
       };
       const launched = await launch();
@@ -1861,6 +1865,10 @@ export class ClaudeChatViewManager
         continue;
       }
       await recordHandoff();
+      // 作業履歴へ親子を残す（Issue #2175）
+      if (launchedSessionId !== undefined) {
+        reportWorkHistoryHandoff('claude', sessionId, launchedSessionId);
+      }
       if (autoReply) {
         this.stopAutoReply(entry, 'handedOff');
       }
@@ -1875,7 +1883,14 @@ export class ClaudeChatViewManager
         entry,
         launched,
         choice.settings,
-        launch,
+        // 作り直した引き継ぎ先も親子として残す（Issue #2175）
+        async () => {
+          const relaunched = await launch();
+          if (relaunched !== undefined && launchedSessionId !== undefined) {
+            reportWorkHistoryHandoff('claude', sessionId, launchedSessionId);
+          }
+          return relaunched;
+        },
         trigger.kind === 'assistantSuggested' && trigger.keepOldTab === true,
       );
       return 'started';
