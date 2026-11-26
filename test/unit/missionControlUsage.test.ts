@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { UsageSnapshot } from '../../src/codex/usage';
 import { buildMcUsage } from '../../src/view/missionControlUsage';
 import { parseRunTaskOp } from '../../src/view/missionControlRuns';
+import { projectUsage } from '../../src/webview/missionControl/globalLogic';
 
 const NOW = 1_800_000_000_000;
 const NOW_SEC = NOW / 1000;
@@ -147,6 +148,88 @@ describe('buildMcUsage', () => {
       ['toString', undefined],
       ['制限', undefined],
     ]);
+  });
+
+  it('/usageの5時間枠と週次を同じ表示名の枠へ重ね、見込みに要る組を揃える（Issue #2174）', () => {
+    const usage = buildMcUsage(
+      {
+        codex: undefined,
+        claude: [
+          // rate_limit_event由来: リセット時刻と到達だけ
+          { label: '5時間', usedPercent: undefined, resetsAt: NOW_SEC + 7200, limited: true },
+          // /usage由来: 使用率だけ
+          { label: 'セッション', usedPercent: 16, resetsAt: undefined, limited: undefined },
+        ],
+        claudeReceivedAt: NOW - 5000,
+        claudeSlots: {
+          slots: {
+            fiveHour: { pct: 16, resetsAt: NOW + 3_600_000 },
+            weekly: { pct: 23, resetsAt: NOW + 86_400_000 },
+          },
+          readAt: NOW - 60_000,
+        },
+      },
+      NOW,
+    );
+    expect(usage.claude).toEqual({
+      windows: [
+        {
+          label: '5時間',
+          usedPercent: 16,
+          resetsAt: NOW + 3_600_000,
+          windowMs: 5 * 3_600_000,
+          limited: true,
+          stale: false,
+        },
+        { label: 'セッション', usedPercent: 16, limited: false, stale: false },
+        {
+          label: '週次',
+          usedPercent: 23,
+          resetsAt: NOW + 86_400_000,
+          windowMs: 7 * 24 * 3_600_000,
+          limited: false,
+          stale: false,
+        },
+      ],
+      // 重ねた値のうち最も古い受け取り時刻
+      capturedAt: NOW - 60_000,
+    });
+    // 画面側の計算に渡すと見込みが出る（週次の6/7が過ぎて23% → リセット時約27%）
+    const weekly = usage.claude?.windows[2];
+    expect(weekly && projectUsage(weekly, NOW)?.atResetPercent).toBeCloseTo((23 * 7) / 6);
+  });
+
+  it('/usageの値のリセット時刻を過ぎていれば、ステータスバーの枠をそのまま使う（Issue #2174）', () => {
+    const entry = {
+      label: '5時間',
+      usedPercent: undefined,
+      resetsAt: NOW_SEC + 7200,
+      limited: false,
+    };
+    const usage = buildMcUsage(
+      {
+        codex: undefined,
+        claude: [entry],
+        claudeReceivedAt: NOW - 5000,
+        claudeSlots: {
+          slots: { fiveHour: { pct: 90, resetsAt: NOW - 1000 }, weekly: undefined },
+          readAt: NOW - 6 * 3_600_000,
+        },
+      },
+      NOW,
+    );
+    expect(usage.claude).toEqual({
+      windows: [
+        {
+          label: '5時間',
+          resetsAt: NOW + 7_200_000,
+          windowMs: 5 * 3_600_000,
+          limited: false,
+          stale: false,
+        },
+      ],
+      capturedAt: NOW - 5000,
+    });
   });
 
   it('Claudeに値のある枠が無ければ返さない', () => {
