@@ -32,6 +32,7 @@ function makeDeps(overrides: Record<string, unknown> = {}) {
     findRoadmapRun: vi.fn(() => undefined as { runId: string; suspendedAt?: number } | undefined),
     startRoadmapRun: vi.fn(async () => ({ ok: true, runId: 'r1', reused: false })),
     syncRoadmap: vi.fn(async () => ({ ok: true })),
+    setGoal: vi.fn(async () => ({ ok: true, message: 'ok' })),
     ...overrides,
   };
   const deps = {
@@ -50,6 +51,7 @@ const input = { folder: '/w', engine: 'codex' as const, issueNumber: undefined, 
 
 const validImport = {
   kind: 'imported',
+  body: '',
   children: [],
   plan: { kind: 'valid', nodes: [], content: ['x'] },
 };
@@ -178,5 +180,71 @@ describe('startRoadmapRunFromChat', () => {
     const r = await startRoadmapRunFromChat(deps, input);
     expect(r).toMatchObject({ accepted: false, reused: true, runId: 'old' });
     expect(r.reason).toContain('sync');
+  });
+
+  describe('runの目的（Issue #2193）', () => {
+    const goal = {
+      objective: '起動が速くなる',
+      completionCriteria: '起動が1秒以内',
+      source: 'start' as const,
+    };
+
+    it('渡したgoalをrunの作成へ渡す', async () => {
+      h.importRoadmap.mockResolvedValue({
+        ...validImport,
+        body: '## 目的\n本文の目的\n## 完了条件\n本文の条件',
+      });
+      const { deps, controller } = makeDeps();
+      const r = await startRoadmapRunFromChat(deps, { ...input, goal });
+      expect(r).toMatchObject({ accepted: true, goalApplied: true });
+      expect(controller.startRoadmapRun).toHaveBeenCalledWith(expect.objectContaining({ goal }));
+    });
+
+    it('goalを渡さなければロードマップ本文の節から取る', async () => {
+      h.importRoadmap.mockResolvedValue({
+        ...validImport,
+        body: '# RM\n## 目的\n- 本文の目的\n## 完了条件\n- 本文の条件\n## 子Issue\n- [ ] #1',
+      });
+      const { deps, controller } = makeDeps();
+      const r = await startRoadmapRunFromChat(deps, input);
+      expect(r.goalApplied).toBeUndefined();
+      expect(controller.startRoadmapRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          goal: { objective: '本文の目的', completionCriteria: '本文の条件', source: 'roadmap' },
+        }),
+      );
+    });
+
+    it('goalも本文の節も無ければgoalを置かない（固定文を入れない）', async () => {
+      h.importRoadmap.mockResolvedValue({ ...validImport, body: '# RM\n- [ ] #1 子' });
+      const { deps, controller } = makeDeps();
+      await startRoadmapRunFromChat(deps, input);
+      expect(controller.startRoadmapRun).toHaveBeenCalledWith(
+        expect.objectContaining({ goal: undefined }),
+      );
+    });
+
+    it('既存runへgoalを渡すと、起動の理由を添えて目的を直す', async () => {
+      const { deps, controller } = makeDeps({
+        findRoadmapRun: vi.fn(() => ({ runId: 'old' })),
+      });
+      const r = await startRoadmapRunFromChat(deps, { ...input, goal, goalReason: '利用者の依頼' });
+      expect(r).toMatchObject({ accepted: true, runId: 'old', reused: true, goalApplied: true });
+      expect(controller.setGoal).toHaveBeenCalledWith(
+        'old',
+        goal,
+        expect.stringContaining('利用者の依頼'),
+      );
+    });
+
+    it('既存runの目的を直せなければ理由へ添え、runの扱いは変えない', async () => {
+      const { deps } = makeDeps({
+        findRoadmapRun: vi.fn(() => ({ runId: 'old' })),
+        setGoal: vi.fn(async () => ({ ok: false, message: '専有権なし' })),
+      });
+      const r = await startRoadmapRunFromChat(deps, { ...input, goal });
+      expect(r).toMatchObject({ accepted: true, goalApplied: false });
+      expect(r.reason).toContain('専有権なし');
+    });
   });
 });

@@ -97,6 +97,7 @@ function kanbanRun(runId: string, cards: TaskRunKanbanCard[] = []): TaskRunKanba
     orchestratorAutoHandoffs: undefined,
     columns: columnsOf({ implement: cards }),
     roadmap: undefined,
+    goal: undefined,
   };
 }
 

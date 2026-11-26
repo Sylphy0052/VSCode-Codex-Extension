@@ -93,6 +93,7 @@ import { checkSelfImproveMerge } from '../orchestrator/selfImproveMergeCheck';
 import { createStageObservationPorts } from '../orchestrator/taskStageObservation';
 import { TaskStageRunner } from '../orchestrator/taskStageRunner';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import { GOAL_REASON_MAX_LENGTH, parseGoalInput } from '../orchestrator/taskRunGoal';
 import {
   nodeWorktreeFileSystem,
   type GitCommandRunner,
@@ -810,7 +811,14 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     // 引数は呼び出し元チャットのフォルダとengine。値は信用せず型を確かめる
     vscode.commands.registerCommand('agent.taskRun.startRoadmapFromChat', (raw?: unknown) => {
       const input = raw as
-        { folder?: unknown; engine?: unknown; issueNumber?: unknown } | undefined;
+        | {
+            folder?: unknown;
+            engine?: unknown;
+            issueNumber?: unknown;
+            goal?: unknown;
+            reason?: unknown;
+          }
+        | undefined;
       const engine = parseEngine(input?.engine);
       if (typeof input?.folder !== 'string' || input.folder === '' || engine === undefined) {
         return { accepted: false, reason: 'フォルダとengineを指定してください' };
@@ -824,11 +832,21 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
       if (!inWorkspace) {
         return { accepted: false, reason: '開いているワークスペースフォルダの外は指定できません' };
       }
+      // goalは外部由来なので、ツール側で確かめていてもここで確かめ直して均す（Issue #2193）
+      const goal = parseGoalInput(input.goal, 'start');
+      if (!goal.ok) {
+        return { accepted: false, reason: goal.message };
+      }
       return startRoadmapRunFromChat(roadmapStartDeps(engine), {
         folder,
         engine,
         issueNumber: parseIssueNumber(input.issueNumber),
         maxParallel: Math.min(readTaskRunMaxParallelPerFolder(), MAX_TASK_RUN_PARALLEL),
+        goal: goal.value,
+        goalReason:
+          typeof input.reason === 'string'
+            ? sanitizeInlineText(input.reason, GOAL_REASON_MAX_LENGTH)
+            : undefined,
       });
     }),
     vscode.commands.registerCommand('agent.taskRun.kanban', () => view.show()),

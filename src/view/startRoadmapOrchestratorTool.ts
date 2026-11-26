@@ -31,6 +31,7 @@ export async function startRoadmapOrchestratorFromTool(
   if (folder === undefined) {
     return { accepted: false, reason: 'このチャットのフォルダが決まっていないため起動できません' };
   }
+  const reason = sanitizeInlineText(args.reason, REASON_MAX_LENGTH);
   let result: StartRoadmapOrchestratorToolResult | undefined;
   try {
     result = await vscode.commands.executeCommand<StartRoadmapOrchestratorToolResult>(
@@ -39,6 +40,16 @@ export async function startRoadmapOrchestratorFromTool(
         folder,
         engine: host.engine,
         ...(args.roadmapIssueNumber === undefined ? {} : { issueNumber: args.roadmapIssueNumber }),
+        // 既存runの目的を直すときの理由として、goalと一緒に起動の理由も渡す（Issue #2193）
+        ...(args.goal === undefined
+          ? {}
+          : {
+              goal: {
+                objective: args.goal.objective,
+                completionCriteria: args.goal.completionCriteria,
+              },
+              reason,
+            }),
       },
     );
   } catch (error) {
@@ -53,13 +64,25 @@ export async function startRoadmapOrchestratorFromTool(
   if (result === undefined) {
     return { accepted: false, reason: 'オーケストレータモードが利用できません' };
   }
-  const reason = sanitizeInlineText(args.reason, REASON_MAX_LENGTH);
   const outcome = result.accepted
     ? result.reused === true
       ? `既存のrun ${result.runId ?? ''}を読み直させました`
       : `run ${result.runId ?? ''}を起動しました`
     : `起動しませんでした（${result.reason}）`;
-  host.note(`オーケストレータモード: ${outcome}。理由: ${reason}`);
+  host.note(`オーケストレータモード: ${outcome}。理由: ${reason}${formatGoalNote(args, result)}`);
   host.log(`start_roadmap_orchestrator: ${outcome}`);
   return result;
+}
+
+/** 会話へ残す目的の行（Issue #2193）。渡したgoalがrunに入ったときだけ出す。 */
+function formatGoalNote(
+  args: StartRoadmapOrchestratorToolArgs,
+  result: StartRoadmapOrchestratorToolResult,
+): string {
+  if (args.goal === undefined || result.goalApplied !== true) {
+    return '';
+  }
+  const objective = sanitizeInlineText(args.goal.objective, REASON_MAX_LENGTH);
+  const criteria = sanitizeInlineText(args.goal.completionCriteria ?? '', REASON_MAX_LENGTH);
+  return `。目的: ${objective} / 完了条件: ${criteria}`;
 }

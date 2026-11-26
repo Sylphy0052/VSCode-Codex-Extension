@@ -1015,6 +1015,19 @@ const script = `
         controls.appendChild(noticeEl);
       }
     }
+    if (run.goal) {
+      // runの目的（Issue #2193）。直した記録は理由と一緒にツールチップで見せる
+      const goal = run.goal;
+      const goalText = goal.objective
+        ? '目的: ' + goal.objective + (goal.completionCriteria ? ' / 完了条件: ' + goal.completionCriteria : '')
+        : '目的: なし';
+      const goalEl = el('span', 'status', goalText + (goal.revisionCount > 0 ? '（' + goal.revisionCount + '回修正）' : ''));
+      goalEl.title = [goalText].concat(goal.revisions.map(function (r) {
+        const at = new Date(r.at);
+        return (isNaN(at.getTime()) ? r.at : at.toLocaleString()) + ' 修正の理由: ' + r.reason + '（直す前: ' + r.previous + '）';
+      })).join(String.fromCharCode(10));
+      controls.appendChild(goalEl);
+    }
     controls.appendChild(button('名前を変更', '', function () { send('renameRun'); }));
     if (orchestratorStatus && !run.suspended) {
       // 世代番号と自動引き継ぎの発生を並べて出す（Issue #1553）

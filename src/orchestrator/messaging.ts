@@ -9,6 +9,8 @@ import {
   stripControlCharsPreservingNewlines,
 } from './sanitize';
 import { TEAM_ROLES } from './rolePresets';
+import { GOAL_CRITERIA_GUIDANCE, parseGoalInput } from './taskRunGoal';
+import type { TaskRunGoal } from './taskRunState';
 import { RECORD_LESSON_TOOL, parseLessonArgs } from './runNotes';
 import { parseSessionTarget, type SessionBridgePort, type SessionTarget } from './sessionBridge';
 import { MAX_HANDOFF_BYTES, type HandoffEntry, type HandoffResult } from './teamHandoff';
@@ -1570,7 +1572,10 @@ export const START_ROADMAP_ORCHESTRATOR_TOOL: McpToolDefinition = {
     '同じロードマップIssueのrunが既にあれば新しく作らず、ロードマップを読み直させる' +
     '（中断中なら再開してから読み直させる）。起動したrunの計画は承認待ちで始まり、' +
     '利用者がKanbanで承認すると工程が進む。結果が`accepted: true`なら**このターンをすぐ終えること**。' +
-    '`accepted: false`なら`reason`を利用者へ伝え、runは始まっていない。',
+    '`accepted: false`なら`reason`を利用者へ伝え、runは始まっていない。' +
+    '利用者の意図からrunの目的が分かるときは`goal`に渡す。' +
+    `${GOAL_CRITERIA_GUIDANCE}。省くとロードマップ本文の「目的」「完了条件」の節を使い、節も無ければ目的を置かない。` +
+    '既存のrunを読み直すときに`goal`を渡すと、そのrunの目的を直す。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -1584,6 +1589,19 @@ export const START_ROADMAP_ORCHESTRATOR_TOOL: McpToolDefinition = {
         type: 'string',
         description: '起動する理由（1行）。会話と作業ログに残る。',
       },
+      goal: {
+        type: 'object',
+        description: `runの目的（任意）。${GOAL_CRITERIA_GUIDANCE}`,
+        properties: {
+          objective: { type: 'string', description: '目的（観測できる結果で書く）' },
+          completionCriteria: {
+            type: 'string',
+            description: '完了条件（数値・状態・動作のような観測できる結果）',
+          },
+        },
+        required: ['objective', 'completionCriteria'],
+        additionalProperties: false,
+      },
     },
     required: ['reason'],
     additionalProperties: false,
@@ -1594,6 +1612,8 @@ export const START_ROADMAP_ORCHESTRATOR_TOOL: McpToolDefinition = {
 export interface StartRoadmapOrchestratorToolArgs {
   roadmapIssueNumber: number | undefined;
   reason: string;
+  /** runの目的（Issue #2193）。`parseGoalInput`で均した値。省略なら`undefined`。 */
+  goal: TaskRunGoal | undefined;
 }
 
 /** `start_roadmap_orchestrator`の結果。 */
@@ -1604,6 +1624,8 @@ export interface StartRoadmapOrchestratorToolResult {
   runId?: string | undefined;
   /** 既存runを読み直しただけなら`true`。 */
   reused?: boolean | undefined;
+  /** 渡した`goal`をrunに記録したら`true`（Issue #2193）。`goal`を渡さなければ省く。 */
+  goalApplied?: boolean | undefined;
 }
 
 /** 呼び出し元の会話でロードマップのrunを起動する口。会話ごとに束縛した関数を渡す。 */
@@ -1627,7 +1649,11 @@ export function parseStartRoadmapOrchestratorToolArgs(
   if (typeof reason !== 'string' || reason.trim() === '') {
     return { ok: false, reason: 'reasonに起動する理由を1行で指定してください' };
   }
-  return { ok: true, value: { roadmapIssueNumber, reason } };
+  const goal = parseGoalInput(args.goal, 'start');
+  if (!goal.ok) {
+    return { ok: false, reason: goal.message };
+  }
+  return { ok: true, value: { roadmapIssueNumber, reason, goal: goal.value } };
 }
 
 /**
