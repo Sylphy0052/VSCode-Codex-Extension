@@ -60,7 +60,9 @@ export type McKeyCommand =
   | { kind: 'savedFilter'; delta: 1 | -1 }
   | { kind: 'deleteFilter' }
   | { kind: 'task'; delta: 1 | -1 }
-  | { kind: 'taskOp'; op: McRunTaskOp };
+  | { kind: 'taskOp'; op: McRunTaskOp }
+  // 利用枠の推移グラフ（Issue #2176）
+  | { kind: 'usageHistory' };
 
 /** 選んだセッションへの操作（Issue #2160）。`pin`はピン留めの付け外しを切り替える。 */
 export type McSessionOp = 'rename' | 'fork' | 'pin' | 'clear' | 'handoff' | 'rewind';
@@ -355,6 +357,12 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     keys: ['Shift+u'],
     label: '費用と利用枠の詳細を開く / 閉じる',
     command: { kind: 'usage' },
+  },
+  // Issue #2176: 英字はShift付きも埋まっているので記号にする（使用率の「%」）
+  {
+    keys: ['%'],
+    label: '利用枠の推移グラフ（窓ごとの使用率・日別の使用量）を開く / 閉じる',
+    command: { kind: 'usageHistory' },
   },
   {
     keys: [','],

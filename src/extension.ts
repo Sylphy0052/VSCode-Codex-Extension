@@ -308,6 +308,7 @@ import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildMcUsage } from './view/missionControlUsage';
 import { normalizeRetentionDays, WorkHistoryStore } from './view/workHistory';
+import { loadUsageHistory } from './view/usageHistory';
 import {
   setWorkHistoryHandoffSink,
   WORK_HISTORY_OBSERVE_INTERVAL_MS,
@@ -2294,6 +2295,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     },
     () => missionControlRunsHolder.current,
     createMcSettingsPort(context.globalState),
+    // 利用枠の推移（Issue #2176）。作業履歴（Issue #2175）から読む
+    () => loadUsageHistory(context.globalStorageUri.fsPath, Date.now()),
   );
   // 利用枠と、MCから変えられる設定（Issue #2162）が変わったら画面へ反映する。設定はMCの外
   // （設定エディタ・別ウィンドウ）で変わることもある

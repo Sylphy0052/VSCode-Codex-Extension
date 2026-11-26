@@ -20,6 +20,7 @@ import {
 import { KindIcon, ProviderIcon, StatusIcon } from './icons';
 import { IssueStartDialog, orderRuns, RunsPane } from './runs';
 import { McHeader, PrefsDialog, SaveFilterDialog, UsageDialog } from './globalPanels';
+import { UsageHistoryDialog } from './usageHistory';
 import {
   activeSavedFilter,
   cycleSavedFilter,
@@ -318,6 +319,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const [issuesOpen, setIssuesOpen] = useState(false);
   // 費用・利用枠の詳細、MCの設定、絞り込みの保存（Issue #2162）
   const [usageOpen, setUsageOpen] = useState(false);
+  /** 利用枠の推移グラフ（Issue #2176）。 */
+  const [usageHistoryOpen, setUsageHistoryOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [saveFilterOpen, setSaveFilterOpen] = useState(false);
   /** 複数選択（`x`）したセッションの`McSession.key`（Issue #2149の1）。 */
@@ -871,7 +874,12 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     // 費用・利用枠・設定・絞り込みの保存はどのタブでも効く（Issue #2162）
     switch (command.kind) {
       case 'usage':
+        setUsageHistoryOpen(false);
         setUsageOpen((open) => !open);
+        return;
+      case 'usageHistory':
+        setUsageOpen(false);
+        setUsageHistoryOpen((open) => !open);
         return;
       case 'prefs':
         setPrefsOpen(true);
@@ -1066,6 +1074,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           setHelpOpen(false);
         } else if (usageOpen) {
           setUsageOpen(false);
+        } else if (usageHistoryOpen) {
+          setUsageHistoryOpen(false);
         } else if (ctx.editable && ctx.target instanceof HTMLElement) {
           // 入力欄から出たら、そのペインにフォーカスを残す（フォーカス位置を見失わないように）
           const pane = ctx.target.closest<HTMLElement>('[data-pane]');
@@ -1308,6 +1318,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const latest = useRef({
     helpOpen,
     usageOpen,
+    usageHistoryOpen,
     launchOpen,
     historyOpen,
     issuesOpen,
@@ -1321,6 +1332,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   latest.current = {
     helpOpen,
     usageOpen,
+    usageHistoryOpen,
     launchOpen,
     historyOpen,
     issuesOpen,
@@ -1407,10 +1419,12 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       ) {
         return;
       }
-      // 利用枠の詳細もヘルプと同じく、開閉とEscだけを効かせる（Issue #2162）
+      // 利用枠の詳細と推移グラフ（Issue #2176）もヘルプと同じく、開閉・互いの切替とEscだけを
+      // 効かせる（Issue #2162）
       if (
-        state.usageOpen &&
+        (state.usageOpen || state.usageHistoryOpen) &&
         resolved?.command.kind !== 'usage' &&
+        resolved?.command.kind !== 'usageHistory' &&
         resolved?.command.kind !== 'escape'
       ) {
         return;
@@ -1819,7 +1833,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           usage={snapshot.usage}
           now={now}
           onClose={() => setUsageOpen(false)}
+          onHistory={() => {
+            setUsageOpen(false);
+            setUsageHistoryOpen(true);
+          }}
         />
+      ) : null}
+      {usageHistoryOpen ? (
+        <UsageHistoryDialog bridge={bridge} onClose={() => setUsageHistoryOpen(false)} />
       ) : null}
       {prefsOpen ? (
         <PrefsDialog

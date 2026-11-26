@@ -11,6 +11,7 @@ import type {
   McProvider,
   McSnapshot,
   McTarget,
+  McUsageHistory,
 } from '../webview/missionControl/protocol';
 import { MISSION_CONTROL_STYLES } from '../webview/missionControl/styles';
 import type { SessionControlResult } from './chatManagerBase';
@@ -143,6 +144,8 @@ export class MissionControlViewManager implements vscode.Disposable {
     private readonly runsPort?: () => McRunsPort | undefined,
     /** MCの設定の変更と絞り込みの保存（Issue #2162）。 */
     private readonly settingsPort?: McSettingsPort,
+    /** 作業履歴から利用枠の推移を組む（Issue #2176）。 */
+    private readonly usageHistory?: () => Promise<McUsageHistory>,
   ) {}
 
   /** webviewの設定。`createWebviewPanel`と、Reload後の復元の両方で使う。 */
@@ -359,6 +362,9 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'deleteFilter':
         this.handleSettings(m);
         return;
+      case 'usageHistory':
+        this.handleUsageHistory(m);
+        return;
       default:
         return;
     }
@@ -515,6 +521,25 @@ export class MissionControlViewManager implements vscode.Disposable {
           `Mission Control: 操作に失敗しました（${String(message.type)}）: ${String(e)}`,
         );
         this.postReply(seq, { ok: false, error: '操作に失敗しました' });
+      });
+  }
+
+  /** 利用枠の推移の要求（Issue #2176）。応答は`reply`の`usageHistory`で返す。 */
+  private handleUsageHistory(message: Record<string, unknown>): void {
+    const seq = message.seq;
+    if (typeof seq !== 'number') {
+      return;
+    }
+    const load = this.usageHistory;
+    if (load === undefined) {
+      this.postReply(seq, { ok: false, error: 'この操作はこの画面では使えません' });
+      return;
+    }
+    void load()
+      .then((usageHistory) => this.postReply(seq, { ok: true, usageHistory }))
+      .catch((e: unknown) => {
+        this.log.warn(`Mission Control: 利用枠の推移を読めませんでした: ${String(e)}`);
+        this.postReply(seq, { ok: false, error: '作業履歴を読めませんでした' });
       });
   }
 

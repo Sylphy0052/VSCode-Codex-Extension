@@ -126,6 +126,8 @@ export function UsageDialog(props: {
   usage: McUsage | undefined;
   now: number;
   onClose: () => void;
+  /** 利用枠の推移グラフへ切り替える（Issue #2176）。 */
+  onHistory: () => void;
 }): JSX.Element {
   const total = totalCost(props.sessions);
   return (
@@ -151,6 +153,14 @@ export function UsageDialog(props: {
           Codeはチャット画面を開いている間に届いた値だけを出します。
         </p>
         <div class="actions">
+          <button
+            type="button"
+            class="btn"
+            onClick={props.onHistory}
+            data-key-label={keyLabelFor('usageHistory')}
+          >
+            推移グラフ（{keyLabelFor('usageHistory') ?? ''}）
+          </button>
           <button type="button" class="btn" onClick={props.onClose}>
             閉じる（Esc）
           </button>
