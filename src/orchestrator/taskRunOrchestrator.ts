@@ -86,6 +86,14 @@ import {
   tallyTaskRun,
 } from './taskRunDigest';
 import { TurnEndAnswererNudge } from './turnEndAnswerer';
+import {
+  buildEndReviewBody,
+  formatEndReviewVerdictLine,
+  isEndReviewTarget,
+  markEndReviewSent,
+  type EndReviewVerdict,
+  type TaskRunEndReviewConfig,
+} from './taskRunEndReview';
 import type { AnswererVerdict } from '../reflex/answererJudge';
 import type { AskUserQuestionItem } from '../claude/askUserQuestion';
 
@@ -128,6 +136,7 @@ export interface TaskRunOrchestratorEvent {
     | 'gateResolved'
     | 'runStalled'
     | 'runFinished'
+    | 'runEndReview'
     | 'roadmapChildrenAdded'
     | 'roadmapChildrenRemoved'
     | 'roadmapPlanChanged'
@@ -282,6 +291,18 @@ export interface TaskRunOrchestratorDeps {
     taskId: string,
     reason: string | undefined,
   ) => Promise<AnswererVerdict>;
+  /**
+   * 終了レビュー（Issue #2194）。全タスクが終わってrunが終わったとき、`runFinished`の代わりに集計と
+   * goalを載せた`runEndReview`を送る。省略時と設定がOFFのときは今までどおり`runFinished`を送る。
+   * `judge`はgoalがありReflexが有効なら完了条件の判定を1回走らせ、そうでなければ`skipped`を返す。
+   * 例外を投げず、失敗は`unavailable`で返す実装を期待する。
+   */
+  endReview?: {
+    config(): TaskRunEndReviewConfig;
+    judge(run: TaskRun): Promise<EndReviewVerdict>;
+  };
+  /** 時刻の口（テスト用）。省略時は`new Date()`。 */
+  now?: () => Date;
 }
 
 interface LiveOrchestrator {
@@ -556,11 +577,32 @@ export class TaskRunOrchestrator {
     if (prev === undefined || live === undefined) {
       return;
     }
+    const finishedNow = prev.finishedAt === undefined && next.finishedAt !== undefined;
+    const endReview = finishedNow && this.endReviewApplies(next);
     for (const event of diffTaskRunEvents(prev, next)) {
+      // 終了レビューを送るときは、`runFinished`をその中へまとめる（Issue #2194）
+      if (endReview && event.kind === 'runFinished') {
+        continue;
+      }
       this.notify(next.runId, withLessonReminder(event, this.deps.runNotes !== undefined));
     }
-    if (prev.finishedAt === undefined && next.finishedAt !== undefined) {
+    if (finishedNow) {
       this.closeRemainingOfCompletedTasks(next);
+    }
+    if (endReview) {
+      void this.sendEndReview(next).catch((e: unknown) => {
+        this.deps.log(
+          `[task run orchestrator] ${next.runId}: 終了レビューを送れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        // 終了の知らせだけは届ける（まとめて捨てた`runFinished`の代わり）
+        this.notify(
+          next.runId,
+          withLessonReminder(
+            { kind: 'runFinished', body: 'runが終了しました' },
+            this.deps.runNotes !== undefined,
+          ),
+        );
+      });
     }
     const awaiting = new Set(listStagesAwaitingDecision(next).map(stageRefKey));
     for (const key of [...live.announcedStages]) {
@@ -575,6 +617,61 @@ export class TaskRunOrchestrator {
       }
       live.announcedStages.add(key);
       void this.notifyAwaitingDecision(next.runId, ref);
+    }
+  }
+
+  /** 終了レビュー（Issue #2194）を送る終わりか。設定がONで、全タスクが終わって終えたrunに限る。 */
+  private endReviewApplies(run: TaskRun): boolean {
+    return this.deps.endReview?.config().enabled === true && isEndReviewTarget(run);
+  }
+
+  /**
+   * 終了レビューを送る（Issue #2194）。goalがありReflexが有効なら完了条件の判定を1回走らせて添え、
+   * 結果を会話に1行残す。判定に失敗したら「判定なし」として送る。届けた（イベントの上限で捨てなかった）
+   * ときだけ送った時刻をrunへ記録し、そこから再計画の受付時間を数える。判定の間にrunが再開した・
+   * 終わり直した・Orchestratorの世代が変わったときは送らない（古い終わりのレビューを届けない）。
+   */
+  private async sendEndReview(run: TaskRun): Promise<void> {
+    const endReview = this.deps.endReview;
+    const finishedAt = run.finishedAt;
+    const live = this.live.get(run.runId);
+    if (endReview === undefined || finishedAt === undefined || live === undefined) {
+      return;
+    }
+    let verdict: EndReviewVerdict;
+    try {
+      verdict = await endReview.judge(run);
+    } catch {
+      verdict = { kind: 'unavailable' };
+    }
+    const current = this.deps.controller.find(run.runId);
+    if (current?.finishedAt !== finishedAt || this.live.get(run.runId) !== live) {
+      return;
+    }
+    const config = endReview.config();
+    const verdictLine = formatEndReviewVerdictLine(verdict);
+    if (verdictLine !== undefined) {
+      live.session.note(`end-review-${finishedAt}`, verdictLine);
+      this.deps.log(`[task run orchestrator] ${run.runId}: ${verdictLine}`);
+    }
+    const delivered = this.notify(
+      run.runId,
+      withLessonReminder(
+        { kind: 'runEndReview', body: buildEndReviewBody(current, verdict, config) },
+        this.deps.runNotes !== undefined,
+      ),
+    );
+    if (!delivered) {
+      return;
+    }
+    const now = this.deps.now?.() ?? new Date();
+    try {
+      await this.deps.controller.updateRun(run.runId, (r) => markEndReviewSent(r, finishedAt, now));
+    } catch (e: unknown) {
+      // 記録できなければ再計画は受け付けない（今までどおり終わったまま）。レビューは届いている
+      this.deps.log(
+        `[task run orchestrator] ${run.runId}: 終了レビューを送った記録を残せませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
 
@@ -929,33 +1026,35 @@ export class TaskRunOrchestrator {
     return { kind: 'auto', decision: 'accept' };
   }
 
-  private notify(runId: string, event: TaskRunOrchestratorEvent): void {
+  /** イベントを届ける。届けた（送るか送る列へ積んだ）ら真、Orchestratorが無い・上限で捨てたら偽。 */
+  private notify(runId: string, event: TaskRunOrchestratorEvent): boolean {
     const live = this.live.get(runId);
     if (live === undefined) {
-      return;
+      return false;
     }
     if (event.kind === 'stageStarted') {
       // 開始の知らせは応答を求めないため、単独ではターンを起こさない（Issue #1981）
       live.startedStages.push(event.body);
-      return;
+      return true;
     }
     if (event.kind === 'stageAutoStarted') {
       // 推奨値での自動開始も応答を求めないため、単独ではターンを起こさない（Issue #2031）
       live.autoStartedStages.push(event.body);
-      return;
+      return true;
     }
     if (live.eventsSent >= this.eventsCap(runId)) {
       // 上限に達すると`taskFailed`・`runFinished`を含め以降は無言で捨てていた（Issue #1520）。
       // 気付ける手がかりを1回だけ残す（ログ＋通知）。この通知自体は`eventsSent`を消費しない
       // （消費すると上限をさらに縮めてしまい、本末転倒になる）
       this.noticeEventsCapOnce(runId, live);
-      return;
+      return false;
     }
     live.eventsSent += 1;
     live.pending.push(event);
     if (!live.busy) {
       this.flush(runId, live);
     }
+    return true;
   }
 
   private noticeEventsCapOnce(runId: string, live: LiveOrchestrator): void {
@@ -1916,8 +2015,11 @@ export function buildIntroPrompt(
       ? []
       : [
           '- record_lesson: 次のrunへ残す教訓。気付いた時点（工程の失敗・やり直し・最後の' +
-            'タスクの完了前）、またはrunFinishedを受けたときに記録する',
+            'タスクの完了前）、またはrunFinished・runEndReviewを受けたときに記録する',
         ]),
+    '- 全タスクが終わってrunが終わると、集計と目的を載せたrunEndReview（終了レビュー）が届くことがある。完了条件に照らして目的が未達なら、' +
+      '本文に書かれた受付時間のうちに、足すタスクを入れたpropose_planを出すとこのrunが再開する（既存のタスクだけの計画は受け付けない。' +
+      '足したタスクは計画の承認の設定どおりに承認待ちになる）。resume_runは使わない。受付時間を過ぎた・再開の上限に達したと本文にあれば出さない',
     '- runの目的（goal）と完了条件はget_run_stateに出る。完了条件はmergeのたびに照らす拠り所になる。' +
       `ユーザーが会話で目的を示したとき、今のgoalが無い・観測できない・実態と合わないと分かったときは、set_goalで直す（reasonに理由を書く）。${GOAL_CRITERIA_GUIDANCE}。` +
       '完了条件を緩める・外す修正は受入基準を下げる判断なので、ユーザーが会話で示したとき以外は先にユーザーへ確かめる',

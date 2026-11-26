@@ -1,5 +1,6 @@
 import { parseOptimizationSpec, type OptimizationSpec } from './optimizeSpec';
 import { stripControlCharsPreservingNewlines } from './sanitize';
+import { FINISHED_RUN_REFUSAL, type FinishedRunReplan } from './taskRunEndReview';
 import {
   allocateTaskIds,
   getTask,
@@ -200,13 +201,23 @@ export interface ResolvedTaskPlan {
  * - 着手済みのタスクの既存のIssue番号は変えられない（Issue #1679）
  * - 未着手のタスクは、省くと計画から外れる。新しいタスクの追加は通す
  * - 既存のIssue番号は計画内で重複させない
+ * - 終わったrunは、終了レビューからの再計画（`finishedRunReplan`が`ok`。Issue #2194）のときだけ受け付け、
+ *   新しいタスクを1件以上求める（足すタスクが無いと、承認した途端に終わり直して再開の回数だけ減る）
  */
 export function resolveTaskPlan(
   run: TaskRun,
   proposed: readonly PlanTaskInput[],
+  finishedRunReplan?: FinishedRunReplan,
 ): Parsed<ResolvedTaskPlan> {
   if (run.finishedAt !== undefined) {
-    return fail('このrunは終わっている');
+    if (finishedRunReplan?.ok !== true) {
+      return fail(finishedRunReplan?.reason ?? FINISHED_RUN_REFUSAL);
+    }
+    if (!proposed.some((t) => getTask(run, t.id) === undefined)) {
+      return fail(
+        '終わったrunの再計画には、新しいタスクを1件以上入れる（既存のタスクだけの計画では再開しない）',
+      );
+    }
   }
   const tasks = withCarriedTasks(run, proposed);
   const keys = new Set(tasks.map((t) => t.id));

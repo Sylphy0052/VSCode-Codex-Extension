@@ -382,12 +382,19 @@ export function formatLessonsForIntro(lessons: readonly LessonRecord[], nonce?: 
  * `runFinished`イベントへ、教訓を残せる旨の一文を足す（Issue #1606。廃止済みのroadmapOrchestrator.ts /
  * taskRunOrchestrator.tsでほぼ同じ実装が2つあった重複を解消）。`runNotesEnabled`が`false`
  * （教訓欄が無効）なら何もしない。`event.body`が句点で終わらない場合の区切りに`。`を挟む。
+ * 複数行の終了レビュー（`runEndReview`、Issue #2194）には最後の行として足す。
  */
 export function withLessonReminder<T extends { kind: string; body: string }>(
   event: T,
   runNotesEnabled: boolean,
 ): T {
-  if (event.kind !== 'runFinished' || !runNotesEnabled) {
+  if (!runNotesEnabled) {
+    return event;
+  }
+  if (event.kind === 'runEndReview') {
+    return { ...event, body: `${event.body}\n次のrunへ残す教訓があればrecord_lessonで記録する。` };
+  }
+  if (event.kind !== 'runFinished') {
     return event;
   }
   return { ...event, body: `${event.body}。次のrunへ残す教訓があればrecord_lessonで記録する。` };
