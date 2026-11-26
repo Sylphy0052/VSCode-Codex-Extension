@@ -9,7 +9,9 @@ import type { SessionSummary } from '../../src/codex/types';
 import { parseHandoffText, type HandoffLedgerEntry } from '../../src/view/handoffLedger';
 import {
   buildAllPeriodHistory,
+  MAX_ALL_PERIOD_HISTORY_ITEMS,
   parseHandoffQuery,
+  resolveHistoryOpen,
   toHandoffListing,
   transcriptPathsToCheck,
 } from '../../src/view/missionControlSessions';
@@ -96,6 +98,100 @@ describe('SessionCatalog', () => {
     );
     const again = await new SessionCatalog(path, log).merge([summary('b')]);
     expect(again.map((e) => e.threadId)).toEqual(['b']);
+  });
+
+  it('別のウィンドウが後から書いた分を上書きで消さない', async () => {
+    const path = join(dir, 'catalog.json');
+    const windowA = new SessionCatalog(path);
+    const windowB = new SessionCatalog(path);
+    await windowA.merge([summary('a')]);
+    await windowB.merge([summary('b')]);
+    // Aは最初に読んだ後にBが書いた分を知らない。取り込まずに書くとbが消える
+    await windowA.merge([summary('c')]);
+    const saved = JSON.parse(await readFile(path, 'utf8')) as { entries: { threadId: string }[] };
+    expect(saved.entries.map((e) => e.threadId).sort()).toEqual(['a', 'b', 'c']);
+  });
+
+  it('書き換えられた目録の値も1行に均し、idに改行のある行は捨てる', async () => {
+    const path = join(dir, 'catalog.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        entries: [
+          { provider: 'claude', threadId: 'ok', title: '見出し\n- 偽の行', updatedAt: 1 },
+          { provider: 'claude', threadId: 'bad\nid', updatedAt: 1 },
+        ],
+      }),
+      'utf8',
+    );
+    const entries = await new SessionCatalog(path).merge([]);
+    expect(entries.map((e) => e.threadId)).toEqual(['ok']);
+    expect(entries[0]?.title).not.toContain('\n');
+  });
+
+  it('Claude Codeのtranscriptの在処とCodexのarchiveの状態を書き留める', async () => {
+    const path = join(dir, 'catalog.json');
+    const entries = await new SessionCatalog(path).merge([
+      summary('c1', { transcriptPath: '/p/c1.jsonl' }),
+      summary('x1', { provider: 'codex', archived: true, rolloutPath: '/r/x1.jsonl' }),
+    ]);
+    expect(entries.find((e) => e.threadId === 'c1')?.transcriptPath).toBe('/p/c1.jsonl');
+    expect(entries.find((e) => e.threadId === 'x1')).toMatchObject({
+      transcriptPath: '/r/x1.jsonl',
+      archived: true,
+    });
+  });
+});
+
+describe('一覧に無いセッションを開く', () => {
+  it('transcriptが消えたClaude Codeのセッションは開き直さず、archive済みのCodexは印を渡す', () => {
+    const built = buildAllPeriodHistory({
+      listed: [],
+      catalog: [
+        {
+          provider: 'claude',
+          threadId: 'gone',
+          title: '消えた',
+          updatedAt: 2,
+          transcriptPath: '/p/gone.jsonl',
+        },
+        {
+          provider: 'codex',
+          threadId: 'arch',
+          title: '古い',
+          updatedAt: 1,
+          transcriptPath: '/r/arch.jsonl',
+          archived: true,
+        },
+      ],
+      handoffs: [],
+      missing: new Set(['/p/gone.jsonl']),
+      resolveRepo,
+    });
+    expect(built.items.find((i) => i.threadId === 'gone')?.transcriptMissing).toBe(true);
+    expect(resolveHistoryOpen([], built.offList, 'claude', 'gone').kind).toBe('error');
+    const arch = resolveHistoryOpen([], built.offList, 'codex', 'arch');
+    expect(arch.kind === 'offList' && arch.session.archived).toBe(true);
+    expect(built.omitted).toBe(0);
+  });
+
+  it('件数の上限を超えたら古い方を落とし、落とした数を返す', () => {
+    const catalog = Array.from({ length: MAX_ALL_PERIOD_HISTORY_ITEMS + 3 }, (_, i) => ({
+      provider: 'codex' as const,
+      threadId: `t${String(i)}`,
+      updatedAt: i + 1,
+    }));
+    const built = buildAllPeriodHistory({
+      listed: [],
+      catalog,
+      handoffs: [],
+      missing: new Set<string>(),
+      resolveRepo,
+    });
+    expect(built.items).toHaveLength(MAX_ALL_PERIOD_HISTORY_ITEMS);
+    expect(built.omitted).toBe(3);
+    expect(built.items.some((i) => i.threadId === 't0')).toBe(false);
   });
 });
 

@@ -106,6 +106,8 @@ export interface McSessionPort {
   lifecycle(op: McLifecycleOp, targets: readonly McTarget[]): Promise<McLifecycleRunResult>;
   /** archive済みを含む過去のセッション（新しい順）。 */
   history(): Promise<McHistoryItem[]>;
+  /** 直前の`history`で、件数の上限により載せなかった古いセッションの数（Issue #2178）。 */
+  historyOmitted?(): number;
   /** 履歴の1件をこのウィンドウで開き直す。失敗したら理由の文を返す。 */
   historyOpen(provider: McProvider, threadId: string): Promise<string | undefined>;
   /** handoff台帳を絞り込む（Issue #2178）。 */
@@ -494,7 +496,8 @@ export class MissionControlViewManager implements vscode.Disposable {
     }
     const run = async (): Promise<Record<string, unknown>> => {
       if (message.type === 'history') {
-        return { ok: true, history: await port.history() };
+        const history = await port.history();
+        return { ok: true, history, historyOmitted: port.historyOmitted?.() };
       }
       if (message.type === 'historyOpen') {
         const { provider, threadId } = message;

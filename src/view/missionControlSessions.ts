@@ -345,11 +345,15 @@ export interface McOffListSession {
   title: string;
   cwd: string | undefined;
   transcriptMissing: boolean | undefined;
+  /** archive済みか（Codexの状態DB・前に見かけた一覧から）。開き直す前に解除する。 */
+  archived: boolean;
 }
 
 export interface McAllPeriodHistory {
   items: McHistoryItem[];
   offList: McOffListSession[];
+  /** 件数の上限（`MAX_ALL_PERIOD_HISTORY_ITEMS`）で載せなかった古いセッションの数。 */
+  omitted: number;
 }
 
 /**
@@ -430,6 +434,7 @@ export function buildAllPeriodHistory(input: {
       inline(group?.request, HISTORY_TITLE_MAX) ??
       '(名称未設定)';
     const repo = input.resolveRepo(cwd);
+    const archived = entry?.archived === true;
     items.push(
       withHandoffs(
         {
@@ -440,17 +445,22 @@ export function buildAllPeriodHistory(input: {
           repoLabel: repo.label,
           cwdFull: cwd ?? '',
           updatedAt: entry?.updatedAt ?? 0,
-          archived: false,
+          archived,
           firstPrompt: inline(entry?.firstPrompt, HISTORY_PROMPT_MAX),
           transcriptMissing,
         },
         group,
       ),
     );
-    offList.push({ provider, threadId, title, cwd, transcriptMissing });
+    offList.push({ provider, threadId, title, cwd, transcriptMissing, archived });
   }
   items.sort((a, b) => b.updatedAt - a.updatedAt);
-  return { items: items.slice(0, MAX_ALL_PERIOD_HISTORY_ITEMS), offList };
+  // 上限で切ったことは黙らず件数を返す（画面で、古い分はhandoff台帳で探すよう案内する）
+  return {
+    items: items.slice(0, MAX_ALL_PERIOD_HISTORY_ITEMS),
+    offList,
+    omitted: Math.max(0, items.length - MAX_ALL_PERIOD_HISTORY_ITEMS),
+  };
 }
 
 export type McHistoryOpenTarget =
@@ -494,7 +504,7 @@ export function resolveHistoryOpen(
       threadName: off.title,
       updatedAt: '',
       cwd: off.cwd,
-      archived: false,
+      archived: off.archived,
     },
   };
 }

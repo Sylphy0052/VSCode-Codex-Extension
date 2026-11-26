@@ -63,6 +63,7 @@ export interface ReplyResult {
   choices?: McLaunchChoices | undefined;
   outcomes?: McLifecycleOutcome[] | undefined;
   history?: McHistoryItem[] | undefined;
+  historyOmitted?: number | undefined;
   handoffs?: McHandoffListing | undefined;
   issues?: McIssueListing | undefined;
   message?: string | undefined;
@@ -225,6 +226,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           choices: message.choices,
           outcomes: message.outcomes,
           history: message.history,
+          historyOmitted: message.historyOmitted,
           handoffs: message.handoffs,
           issues: message.issues,
           message: message.message,

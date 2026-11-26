@@ -296,7 +296,7 @@ const HISTORY_SHOWN_MAX = 200;
 
 type HistoryState =
   | { status: 'loading' }
-  | { status: 'ok'; items: McHistoryItem[] }
+  | { status: 'ok'; items: McHistoryItem[]; omitted: number }
   | { status: 'error'; error: string };
 
 function formatDate(ms: number): string {
@@ -342,7 +342,7 @@ export function HistoryDialog(props: {
     void bridge.history().then((result) => {
       setState(
         result.ok
-          ? { status: 'ok', items: result.history ?? [] }
+          ? { status: 'ok', items: result.history ?? [], omitted: result.historyOmitted ?? 0 }
           : { status: 'error', error: result.error ?? '履歴を取り寄せられませんでした' },
       );
     });
@@ -493,6 +493,12 @@ export function HistoryDialog(props: {
         {matched.length > shown.length ? (
           <p class="notice">
             ほか{String(matched.length - shown.length)}件あります。絞り込んでください。
+          </p>
+        ) : null}
+        {state.status === 'ok' && state.omitted > 0 ? (
+          <p class="notice">
+            件数が多いため、古い{String(state.omitted)}
+            件のセッションは履歴に載せていません。handoffの本文はhandoff台帳（l）で探せます。
           </p>
         ) : null}
         {error === undefined ? null : (

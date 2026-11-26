@@ -134,6 +134,11 @@ export interface SessionSummary {
    * Mission Controlの全期間の履歴へ残す。取れたときだけ持ち、`FIRST_PROMPT_MAX`字で切る。
    */
   firstPrompt?: string | undefined;
+  /**
+   * Claude Codeのtranscriptファイル（Issue #2178）。Mission Controlの全期間の目録へ書き留め、
+   * transcriptが消えたかを後で確かめるのに使う。Codexの`rolloutPath`に当たる。UIへは公開しない。
+   */
+  transcriptPath?: string | undefined;
 }
 
 /** `SessionSummary.firstPrompt`に残す最大の文字数。 */

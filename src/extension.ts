@@ -2077,6 +2077,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   let missionControlHistory: SessionSummary[] = [];
   /** 一覧に無い（目録・handoffだけで知っている）履歴（Issue #2178）。 */
   let missionControlOffList: McOffListSession[] = [];
+  /** 直前の履歴で、件数の上限により載せなかった古いセッションの数（Issue #2178）。 */
+  let missionControlHistoryOmitted = 0;
   const missionControlStateDir = path.join(context.globalStorageUri.fsPath, 'mission-control');
   const handoffLedger = new HandoffLedger(
     path.join(context.globalStorageUri.fsPath, 'handoff'),
@@ -2322,8 +2324,15 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           resolveRepo: missionControlHistoryRepoResolver,
         });
         missionControlOffList = built.offList;
+        missionControlHistoryOmitted = built.omitted;
+        if (built.omitted > 0) {
+          log.info(
+            `Mission Control: 履歴は新しい${String(built.items.length)}件だけ渡しました（古い${String(built.omitted)}件は載せていません）`,
+          );
+        }
         return built.items;
       },
+      historyOmitted: () => missionControlHistoryOmitted,
       historyOpen: async (provider, threadId) => {
         // webviewから届いたidは、直前に渡した履歴に載っていたものだけを開く
         const target = resolveHistoryOpen(
@@ -2335,13 +2344,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         if (target.kind === 'error') {
           return target.message;
         }
-        if (target.kind === 'offList') {
-          openSession(chat, claudeChat, log, target.session);
-          return undefined;
-        }
         const session = target.session;
         // archive済みのCodexのセッションは、app-serverが再開を断る（「unarchiveしてから」と
-        // 返す。実測）。再開の操作なので、先にarchiveを解除する
+        // 返す。実測）。再開の操作なので、先にarchiveを解除する。一覧に無いスレッド（状態DBで
+        // archive済みと分かったもの）も同じ
         if (session.provider === 'codex' && session.archived) {
           try {
             const run = await actions.run('unarchive', session.id);
@@ -2354,6 +2360,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           log.info(`Mission Control: 履歴から再開するためarchiveを解除しました（${session.id}）`);
           missionControlHistory = missionControlHistory.map((s) =>
             s === session ? { ...s, archived: false } : s,
+          );
+          missionControlOffList = missionControlOffList.map((s) =>
+            s.provider === session.provider && s.threadId === session.id
+              ? { ...s, archived: false }
+              : s,
           );
         }
         openSession(chat, claudeChat, log, session);

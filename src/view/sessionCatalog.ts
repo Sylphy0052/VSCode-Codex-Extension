@@ -24,6 +24,7 @@ export const MC_HISTORY_LIST_MIN = 2_000;
 const TITLE_MAX = 200;
 const PROMPT_MAX = 300;
 const PATH_MAX = 1_000;
+const THREAD_ID_MAX = 200;
 
 export interface SessionCatalogEntry {
   provider: 'claude' | 'codex';
@@ -33,8 +34,10 @@ export interface SessionCatalogEntry {
   cwd?: string | undefined;
   /** 最後に更新された時刻（ms）。不明なら0。 */
   updatedAt: number;
-  /** Codexのrollout。transcriptが残っているかを確かめるのに使う。 */
+  /** Codexのrollout・Claude Codeのtranscript。会話記録が残っているかを確かめるのに使う。 */
   transcriptPath?: string | undefined;
+  /** archive済みか（Codex）。一覧に無いスレッドを開き直す前にarchiveを解除するのに使う。 */
+  archived?: boolean | undefined;
 }
 
 export function catalogKey(provider: string, threadId: string): string {
@@ -54,12 +57,30 @@ function isEntry(value: unknown): value is SessionCatalogEntry {
     (v.provider === 'claude' || v.provider === 'codex') &&
     typeof v.threadId === 'string' &&
     v.threadId !== '' &&
+    // idは鍵としてそのまま使うので、均すと変わるもの（改行・制御文字・長すぎる）は捨てる
+    sanitizeInlineText(v.threadId, THREAD_ID_MAX) === v.threadId &&
     optionalString(v.title) &&
     optionalString(v.firstPrompt) &&
     optionalString(v.cwd) &&
     optionalString(v.transcriptPath) &&
-    typeof v.updatedAt === 'number'
+    (v.archived === undefined || typeof v.archived === 'boolean') &&
+    typeof v.updatedAt === 'number' &&
+    Number.isFinite(v.updatedAt)
   );
+}
+
+/** ファイルから読んだ1件を、書くときと同じく1行に均す（ファイルが書き換えられていても）。 */
+function normalizeStored(entry: SessionCatalogEntry): SessionCatalogEntry {
+  return {
+    provider: entry.provider,
+    threadId: entry.threadId,
+    title: inline(entry.title, TITLE_MAX),
+    firstPrompt: inline(entry.firstPrompt, PROMPT_MAX),
+    cwd: inline(entry.cwd, PATH_MAX),
+    updatedAt: entry.updatedAt,
+    transcriptPath: inline(entry.transcriptPath, PATH_MAX),
+    archived: entry.archived,
+  };
 }
 
 function inline(value: string | undefined, max: number): string | undefined {
@@ -86,7 +107,10 @@ export function toCatalogEntry(
     firstPrompt: inline(session.firstPrompt, PROMPT_MAX) ?? previous?.firstPrompt,
     cwd: inline(session.cwd, PATH_MAX) ?? previous?.cwd,
     updatedAt: Math.max(Number.isFinite(updatedAt) ? updatedAt : 0, previous?.updatedAt ?? 0),
-    transcriptPath: inline(session.rolloutPath, PATH_MAX) ?? previous?.transcriptPath,
+    transcriptPath:
+      inline(session.rolloutPath ?? session.transcriptPath, PATH_MAX) ?? previous?.transcriptPath,
+    // 一覧（archive済みを重ねたもの）と状態DBのどちらも、その時点のarchiveの状態を持つ
+    archived: session.archived,
   };
 }
 
@@ -96,7 +120,8 @@ function sameEntry(a: SessionCatalogEntry, b: SessionCatalogEntry): boolean {
     a.firstPrompt === b.firstPrompt &&
     a.cwd === b.cwd &&
     a.updatedAt === b.updatedAt &&
-    a.transcriptPath === b.transcriptPath
+    a.transcriptPath === b.transcriptPath &&
+    a.archived === b.archived
   );
 }
 
@@ -106,8 +131,9 @@ interface Logger {
 
 export class SessionCatalog {
   private readonly entries = new Map<string, SessionCatalogEntry>();
-  private loaded: Promise<void> | undefined;
-  private writing: Promise<void> = Promise.resolve();
+  /** 最後に読んだ・書いた時のファイルの版。変わっていれば別のウィンドウが書いている。 */
+  private seenVersion: string | undefined;
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly path: string,
@@ -115,19 +141,30 @@ export class SessionCatalog {
   ) {}
 
   /** 一覧で見かけたセッションを書き留め、目録の全件を返す。 */
-  async merge(sessions: readonly SessionSummary[]): Promise<SessionCatalogEntry[]> {
-    this.loaded ??= this.load();
-    await this.loaded;
-    let changed = false;
+  merge(sessions: readonly SessionSummary[]): Promise<SessionCatalogEntry[]> {
+    // 同じウィンドウの中では1本ずつ（読み直し・書き込みが交互に走らないように）
+    const run = this.queue.then(() => this.doMerge(sessions));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async doMerge(sessions: readonly SessionSummary[]): Promise<SessionCatalogEntry[]> {
+    // 目録は作り直せない記録なので、別のウィンドウ（globalStorageを共有する）が書いた分を
+    // 取り込んでから重ねる。取り込まずに書くと、その分を上書きで消してしまう
+    await this.reloadIfChanged();
+    const before = new Map(this.entries);
     for (const session of sessions) {
       const key = catalogKey(session.provider, session.id);
-      const previous = this.entries.get(key);
-      const next = toCatalogEntry(session, previous);
-      if (next !== undefined && (previous === undefined || !sameEntry(previous, next))) {
+      const next = toCatalogEntry(session, this.entries.get(key));
+      if (next !== undefined) {
         this.entries.set(key, next);
-        changed = true;
       }
     }
+    // 同じセッションを状態DBと一覧の両方から重ねるので、途中の値ではなく最後の値で比べる
+    let changed = [...this.entries].some(([key, entry]) => {
+      const previous = before.get(key);
+      return previous === undefined || !sameEntry(previous, entry);
+    });
     if (this.entries.size > SESSION_CATALOG_MAX) {
       const oldest = [...this.entries.values()]
         .sort((a, b) => a.updatedAt - b.updatedAt)
@@ -142,27 +179,51 @@ export class SessionCatalog {
         version: CATALOG_VERSION,
         entries: [...this.entries.values()],
       });
-      this.writing = this.writing.then(() => this.write(body));
-      await this.writing;
+      await this.write(body);
     }
     return [...this.entries.values()];
   }
 
-  private async load(): Promise<void> {
+  /**
+   * ファイルの版。書き込みは一時ファイルからのrenameなのでinodeが毎回変わる。mtimeは粒度が
+   * 粗く（数ms）、続けて書かれると同じ値になりうるため、inodeとサイズも合わせて見る。
+   */
+  private async versionOf(): Promise<string | undefined> {
+    try {
+      const stat = await fs.stat(this.path);
+      return `${String(stat.ino)}:${String(stat.size)}:${String(stat.mtimeMs)}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** ファイルが前に読んだ・書いた時から変わっていれば読み、更新の新しい方を残して重ねる。 */
+  private async reloadIfChanged(): Promise<void> {
+    const version = await this.versionOf();
+    if (version === undefined || version === this.seenVersion) {
+      return;
+    }
     let raw: string;
     try {
       raw = await fs.readFile(this.path, 'utf8');
     } catch {
       return;
     }
+    this.seenVersion = version;
     try {
       const parsed = JSON.parse(raw) as { version?: unknown; entries?: unknown };
       if (parsed.version !== CATALOG_VERSION || !Array.isArray(parsed.entries)) {
         return;
       }
-      for (const entry of parsed.entries) {
-        if (isEntry(entry)) {
-          this.entries.set(catalogKey(entry.provider, entry.threadId), entry);
+      for (const value of parsed.entries) {
+        if (!isEntry(value)) {
+          continue;
+        }
+        const entry = normalizeStored(value);
+        const key = catalogKey(entry.provider, entry.threadId);
+        const current = this.entries.get(key);
+        if (current === undefined || entry.updatedAt > current.updatedAt) {
+          this.entries.set(key, entry);
         }
       }
     } catch (e: unknown) {
@@ -176,6 +237,8 @@ export class SessionCatalog {
       await fs.mkdir(dirname(this.path), { recursive: true });
       await fs.writeFile(tmp, body, 'utf8');
       await fs.rename(tmp, this.path);
+      // 自分で書いた分は読み直さない
+      this.seenVersion = await this.versionOf();
     } catch (e: unknown) {
       this.log?.warn(`セッション目録を書けませんでした: ${String(e)}`);
       await fs.rm(tmp, { force: true }).catch(() => undefined);

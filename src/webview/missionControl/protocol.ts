@@ -620,6 +620,8 @@ export type McHostMessage =
       outcomes?: McLifecycleOutcome[] | undefined;
       /** `history`の応答（Issue #2149の3）。 */
       history?: McHistoryItem[] | undefined;
+      /** `history`の応答: 件数の上限で載せなかった古いセッションの数（Issue #2178）。 */
+      historyOmitted?: number | undefined;
       /** `handoffLedger`の応答（Issue #2178）。 */
       handoffs?: McHandoffListing | undefined;
       /** `issueList`の応答（Issue #2150）。 */

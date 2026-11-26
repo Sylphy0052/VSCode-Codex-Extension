@@ -781,6 +781,21 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
         ?.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     };
 
+    it('件数の上限で載せなかった古いセッションがあれば、その数と台帳の案内を出す', async () => {
+      const { window, deliver, request } = await openHistory();
+      deliver({
+        type: 'reply',
+        seq: request?.seq,
+        ok: true,
+        history: [historyItem({ threadId: 't1' })],
+        historyOmitted: 42,
+      });
+      await tick();
+      const text = window.document.body.textContent ?? '';
+      expect(text).toContain('古い42件のセッションは履歴に載せていません');
+      expect(text).toContain('handoff台帳（l）');
+    });
+
     it('会話記録が残るセッションは、検索語で絞って開くと選ばれ、会話内検索へ語が入る', async () => {
       const { window, posted, deliver, request } = await openHistory();
       deliver({

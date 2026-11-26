@@ -312,7 +312,7 @@ export class ClaudeSessionStore {
 
     const sessions: SessionSummary[] = [];
 
-    for (const { session } of ordered) {
+    for (const { session, filePath } of ordered) {
       if (sessions.length >= Math.max(0, options.maxEntries)) {
         break;
       }
@@ -326,6 +326,8 @@ export class ClaudeSessionStore {
         ...session,
         // 解決順: 人が付けた名前 > transcriptの最初の発言（issue #199の受入基準）
         threadName: this.names.get(session.id) ?? session.threadName,
+        // 索引の保存形式は変えず、読み出す時に付ける（既存の索引にも効く。Issue #2178）
+        transcriptPath: filePath,
       });
     }
 
