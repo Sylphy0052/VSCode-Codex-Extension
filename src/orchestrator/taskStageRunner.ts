@@ -1745,7 +1745,13 @@ export class TaskStageRunner {
       const treeMismatch = await this.checkOptimizePullRequest(run, binding.ref, observed.output);
       const gateId = this.newId();
       const next = await this.mutate(entry.runId, (r) => {
-        const completed = completeStage(r, binding.ref, observed.output, this.now());
+        const completed = completeStage(
+          r,
+          binding.ref,
+          observed.output,
+          this.now(),
+          report.summary,
+        );
         // PRのHEADの木が最良の候補と違えば、人だけが決着できる最適化の関門にする（Issue #2111 仕様6）
         const gated =
           treeMismatch === undefined

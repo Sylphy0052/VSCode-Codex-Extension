@@ -8,6 +8,13 @@ import {
   MAX_PLAN_SUMMARY_LENGTH,
   MAX_PLAN_TITLE_LENGTH,
 } from './taskRunPlan';
+import {
+  formatReviewTally,
+  formatStageSummaryHint,
+  formatTaskResultDetailLines,
+  formatTaskRunTally,
+  tallyTaskRun,
+} from './taskRunDigest';
 import { findOpenGate, MAX_REVIEW_ROUNDS } from './taskRunGates';
 import { taskIssueNumber } from './taskRunRoadmap';
 import { listQuestionsAwaitingOrchestrator, listQuestionsAwaitingUser } from './taskRunQuestions';
@@ -241,7 +248,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
   {
     name: 'get_run_state',
     description:
-      'この実行の現在の状態（計画の承認状況・並列上限・各タスクの工程・判断待ちの工程と推奨値・ユーザー判断待ちの質問）を返す。状態の正本はこれで、通知の内容より優先する。' +
+      'この実行の現在の状態（計画の承認状況・並列上限・各タスクの工程・判断待ちの工程と推奨値・ユーザー判断待ちの質問・reviewの結果と台帳の集計・run全体の集計）を返す。状態の正本はこれで、通知の内容より優先する。' +
       '既定は差分で、この世代で前回返したときから行が変わったタスクと、答えを待つ質問・開いている関門があるタスクだけを返し、変わらなかったタスクは「変化なし: N件（T1, T3, ...）」の1行にまとめる（それらは前回の結果のまま。idは先頭10件だけ並べ、残りは「ほかN件」）。本文の上限に収まらないときは、答えを待つ質問・開いている関門・判断待ちの工程があるタスクを先に入れ、入らなかったタスクは「省いたタスク」の行に出す（同じくidは先頭10件まで）。見出しとロードマップ節は毎回返す。世代で最初の呼出しと会話の圧縮後の最初の呼出しは全タスクを返す。' +
       '全工程が終わったタスクは1行に畳む。前回の結果を覚えていないとき（圧縮の後など）はfull: trueで全タスクを取り直し、畳まれたタスクや変化なしのタスクの全項目はtaskIdsで取る。',
     inputSchema: {
@@ -256,7 +263,7 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
           items: TASK_ID_SCHEMA,
           minItems: 1,
           description:
-            '指定したタスクだけを全項目で返す（差分の判定に関係なく、完了済みでも省かない）',
+            '指定したタスクだけを全項目で返す（差分の判定に関係なく、完了済みでも省かない）。工程報告の要約・reviewの要約・残った指摘・台帳の未実測の場面の全文はこのときだけ返す',
         },
       },
       additionalProperties: false,
@@ -998,6 +1005,7 @@ export function formatTaskRunState(
     `エンジン: ${run.engine} / 計画: ${run.planStatus} / 並列上限: ${String(run.maxParallel)} / 動いている工程: ${String(countActiveStageSessions(run))}`,
     `run全体の停止: ${run.haltedByUser ? 'あり' : 'なし'} / 終了: ${run.finishedAt === undefined ? 'いいえ' : 'はい'} / 全体: ${formatAssessment(run)}`,
     `判断待ちの工程: ${awaiting.length === 0 ? 'なし' : `${awaiting.map((r) => `${r.taskId}:${r.stage}`).join(', ')}（うち並列上限の空き枠内で通知の対象: 先頭${String(listStagesToAnnounce(run).length)}件）`}`,
+    formatTaskRunTally(tallyTaskRun(run)),
     ...resourceLines,
   ];
   const lines: string[] = [];
@@ -1056,7 +1064,7 @@ export function formatTaskRunState(
       if (!requested.has(task.taskId)) {
         continue;
       }
-      const taskLines = formatTaskLines(run, task, recommendations, awaiting);
+      const taskLines = formatTaskLines(run, task, recommendations, awaiting, true);
       if (fits(taskLines)) {
         lines.push(...taskLines);
         shown.set(task.taskId, formatDefaultTaskBlock(run, task, recommendations, awaiting));
@@ -1203,12 +1211,16 @@ function formatFinishedTaskLine(task: OrchestratedTask): string {
   return parts.join(' / ');
 }
 
-/** タスク1件の全項目の行。 */
+/**
+ * タスク1件の行。`detail`（taskIdsで指定したとき）なら工程の要約・reviewの要約・残った指摘・
+ * 未実測の場面の全文を載せ、既定ではreviewの数と要約のある工程だけを載せる（Issue #2192 仕様6）。
+ */
 function formatTaskLines(
   run: TaskRun,
   task: OrchestratedTask,
   recommendations: ReadonlyMap<string, StageSettingsRecommendation>,
   awaiting: readonly { taskId: string; stage: TaskStage }[],
+  detail = false,
 ): string[] {
   const lines: string[] = [];
   const stage = currentStage(task);
@@ -1287,6 +1299,17 @@ function formatTaskLines(
       `  ${label} questionId=${inline(q.questionId, MAX_QUESTION_ID_LENGTH)}: ${inline(q.question)}${options}`,
       `    理由: ${inline(q.reason)}${q.recommended === undefined ? '' : ` / 推奨: ${inline(q.recommended)}`}`,
     );
+  }
+  if (detail) {
+    lines.push(...formatTaskResultDetailLines(task, STATE_TEXT_MAX_LENGTH));
+  } else {
+    if (task.review !== undefined) {
+      lines.push(`  ${formatReviewTally(task.review)}`);
+    }
+    const hint = formatStageSummaryHint(task);
+    if (hint !== undefined) {
+      lines.push(hint);
+    }
   }
   if ((task.reviewRounds ?? 0) > 0) {
     lines.push(
