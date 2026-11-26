@@ -1,4 +1,4 @@
-import type { SessionSummary } from './types';
+import { FIRST_PROMPT_MAX, type SessionSummary } from './types';
 
 export type ThreadListOutcome =
   { ok: true; sessions: SessionSummary[] } | { ok: false; error: string };
@@ -83,6 +83,7 @@ export function normalizeThread(
   const name = obj['name'];
   const path = str(obj['path']);
   const parentThreadId = str(obj['parentThreadId']);
+  const preview = previewRequest(str(obj['preview']));
 
   return {
     id,
@@ -93,7 +94,30 @@ export function normalizeThread(
     archived: path !== '' && isUnderDir(path, archivedSessionsDir),
     rolloutPath: path === '' ? undefined : path,
     parentThreadId: parentThreadId === '' ? undefined : parentThreadId,
+    // 名前を付けたスレッドでも最初の依頼文で探せるように持つ（Issue #2178）
+    ...(preview === undefined ? {} : { firstPrompt: preview.slice(0, FIRST_PROMPT_MAX) }),
   };
+}
+
+const IDE_CONTEXT_HEADING = '# Context from my IDE setup';
+const IDE_REQUEST_HEADING = '## My request for Codex:';
+
+/**
+ * `thread/list`の`preview`（最初のユーザー発話）から依頼文を取り出す。IDE拡張が前に付ける
+ * 「# Context from my IDE setup」の節は依頼文ではないので、「## My request for Codex:」より後だけを
+ * 使う。依頼の見出しが無いまま前置きだけのもの（途中で切れたもの）と空白だけのものは`undefined`。
+ */
+export function previewRequest(preview: string): string | undefined {
+  let text = preview;
+  if (text.trimStart().startsWith(IDE_CONTEXT_HEADING)) {
+    const at = text.indexOf(IDE_REQUEST_HEADING);
+    if (at < 0) {
+      return undefined;
+    }
+    text = text.slice(at + IDE_REQUEST_HEADING.length);
+  }
+  const trimmed = text.trim();
+  return trimmed === '' ? undefined : trimmed;
 }
 
 /** `raw` の配列をまとめて正規化する。個々に失敗した要素は結果から落ちる。 */

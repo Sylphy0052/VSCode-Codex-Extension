@@ -303,18 +303,35 @@ function formatDate(ms: number): string {
   return ms > 0 ? new Date(ms).toLocaleString('ja-JP') : '日時不明';
 }
 
+/** 見出しと違うときだけ、依頼文の行を出す。 */
+function historyPromptLine(item: McHistoryItem): string | undefined {
+  const prompt = item.firstPrompt ?? item.handoffRequest;
+  return prompt === undefined || prompt === item.title ? undefined : prompt;
+}
+
 /**
  * 履歴（archive済みを含む）の検索と再開（Issue #2149の3）。↑ / ↓で選び、Enterで開き直す。
  * Escは`App`のキー処理が受け持つ。
+ *
+ * 見出し・最初の依頼文・handoffに残った依頼文で、会話記録が消えたセッションも含めて全期間を
+ * 探せる（Issue #2178）。会話記録が消えたセッションはEnterでhandoff台帳を開く。
  */
 export function HistoryDialog(props: {
   bridge: Bridge;
+  /** 開いたときの検索語（handoff台帳から「履歴でセッションを探す」で来たとき）。 */
+  initialQuery?: string | undefined;
   onClose: () => void;
-  onOpened: (message: string) => void;
+  /** 開き直した。`query`は開いたときの検索語（詳細ペインの会話内検索へ引き継ぐ）。 */
+  onOpened: (message: string, item: McHistoryItem, query: string) => void;
+  /** このセッションのhandoffを台帳で見る。 */
+  onShowHandoffs: (sessionId: string) => void;
 }): JSX.Element {
   const { bridge } = props;
   const [state, setState] = useState<HistoryState>({ status: 'loading' });
-  const [filter, setFilter] = useState<McHistoryFilter>(EMPTY_HISTORY_FILTER);
+  const [filter, setFilter] = useState<McHistoryFilter>({
+    ...EMPTY_HISTORY_FILTER,
+    query: props.initialQuery ?? '',
+  });
   const [cursor, setCursor] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -352,6 +369,15 @@ export function HistoryDialog(props: {
     if (item === undefined || busy) {
       return;
     }
+    // 会話記録が消えたセッションは開き直せない。残っているhandoffを詳細として見せる
+    if (item.transcriptMissing === true) {
+      if ((item.handoffCount ?? 0) > 0) {
+        props.onShowHandoffs(item.threadId);
+      } else {
+        setError('会話記録が残っておらず、handoffもありません');
+      }
+      return;
+    }
     setBusy(true);
     setError(undefined);
     void bridge.historyOpen(item.provider, item.threadId).then((result) => {
@@ -360,7 +386,7 @@ export function HistoryDialog(props: {
         setError(result.error ?? '開けませんでした');
         return;
       }
-      props.onOpened(`「${item.title}」を開きました`);
+      props.onOpened(`「${item.title}」を開きました`, item, filter.query.trim());
     });
   };
 
@@ -394,14 +420,14 @@ export function HistoryDialog(props: {
   return (
     <div class="help" role="dialog" aria-label="履歴" onKeyDown={onKeyDown}>
       <div class="help-box history-box">
-        <h2>履歴（archive済みを含む）</h2>
+        <h2>履歴（archive済み・会話記録が消えたものを含む）</h2>
         <div class="history-filter">
           <input
             ref={queryRef}
             class="text-input"
             type="search"
-            placeholder="タイトル・repo名で検索"
-            aria-label="タイトル・repo名で検索"
+            placeholder="見出し・依頼文・repo名・セッションIDで検索（全期間）"
+            aria-label="見出し・依頼文・repo名・セッションIDで検索"
             value={filter.query}
             onInput={(e) => update({ query: e.currentTarget.value })}
           />
@@ -455,7 +481,12 @@ export function HistoryDialog(props: {
               <span class="row-sub" title={item.cwdFull}>
                 {item.repoLabel}
                 {item.archived ? ' · archive済み' : ''}
+                {item.transcriptMissing === true ? ' · 会話記録なし' : ''}
+                {(item.handoffCount ?? 0) > 0 ? ` · handoff ${String(item.handoffCount)}件` : ''}
               </span>
+              {historyPromptLine(item) === undefined ? null : (
+                <span class="row-sub prompt">{historyPromptLine(item)}</span>
+              )}
             </div>
           ))}
         </div>
@@ -476,7 +507,24 @@ export function HistoryDialog(props: {
             disabled={busy || shown[index] === undefined}
             onClick={() => open(shown[index])}
           >
-            {busy ? '開いています…' : '再開（Enter）'}
+            {busy
+              ? '開いています…'
+              : shown[index]?.transcriptMissing === true
+                ? 'handoffを見る（Enter）'
+                : '再開（Enter）'}
+          </button>
+          <button
+            type="button"
+            class="btn"
+            disabled={(shown[index]?.handoffCount ?? 0) === 0}
+            onClick={() => {
+              const item = shown[index];
+              if (item !== undefined) {
+                props.onShowHandoffs(item.threadId);
+              }
+            }}
+          >
+            handoffを見る
           </button>
           <button type="button" class="btn" disabled={busy} onClick={props.onClose}>
             閉じる（Esc）

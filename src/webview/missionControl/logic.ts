@@ -537,7 +537,7 @@ export interface McHistoryFilter {
 export const EMPTY_HISTORY_FILTER: McHistoryFilter = { query: '', repoKey: '', from: '', to: '' };
 
 /** `YYYY-MM-DD`をその日の0時（ローカル時刻、ms）にする。読めなければ`undefined`。 */
-function parseDay(value: string): number | undefined {
+export function parseDay(value: string): number | undefined {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
   if (match === null) {
     return undefined;
@@ -545,11 +545,11 @@ function parseDay(value: string): number | undefined {
   return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime();
 }
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+export const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * タイトル・repo・日付で絞り、新しい順に並べる。日付で絞るときは、更新時刻の分からない
- * （`updatedAt`が0の）項目を外す。
+ * 見出し・最初の依頼文・handoffに残った依頼文・repo・セッションid（Issue #2178）と日付で絞り、
+ * 新しい順に並べる。日付で絞るときは、更新時刻の分からない（`updatedAt`が0の）項目を外す。
  */
 export function filterHistory(
   items: readonly McHistoryItem[],
@@ -564,11 +564,7 @@ export function filterHistory(
       if (filter.repoKey !== '' && item.repoKey !== filter.repoKey) {
         return false;
       }
-      if (
-        query !== '' &&
-        !item.title.toLowerCase().includes(query) &&
-        !item.repoLabel.toLowerCase().includes(query)
-      ) {
+      if (query !== '' && !historySearchFields(item).some((f) => f.toLowerCase().includes(query))) {
         return false;
       }
       if ((from !== undefined || to !== undefined) && item.updatedAt <= 0) {
@@ -580,6 +576,16 @@ export function filterHistory(
       return to === undefined || item.updatedAt < to;
     })
     .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function historySearchFields(item: McHistoryItem): string[] {
+  return [
+    item.title,
+    item.repoLabel,
+    item.threadId,
+    item.firstPrompt ?? '',
+    item.handoffRequest ?? '',
+  ];
 }
 
 /** 履歴に出てくるrepo（絞り込みの候補）。ラベル順。 */

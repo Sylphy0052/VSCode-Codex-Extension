@@ -1,4 +1,4 @@
-import type { SessionSummary } from '../codex/types';
+import { FIRST_PROMPT_MAX, type SessionSummary } from '../codex/types';
 import type { FileSystemPort, HeadDigest } from '../session/ports';
 import {
   isWithinAny,
@@ -230,6 +230,10 @@ export class ClaudeSessionStore {
               ).toISOString(),
               cwd: meta.cwd,
               archived: false,
+              // 名前を付けた後も最初の依頼文で探せるように持つ（Issue #2178）
+              ...(meta.firstUserText === undefined
+                ? {}
+                : { firstPrompt: meta.firstUserText.slice(0, FIRST_PROMPT_MAX) }),
             },
           });
         }

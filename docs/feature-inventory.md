@@ -481,6 +481,8 @@
 
 旧統括ページ（`sessionKanbanView.ts`）はIssue #2138で廃止し、Mission Controlへ統合した。`agent.sessionKanban`はMission Controlを開く別名として残る。5つの状態での絞り込み、レビュー待ち、再開待ち、引き継ぎ確認・脇道の質問もMission Controlで扱う。全操作はキーボードだけで行える（Issue #2152）。キーの割り当ては`src/webview/missionControl/keys.ts`の表1つから判定・ヘルプ（`?`）・コマンドパレット（`:`）を作り、詳細ペインとダイアログのボタンには空いている英字をアクセスキーとして振る。拡張側のkeybindingは開く`Ctrl+K J`・閉じる`Ctrl+K Q`。
 
+履歴（`h`）は見出し・最初の依頼文・handoffに残ったユーザー発話で全期間を探せる（Issue #2178）。一覧で見かけたセッションを`<globalStorage>/mission-control/session-catalog.json`へ書き留め、transcriptが消えた後も引けるようにする。handoff台帳（`l`）は`<globalStorage>/handoff/`の本文を日付・セッション・契機（手動 / 自動）で絞り、本文の部分一致で探す。先頭の項目は`handoff-ledger-index.json`に索引として残し、本文は検索のたびに候補を新しい順に読んで一致が100件に達したら止める。
+
 レビュー結果:[静的レビュー](reviews/f24-session-kanban.md)（廃止前の旧統括ページが対象）。
 
 主な実装:[src/view/missionControlView.ts](../src/view/missionControlView.ts)、[src/view/missionControlModel.ts](../src/view/missionControlModel.ts)、[src/view/missionControlReview.ts](../src/view/missionControlReview.ts)、[src/view/missionControlResume.ts](../src/view/missionControlResume.ts)、[src/view/missionControlNotifier.ts](../src/view/missionControlNotifier.ts)、[src/view/sessionControlMessage.ts](../src/view/sessionControlMessage.ts)、[src/webview/missionControl/app.tsx](../src/webview/missionControl/app.tsx)、[src/view/sessionActivity.ts](../src/view/sessionActivity.ts)。

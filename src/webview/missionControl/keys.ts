@@ -25,6 +25,8 @@ export type McKeyCommand =
   | { kind: 'toggleMark' }
   | { kind: 'lifecycle'; op: McLifecycleOp }
   | { kind: 'history' }
+  // Issue #2178: handoff台帳
+  | { kind: 'ledger' }
   // Issue #2150: Runsタブ・roadmapからの起動
   | { kind: 'tab' }
   | { kind: 'runOp'; op: McRunOp }
@@ -182,8 +184,13 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
   },
   {
     keys: ['h'],
-    label: '履歴を開く（↑ / ↓で移動、Enterで再開）',
+    label: '履歴を開く（見出し・依頼文で全期間を検索。↑ / ↓で移動、Enterで再開）',
     command: { kind: 'history' },
+  },
+  {
+    keys: ['l'],
+    label: 'handoff台帳を開く（本文の部分一致・日付・契機で絞る。Enterで本文を開く）',
+    command: { kind: 'ledger' },
   },
   { keys: ['t'], label: 'セッション / Runsのタブを切り替える', command: { kind: 'tab' } },
   {

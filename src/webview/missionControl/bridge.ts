@@ -3,6 +3,8 @@ import type {
   McAttachment,
   McControlAction,
   McHandoffDetail,
+  McHandoffListing,
+  McHandoffQuery,
   McHistoryItem,
   McHostMessage,
   McIssueListing,
@@ -61,6 +63,7 @@ export interface ReplyResult {
   choices?: McLaunchChoices | undefined;
   outcomes?: McLifecycleOutcome[] | undefined;
   history?: McHistoryItem[] | undefined;
+  handoffs?: McHandoffListing | undefined;
   issues?: McIssueListing | undefined;
   message?: string | undefined;
   attachments?: McAttachment[] | undefined;
@@ -90,6 +93,10 @@ export interface Bridge {
   history(): Promise<ReplyResult>;
   /** 履歴の1件を開き直す。 */
   historyOpen(provider: McProvider, threadId: string): Promise<ReplyResult>;
+  /** handoff台帳を絞り込んで取り寄せる（Issue #2178）。 */
+  handoffLedger(query: McHandoffQuery): Promise<ReplyResult>;
+  /** handoff本文をエディタで開かせる。 */
+  handoffOpen(name: string): Promise<ReplyResult>;
   /** レビュー待ちの1ファイルをdiffエディタで開かせる（Issue #2138の1）。 */
   openDiff(target: McTarget, path: string): Promise<ReplyResult>;
   /** レビュー待ちを「確認済み」にする。 */
@@ -218,6 +225,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           choices: message.choices,
           outcomes: message.outcomes,
           history: message.history,
+          handoffs: message.handoffs,
           issues: message.issues,
           message: message.message,
           attachments: message.attachments,
@@ -303,6 +311,8 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     lifecycle: (op, targets) => call({ type: 'lifecycle', op, targets: targets.map(targetOnly) }),
     history: () => call({ type: 'history' }),
     historyOpen: (provider, threadId) => call({ type: 'historyOpen', provider, threadId }),
+    handoffLedger: (query) => call({ type: 'handoffLedger', query }),
+    handoffOpen: (name) => call({ type: 'handoffOpen', name }),
     openDiff: (to, file) => call({ type: 'openDiff', ...targetOnly(to), path: file }),
     reviewAck: (to) => call({ type: 'reviewAck', ...targetOnly(to) }),
     resume: (to) => call({ type: 'resume', ...targetOnly(to) }),

@@ -93,6 +93,7 @@ import { SessionSettingsPanel } from './sessionSettings';
 import { SessionOpDialog, type McSessionOpDialog } from './sessionOps';
 import { MC_EXTENSION_COMMANDS } from './extensionCommands';
 import { Conversation, type ConversationKeysRef, type TurnLogState } from './conversation';
+import { HandoffLedgerDialog } from './ledger';
 import { hasOlderTurns, logFromPage, mergeTurnPage, TURN_PAGE_SIZE, type TurnLog } from './turnLog';
 import type {
   McActivity,
@@ -308,6 +309,17 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const autoSelect = useRef(true);
   const [launchOpen, setLaunchOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // 履歴を開いたときの検索語（handoff台帳から来たとき。Issue #2178）
+  const [historyQuery, setHistoryQuery] = useState<string | undefined>(undefined);
+  // handoff台帳（Issue #2178）。`session`は開いたときのセッションの絞り込み
+  const [ledger, setLedger] = useState<{ session?: string | undefined } | undefined>(undefined);
+  // 履歴から開き直したセッション。一覧に現れたら選び、会話内検索へ検索語を入れる
+  const [historyFocus, setHistoryFocus] = useState<
+    { provider: McProvider; threadId: string; query: string; at: number } | undefined
+  >(undefined);
+  const [conversationSeed, setConversationSeed] = useState<
+    { key: string; query: string } | undefined
+  >(undefined);
   // 名前変更・クリア・巻き戻しのダイアログ（Issue #2160）。対象は開いた時点のセッションに固定する
   const [opDialog, setOpDialog] = useState<
     { op: McSessionOpDialog; session: McSession } | undefined
@@ -401,6 +413,29 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       setSelected(next);
     }
   }, [snapshot, rowIds, selected]);
+
+  // 履歴から開き直したセッション（Issue #2178）。一覧に現れたら選び、開いたときの検索語を
+  // 会話内検索（#2157）へ入れて該当位置へ飛ばす。現れないまま1分経ったら諦める
+  useEffect(() => {
+    if (historyFocus === undefined) {
+      return;
+    }
+    const same = (s: McSession): boolean =>
+      s.provider === historyFocus.provider && s.threadId === historyFocus.threadId;
+    const found =
+      sessions.find((s) => same(s) && s.isCurrentWindow) ?? sessions.find((s) => same(s));
+    if (found === undefined) {
+      const left = historyFocus.at + 60_000 - Date.now();
+      const timer = setTimeout(() => setHistoryFocus(undefined), Math.max(left, 0));
+      return () => clearTimeout(timer);
+    }
+    setHistoryFocus(undefined);
+    setConversationSeed(
+      historyFocus.query === '' ? undefined : { key: targetKey(found), query: historyFocus.query },
+    );
+    setSelected(sessionRowId(found));
+    return undefined;
+  }, [sessions, historyFocus]);
 
   // 複数選択は、一覧に見えているセッションだけに保つ（絞り込みで隠れたものへ操作が届かない）
   useEffect(() => {
@@ -517,9 +552,17 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     fetchBefore(now.value.start ?? 0);
   };
 
+  const openHistory = (query: string | undefined): void => {
+    setHistoryQuery(query);
+    setHistoryOpen(true);
+  };
+
   const conversationFor = (target: McTarget): JSX.Element => (
     <Conversation
       key={targetKey(target)}
+      initialQuery={
+        conversationSeed?.key === targetKey(target) ? conversationSeed.query : undefined
+      }
       log={turns[targetKey(target)]}
       keysRef={conversationKeys}
       onReload={() => loadTurns(target)}
@@ -1085,7 +1128,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         runLifecycle(command.op);
         return;
       case 'history':
-        setHistoryOpen(true);
+        openHistory(undefined);
+        return;
+      case 'ledger':
+        setLedger({});
         return;
       case 'sessionOp':
         runSessionOp(command.op);
@@ -1310,6 +1356,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     usageOpen,
     launchOpen,
     historyOpen,
+    ledgerOpen: ledger !== undefined,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
     globalDialogOpen: prefsOpen || saveFilterOpen,
@@ -1323,6 +1370,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     usageOpen,
     launchOpen,
     historyOpen,
+    ledgerOpen: ledger !== undefined,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
     globalDialogOpen: prefsOpen || saveFilterOpen,
@@ -1355,6 +1403,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       const dialogOpen =
         state.launchOpen ||
         state.historyOpen ||
+        state.ledgerOpen ||
         state.issuesOpen ||
         state.opDialogOpen ||
         state.globalDialogOpen ||
@@ -1376,6 +1425,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           event.preventDefault();
           setLaunchOpen(false);
           setHistoryOpen(false);
+          setLedger(undefined);
           setIssuesOpen(false);
           setOpDialog(undefined);
           setPrefsOpen(false);
@@ -1641,11 +1691,20 @@ export function App(props: { bridge: Bridge }): JSX.Element {
               <button
                 type="button"
                 class="btn"
-                onClick={() => setHistoryOpen(true)}
+                onClick={() => openHistory(undefined)}
                 title="履歴から再開（h）"
                 data-key-label="h"
               >
                 履歴
+              </button>
+              <button
+                type="button"
+                class="btn"
+                onClick={() => setLedger({})}
+                title="handoff台帳（l）"
+                data-key-label="l"
+              >
+                台帳
               </button>
               <button
                 type="button"
@@ -1870,10 +1929,32 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       {historyOpen ? (
         <HistoryDialog
           bridge={bridge}
+          initialQuery={historyQuery}
           onClose={() => setHistoryOpen(false)}
-          onOpened={(message) => {
+          onOpened={(message, item, query) => {
             setHistoryOpen(false);
             setToast(message);
+            setHistoryFocus({
+              provider: item.provider,
+              threadId: item.threadId,
+              query,
+              at: Date.now(),
+            });
+          }}
+          onShowHandoffs={(sessionId) => {
+            setHistoryOpen(false);
+            setLedger({ session: sessionId });
+          }}
+        />
+      ) : null}
+      {ledger !== undefined ? (
+        <HandoffLedgerDialog
+          bridge={bridge}
+          initialSession={ledger.session}
+          onClose={() => setLedger(undefined)}
+          onShowSession={(sessionId) => {
+            setLedger(undefined);
+            openHistory(sessionId);
           }}
         />
       ) : null}

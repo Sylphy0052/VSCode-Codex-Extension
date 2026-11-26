@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import type { Logger } from '../log';
 import { formatSessionTarget } from '../orchestrator/sessionBridge';
 import type {
+  McHandoffListing,
+  McHandoffQuery,
   McHistoryItem,
   McLaunchChoices,
   McLaunchRepo,
@@ -28,6 +30,7 @@ import { parseRunCommand } from './missionControlCommands';
 import { applyDeleteFilter, applySaveFilter, parseSetPref } from './missionControlPrefs';
 import type { McSettingsPort } from './missionControlSettings';
 import {
+  parseHandoffQuery,
   parseLifecycleRequest,
   ReadMarker,
   type McLifecycleRunResult,
@@ -105,6 +108,10 @@ export interface McSessionPort {
   history(): Promise<McHistoryItem[]>;
   /** 履歴の1件をこのウィンドウで開き直す。失敗したら理由の文を返す。 */
   historyOpen(provider: McProvider, threadId: string): Promise<string | undefined>;
+  /** handoff台帳を絞り込む（Issue #2178）。 */
+  handoffLedger?(query: McHandoffQuery): Promise<McHandoffListing>;
+  /** handoff本文をエディタで開く。失敗したら理由の文を返す。 */
+  handoffOpen?(name: string): Promise<string | undefined>;
 }
 
 /**
@@ -344,6 +351,8 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'lifecycle':
       case 'history':
       case 'historyOpen':
+      case 'handoffLedger':
+      case 'handoffOpen':
         this.handleSessions(m);
         return;
       case 'runOp':
@@ -493,6 +502,21 @@ export class MissionControlViewManager implements vscode.Disposable {
           return { ok: false, error: '開くセッションが正しくありません' };
         }
         const error = await port.historyOpen(provider, threadId);
+        return error === undefined ? { ok: true } : { ok: false, error };
+      }
+      if (message.type === 'handoffLedger') {
+        const query = parseHandoffQuery(message.query);
+        if (query === undefined || port.handoffLedger === undefined) {
+          return { ok: false, error: 'handoff台帳の条件が正しくありません' };
+        }
+        return { ok: true, handoffs: await port.handoffLedger(query) };
+      }
+      if (message.type === 'handoffOpen') {
+        const { name } = message;
+        if (typeof name !== 'string' || name === '' || port.handoffOpen === undefined) {
+          return { ok: false, error: '開くhandoffが正しくありません' };
+        }
+        const error = await port.handoffOpen(name);
         return error === undefined ? { ok: true } : { ok: false, error };
       }
       const request = parseLifecycleRequest(message);

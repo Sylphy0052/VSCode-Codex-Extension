@@ -84,12 +84,14 @@ export function Conversation(props: {
   onReload: () => void;
   onLoadOlder: () => void;
   onLoadAll: () => void;
+  /** 最初に入れておく検索語（履歴の検索から開いたとき。Issue #2178）。 */
+  initialQuery?: string | undefined;
 }): JSX.Element {
   const { log } = props;
   const value = log?.status === 'ok' ? log.value : undefined;
   const turns = value?.turns ?? [];
   const base = value?.start ?? 0;
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(props.initialQuery ?? '');
   const [current, setCurrent] = useState<number | undefined>(undefined);
   const [openAll, setOpenAll] = useState(false);
   // 1件ずつ開閉を反転させた位置（会話全体での位置。読み足しで添字がずれても保つ）

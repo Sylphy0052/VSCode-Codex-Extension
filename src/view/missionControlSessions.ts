@@ -2,6 +2,9 @@ import type { SessionSummary } from '../codex/types';
 import { formatSessionTarget } from '../orchestrator/sessionBridge';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import type {
+  McHandoffItem,
+  McHandoffListing,
+  McHandoffQuery,
   McHistoryItem,
   McLifecycleOp,
   McLifecycleOutcome,
@@ -9,7 +12,9 @@ import type {
   McSession,
   McTarget,
 } from '../webview/missionControl/protocol';
+import type { HandoffLedgerEntry, HandoffLedgerResult } from './handoffLedger';
 import type { McRepoResolver } from './missionControlModel';
+import { catalogKey, type SessionCatalogEntry } from './sessionCatalog';
 import { parseTarget } from './sessionControlMessage';
 
 /**
@@ -201,9 +206,6 @@ export function summarizeOutcomes(
   return `${String(ok)}件成功、${String(failed.length)}件失敗（${reason}）`;
 }
 
-/** 履歴に出す件数の上限。 */
-export const MAX_HISTORY_ITEMS = 500;
-
 /**
  * 一覧（`thread/list`由来。archive済みを含まない）へ、archive済みのセッションを重ねる。
  * 同じセッションが両方にあれば一覧の方を残す。
@@ -214,33 +216,6 @@ export function mergeArchivedSessions(
 ): SessionSummary[] {
   const seen = new Set(listed.map((s) => `${s.provider}|${s.id}`));
   return [...listed, ...archived.filter((s) => !seen.has(`${s.provider}|${s.id}`))];
-}
-
-/** 履歴（`SessionSummary`）を画面の形へ変える。新しい順に並べる。 */
-export function toHistoryItems(
-  sessions: readonly SessionSummary[],
-  resolveRepo: McRepoResolver,
-): McHistoryItem[] {
-  const items: McHistoryItem[] = [];
-  for (const session of sessions) {
-    if (session.provider !== 'codex' && session.provider !== 'claude') {
-      continue;
-    }
-    const repo = resolveRepo(session.cwd);
-    const updatedAt = Date.parse(session.updatedAt);
-    items.push({
-      provider: session.provider,
-      threadId: session.id,
-      title: session.threadName ?? '(名称未設定)',
-      repoKey: repo.key,
-      repoLabel: repo.label,
-      cwdFull: session.cwd ?? '',
-      updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0,
-      archived: session.archived,
-    });
-  }
-  items.sort((a, b) => b.updatedAt - a.updatedAt);
-  return items.slice(0, MAX_HISTORY_ITEMS);
 }
 
 /** 既読の要求を送り直すまでの間隔（ms）。宛先のウィンドウの書き込みが届くまで連打しない。 */
@@ -280,4 +255,257 @@ export class ReadMarker {
     this.requested.set(key, at);
     return true;
   }
+}
+
+/** 全期間の履歴に載せる件数の上限（Issue #2178）。webviewは絞り込んだ先頭だけを描く。 */
+export const MAX_ALL_PERIOD_HISTORY_ITEMS = 10_000;
+const HISTORY_TITLE_MAX = 200;
+const HISTORY_PROMPT_MAX = 200;
+
+/** handoffをセッションごとにまとめたもの。 */
+interface HandoffGroup {
+  provider: McProvider;
+  sessionId: string;
+  count: number;
+  latestAt: number;
+  cwd: string;
+  transcriptPath: string;
+  /** 最も古いhandoffの依頼文。 */
+  request: string;
+  requestAt: number;
+}
+
+function groupHandoffs(entries: readonly HandoffLedgerEntry[]): Map<string, HandoffGroup> {
+  const groups = new Map<string, HandoffGroup>();
+  for (const entry of entries) {
+    if (entry.provider === undefined || entry.sessionId === '') {
+      continue;
+    }
+    const key = catalogKey(entry.provider, entry.sessionId);
+    const group = groups.get(key) ?? {
+      provider: entry.provider,
+      sessionId: entry.sessionId,
+      count: 0,
+      latestAt: 0,
+      cwd: '',
+      transcriptPath: '',
+      request: '',
+      requestAt: Number.POSITIVE_INFINITY,
+    };
+    group.count += 1;
+    group.latestAt = Math.max(group.latestAt, entry.createdAt);
+    group.cwd ||= entry.cwd;
+    group.transcriptPath ||= entry.transcriptPath;
+    if (entry.request !== '' && entry.createdAt < group.requestAt) {
+      group.request = entry.request;
+      group.requestAt = entry.createdAt;
+    }
+    groups.set(key, group);
+  }
+  return groups;
+}
+
+/** 一覧に無いセッションの、会話記録の在処（確かめる対象）。 */
+export function transcriptPathsToCheck(
+  listed: readonly SessionSummary[],
+  catalog: readonly SessionCatalogEntry[],
+  handoffs: readonly HandoffLedgerEntry[],
+): string[] {
+  const seen = new Set(listed.map((s) => catalogKey(s.provider, s.id)));
+  const paths: string[] = [];
+  for (const entry of catalog) {
+    if (!seen.has(catalogKey(entry.provider, entry.threadId)) && entry.transcriptPath) {
+      paths.push(entry.transcriptPath);
+    }
+  }
+  for (const entry of handoffs) {
+    if (
+      entry.provider !== undefined &&
+      !seen.has(catalogKey(entry.provider, entry.sessionId)) &&
+      entry.transcriptPath !== ''
+    ) {
+      paths.push(entry.transcriptPath);
+    }
+  }
+  return paths;
+}
+
+function inline(text: string | undefined, max: number): string | undefined {
+  if (text === undefined) {
+    return undefined;
+  }
+  const value = sanitizeInlineText(text, max);
+  return value === '' ? undefined : value;
+}
+
+/** 一覧に無い（目録・handoffだけで知っている）セッション。開き直すときに使う。 */
+export interface McOffListSession {
+  provider: McProvider;
+  threadId: string;
+  title: string;
+  cwd: string | undefined;
+  transcriptMissing: boolean | undefined;
+}
+
+export interface McAllPeriodHistory {
+  items: McHistoryItem[];
+  offList: McOffListSession[];
+}
+
+/**
+ * 全期間の履歴（Issue #2178）。今の一覧に、目録（一覧で見かけたセッションの見出しと依頼文）と
+ * handoffに残ったセッションを重ねる。一覧に無いセッションは、会話記録の在処が分かれば
+ * `missing`で消えたかを判定する。見出し・依頼文は外部由来なので1行に均す。
+ */
+export function buildAllPeriodHistory(input: {
+  listed: readonly SessionSummary[];
+  catalog: readonly SessionCatalogEntry[];
+  handoffs: readonly HandoffLedgerEntry[];
+  missing: ReadonlySet<string>;
+  resolveRepo: McRepoResolver;
+}): McAllPeriodHistory {
+  const groups = groupHandoffs(input.handoffs);
+  const catalog = new Map(input.catalog.map((e) => [catalogKey(e.provider, e.threadId), e]));
+  const items: McHistoryItem[] = [];
+  const offList: McOffListSession[] = [];
+  const seen = new Set<string>();
+  const withHandoffs = (item: McHistoryItem, group: HandoffGroup | undefined): McHistoryItem =>
+    group === undefined
+      ? item
+      : {
+          ...item,
+          handoffCount: group.count,
+          handoffRequest: inline(group.request, HISTORY_PROMPT_MAX),
+          updatedAt: Math.max(item.updatedAt, group.latestAt),
+        };
+  for (const session of input.listed) {
+    if (session.provider !== 'codex' && session.provider !== 'claude') {
+      continue;
+    }
+    const key = catalogKey(session.provider, session.id);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    const repo = input.resolveRepo(session.cwd);
+    const updatedAt = Date.parse(session.updatedAt);
+    items.push(
+      withHandoffs(
+        {
+          provider: session.provider,
+          threadId: session.id,
+          title: inline(session.threadName, HISTORY_TITLE_MAX) ?? '(名称未設定)',
+          repoKey: repo.key,
+          repoLabel: repo.label,
+          cwdFull: session.cwd ?? '',
+          updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0,
+          archived: session.archived,
+          firstPrompt: inline(
+            session.firstPrompt ?? catalog.get(key)?.firstPrompt,
+            HISTORY_PROMPT_MAX,
+          ),
+          transcriptMissing: false,
+        },
+        groups.get(key),
+      ),
+    );
+  }
+  const offListKeys = new Set([...catalog.keys(), ...groups.keys()]);
+  for (const key of offListKeys) {
+    if (seen.has(key)) {
+      continue;
+    }
+    const entry = catalog.get(key);
+    const group = groups.get(key);
+    const provider = entry?.provider ?? group?.provider;
+    const threadId = entry?.threadId ?? group?.sessionId;
+    if (provider === undefined || threadId === undefined) {
+      continue;
+    }
+    const cwd = entry?.cwd ?? (group?.cwd || undefined);
+    const path = entry?.transcriptPath ?? (group?.transcriptPath || undefined);
+    const transcriptMissing = path === undefined ? undefined : input.missing.has(path);
+    const title =
+      inline(entry?.title, HISTORY_TITLE_MAX) ??
+      inline(group?.request, HISTORY_TITLE_MAX) ??
+      '(名称未設定)';
+    const repo = input.resolveRepo(cwd);
+    items.push(
+      withHandoffs(
+        {
+          provider,
+          threadId,
+          title,
+          repoKey: repo.key,
+          repoLabel: repo.label,
+          cwdFull: cwd ?? '',
+          updatedAt: entry?.updatedAt ?? 0,
+          archived: false,
+          firstPrompt: inline(entry?.firstPrompt, HISTORY_PROMPT_MAX),
+          transcriptMissing,
+        },
+        group,
+      ),
+    );
+    offList.push({ provider, threadId, title, cwd, transcriptMissing });
+  }
+  items.sort((a, b) => b.updatedAt - a.updatedAt);
+  return { items: items.slice(0, MAX_ALL_PERIOD_HISTORY_ITEMS), offList };
+}
+
+const HANDOFF_QUERY_MAX = 200;
+
+function optionalMs(value: unknown): number | undefined | false {
+  if (value === undefined) {
+    return undefined;
+  }
+  return typeof value === 'number' && Number.isFinite(value) ? value : false;
+}
+
+/** webviewから届いた台帳の条件を確かめる。形が違えば`undefined`。 */
+export function parseHandoffQuery(value: unknown): McHandoffQuery | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  const fromMs = optionalMs(v.fromMs);
+  const toMs = optionalMs(v.toMs);
+  if (
+    typeof v.query !== 'string' ||
+    typeof v.session !== 'string' ||
+    v.query.length > HANDOFF_QUERY_MAX ||
+    v.session.length > HANDOFF_QUERY_MAX ||
+    (v.trigger !== 'all' && v.trigger !== 'manual' && v.trigger !== 'auto') ||
+    fromMs === false ||
+    toMs === false
+  ) {
+    return undefined;
+  }
+  return { query: v.query, session: v.session, trigger: v.trigger, fromMs, toMs };
+}
+
+/** 台帳の検索結果を画面の形にする。 */
+export function toHandoffListing(
+  result: HandoffLedgerResult,
+  resolveRepo: McRepoResolver,
+): McHandoffListing {
+  const items: McHandoffItem[] = result.hits.map(({ entry, snippet }) => {
+    const repo = resolveRepo(entry.cwd === '' ? undefined : entry.cwd);
+    return {
+      name: entry.name,
+      provider: entry.provider,
+      sessionId: entry.sessionId,
+      repoKey: repo.key,
+      repoLabel: repo.label,
+      cwdFull: entry.cwd,
+      branch: entry.branch,
+      model: entry.model,
+      trigger: entry.trigger,
+      triggerLabel: entry.triggerLabel,
+      createdAt: entry.createdAt,
+      request: entry.request,
+      snippet,
+    };
+  });
+  return { items, total: result.total, truncated: result.truncated };
 }
