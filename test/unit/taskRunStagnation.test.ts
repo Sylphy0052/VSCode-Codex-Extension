@@ -139,25 +139,31 @@ describe('assessStagnation（LLMを呼ばない純関数）', () => {
     ]);
     expect(signal(run, 'repeatedFailure')).toMatchObject({ active: true, value: 1 });
     const body = bodyOf(run, 'T1');
-    expect(body).toContain('停滞: 同じ原因の失敗1件（閾値1）。方式そのものを見直してください。');
+    expect(body).toContain(
+      '停滞: 未完了のタスクの同じ原因の失敗1件（閾値1）。方式そのものを見直してください。',
+    );
   });
 
-  it('信号1: 前に終わったタスクの失敗は数えない（直近にmergeしたタスクと未完了のタスクだけ）', () => {
+  it('信号1: 失敗をやり直して直したうえでmergeしたタスクの失敗は数えない', () => {
     const gates = [
       stageFailedGate('g1', 'implement', 'pushできない'),
       stageFailedGate('g2', 'implement', 'pushできない'),
     ];
-    const run = makeRun([
-      mergedTask('T1', 1, findings(0), { gates }),
-      mergedTask('T2', 2, findings(0)),
-    ]);
-    expect(signal(run, 'repeatedFailure')).toMatchObject({ active: false, value: 0 });
-    // 直近にmergeしたタスクなら数える
+    // 直近にmergeしたタスクでも、もう続いていないので立てない
     const latest = makeRun([
       mergedTask('T2', 1, findings(0)),
       mergedTask('T1', 2, findings(0), { gates }),
     ]);
-    expect(signal(latest, 'repeatedFailure')).toMatchObject({ active: true, value: 1 });
+    expect(signal(latest, 'repeatedFailure')).toMatchObject({ active: false, value: 0 });
+    expect(bodyOf(latest, 'T1')).not.toContain('停滞');
+    // mergeせずに完了にしたタスクも数えない
+    const closed = makeRun([
+      makeTask('T1', 'implement', 'halted', {
+        gates,
+        closedWithoutMerge: { reason: '不要', by: 'orchestrator', at: at(1) },
+      }),
+    ]);
+    expect(signal(closed, 'repeatedFailure').active).toBe(false);
   });
 
   it('信号2: 差し戻しが上限に達したタスクがあれば、タスクIDと件数を出す', () => {
@@ -247,19 +253,47 @@ describe('assessStagnation（LLMを呼ばない純関数）', () => {
     expect(bodyOf(withoutGoal, 'T1')).not.toContain('停滞');
   });
 
+  it('信号4: 再開後の最初のmergeで知らせ、出し直した計画の2件目以降のmergeには付け続けない', () => {
+    const endReview = {
+      finishedAt: at(10),
+      sentAt: at(10),
+      reopens: STAGNATION_UNMET_REOPEN_THRESHOLD,
+      unmetReopens: STAGNATION_UNMET_REOPEN_THRESHOLD,
+    };
+    const first = {
+      ...makeRun([mergedTask('T1', 1, findings(0)), mergedTask('T2', 11, findings(0))]),
+      goal: GOAL,
+      endReview,
+    };
+    expect(bodyOf(first, 'T2')).toContain('終了レビューで完了条件が未達のまま再開');
+    const second = {
+      ...makeRun([
+        mergedTask('T1', 1, findings(0)),
+        mergedTask('T2', 11, findings(0)),
+        mergedTask('T3', 12, findings(0)),
+      ]),
+      goal: GOAL,
+      endReview,
+    };
+    expect(signal(second, 'endReviewUnmetReopens')).toMatchObject({ active: false, value: 2 });
+    expect(signal(second, 'endReviewUnmetReopens').detail).toContain('知らせ済み');
+    expect(bodyOf(second, 'T3')).not.toContain('停滞');
+  });
+
   it('立った信号だけをまとめ、get_run_stateには全信号の状態を出す', () => {
     const gates = [
       stageFailedGate('g1', 'implement', 'pushできない'),
       stageFailedGate('g2', 'implement', 'pushできない'),
     ];
     const run = makeRun([
-      mergedTask('T1', 1, findings(1), { reviewRounds: MAX_REVIEW_ROUNDS, gates }),
+      mergedTask('T1', 1, findings(1), { reviewRounds: MAX_REVIEW_ROUNDS }),
+      makeTask('T2', 'implement', 'halted', { gates }),
     ]);
     const line = formatStagnationLine(assessStagnation(run)) ?? '';
     expect(line).toContain('同じ原因の失敗1件（閾値1） / 差し戻しが上限');
     expect(line).not.toContain('残りの推移');
     const status = formatStagnationStatus(assessStagnation(run));
-    expect(status).toMatch(/^停滞の信号: あり（\[立つ\] 同じ原因の失敗1件/);
+    expect(status).toMatch(/^停滞の信号: あり（\[立つ\] 未完了のタスクの同じ原因の失敗1件/);
     expect(status).toContain('残りの推移は未判定');
     expect(status).toContain('終了レビューの判定は対象外（goalなし）');
     expect(formatTaskRunState(run, none).text).toContain('停滞の信号: あり（');

@@ -89,11 +89,6 @@ function readCount(value: unknown): number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
-/** 判定が未達のまま再開した回数（Issue #2195）。記録が無ければ0。 */
-export function endReviewUnmetReopenCount(run: Pick<TaskRun, 'endReview'>): number {
-  return readTaskRunEndReview(run)?.unmetReopens ?? 0;
-}
-
 /** 終了レビューから再開した回数。記録が無ければ0。 */
 export function endReviewReopenCount(run: Pick<TaskRun, 'endReview'>): number {
   return readTaskRunEndReview(run)?.reopens ?? 0;

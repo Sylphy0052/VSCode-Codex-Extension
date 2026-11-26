@@ -1,5 +1,5 @@
 import { countRepeatedFailures } from './taskRunDigest';
-import { endReviewUnmetReopenCount } from './taskRunEndReview';
+import { readTaskRunEndReview } from './taskRunEndReview';
 import { isReviewRoundsExhausted, MAX_REVIEW_ROUNDS } from './taskRunGates';
 import { readTaskRunGoal } from './taskRunGoal';
 import { isTaskDone, listTasks, type OrchestratedTask, type TaskRun } from './taskRunState';
@@ -12,9 +12,14 @@ import { sanitizeInlineText } from './untrustedText';
  * 閾値は自律改善の対象外（#2090「関門・上限値・承認判定・指標の計算」）。変えるときは人が
  * ここの定数を直す。
  *
- * 信号1・2は「まだ終わっていないタスク」と「直近にmergeしたタスク」だけを見る。前に終わった
- * タスクの失敗まで数えると、一度立った信号がrunの終わりまで消えず、方式を変えた後も見直しを
- * 求め続けるため。
+ * 一度立った信号がrunの終わりまで消えず、方式を変えた後も見直しを求め続けないよう、どの信号も
+ * 「今も続いている」ものだけを見る。
+ * - 信号1（同じ原因の失敗）は、まだ終わっていないタスクだけを見る。失敗をやり直して直したうえで
+ *   mergeしたタスクは、もう続いていない
+ * - 信号2（差し戻しの上限）は、まだ終わっていないタスクと直近にmergeしたタスクを見る。上限に
+ *   達したまま指摘を残して進めたmergeは、それ自体が停滞の根拠になる
+ * - 信号4（終了レビューの未達）は、終了レビューの後のmergeが1件以下の間だけ立てる。再開後の
+ *   最初のmergeで見直しを求めれば足り、出し直した計画の全mergeに付け続けない
  */
 
 /** 信号1: 同じ原因の失敗がこの件数以上で立つ。 */
@@ -28,6 +33,8 @@ export const STAGNATION_EXHAUSTED_TASK_THRESHOLD = 1;
 export const STAGNATION_LEFTOVER_WINDOW = 3;
 /** 信号4: goalがあるrunで、終了レビューの判定が未達のまま続けて再開した回数がこれ以上で立つ。 */
 export const STAGNATION_UNMET_REOPEN_THRESHOLD = 2;
+/** 信号4: 終了レビューの後のmergeがこの件数以下の間だけ立てる（再開後の最初のmergeで知らせる）。 */
+export const STAGNATION_UNMET_REOPEN_NOTICE_MERGES = 1;
 
 /** 根拠に載せるタスクIDの長さの上限。 */
 const TASK_ID_MAX_LENGTH = 16;
@@ -77,12 +84,8 @@ function mergedTasksInOrder(run: TaskRun): OrchestratedTask[] {
     .map(({ task }) => task);
 }
 
-/** 信号1・2が見るタスク: 終わっていないタスクと、直近にmergeしたタスク。 */
-function tasksInScope(run: TaskRun, merged: readonly OrchestratedTask[]): OrchestratedTask[] {
-  const latest = merged.at(-1);
-  return listTasks(run).filter(
-    (task) => task === latest || (!isTaskDone(task) && task.closedWithoutMerge === undefined),
-  );
+function isUnfinished(task: OrchestratedTask): boolean {
+  return !isTaskDone(task) && task.closedWithoutMerge === undefined;
 }
 
 /** タスクの残り（残った指摘と未実測の場面の和）。reviewの結果が無ければ`undefined`。 */
@@ -95,19 +98,24 @@ function leftoverCount(task: OrchestratedTask): number | undefined {
   return review.remainingFindings.length + scenes;
 }
 
-function repeatedFailureSignal(scope: readonly OrchestratedTask[]): StagnationSignal {
-  const value = scope.reduce((sum, task) => sum + countRepeatedFailures(task), 0);
+function repeatedFailureSignal(run: TaskRun): StagnationSignal {
+  const value = listTasks(run)
+    .filter(isUnfinished)
+    .reduce((sum, task) => sum + countRepeatedFailures(task), 0);
   return {
     kind: 'repeatedFailure',
     active: value >= STAGNATION_REPEATED_FAILURE_THRESHOLD,
     value,
     threshold: STAGNATION_REPEATED_FAILURE_THRESHOLD,
-    detail: `同じ原因の失敗${String(value)}件`,
+    detail: `未完了のタスクの同じ原因の失敗${String(value)}件`,
   };
 }
 
-function exhaustedSignal(scope: readonly OrchestratedTask[]): StagnationSignal {
-  const exhausted = scope.filter(isReviewRoundsExhausted);
+function exhaustedSignal(run: TaskRun, merged: readonly OrchestratedTask[]): StagnationSignal {
+  const latest = merged.at(-1);
+  const exhausted = listTasks(run)
+    .filter((task) => task === latest || isUnfinished(task))
+    .filter(isReviewRoundsExhausted);
   const ids = exhausted.map(taskIdText).join(', ');
   return {
     kind: 'reviewRoundsExhausted',
@@ -160,7 +168,7 @@ function leftoverSignal(merged: readonly OrchestratedTask[]): StagnationSignal {
   };
 }
 
-function unmetReopenSignal(run: TaskRun): StagnationSignal {
+function unmetReopenSignal(run: TaskRun, merged: readonly OrchestratedTask[]): StagnationSignal {
   const base = {
     kind: 'endReviewUnmetReopens' as const,
     threshold: STAGNATION_UNMET_REOPEN_THRESHOLD,
@@ -168,24 +176,35 @@ function unmetReopenSignal(run: TaskRun): StagnationSignal {
   if (readTaskRunGoal(run) === undefined) {
     return { ...base, active: false, value: 0, detail: '終了レビューの判定は対象外（goalなし）' };
   }
-  const value = endReviewUnmetReopenCount(run);
-  return {
-    ...base,
-    active: value >= STAGNATION_UNMET_REOPEN_THRESHOLD,
-    value,
-    detail: `終了レビューで完了条件が未達のまま再開${String(value)}回`,
-  };
+  const review = readTaskRunEndReview(run);
+  const value = review?.unmetReopens ?? 0;
+  const detail = `終了レビューで完了条件が未達のまま再開${String(value)}回`;
+  if (review === undefined || value < STAGNATION_UNMET_REOPEN_THRESHOLD) {
+    return { ...base, active: false, value, detail };
+  }
+  const sentAt = review.sentAt;
+  const mergedSince = merged.filter(
+    (task) => (task.stages.mergeCleanup.completedAt ?? '') > sentAt,
+  ).length;
+  if (mergedSince > STAGNATION_UNMET_REOPEN_NOTICE_MERGES) {
+    return {
+      ...base,
+      active: false,
+      value,
+      detail: `${detail}（再開後のmerge${String(mergedSince)}件で知らせ済み）`,
+    };
+  }
+  return { ...base, active: true, value, detail };
 }
 
 /** runの停滞の信号を判定する。LLMを呼ばない純関数。 */
 export function assessStagnation(run: TaskRun): StagnationAssessment {
   const merged = mergedTasksInOrder(run);
-  const scope = tasksInScope(run, merged);
   const signals = [
-    repeatedFailureSignal(scope),
-    exhaustedSignal(scope),
+    repeatedFailureSignal(run),
+    exhaustedSignal(run, merged),
     leftoverSignal(merged),
-    unmetReopenSignal(run),
+    unmetReopenSignal(run, merged),
   ];
   return { signals, stagnant: signals.some((s) => s.active) };
 }
