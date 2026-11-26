@@ -469,6 +469,12 @@ export interface TaskRun {
    */
   goalRevisions?: readonly TaskRunGoalRevision[];
   /**
+   * 終了レビュー（Issue #2194）の記録。全タスクが終わってrunが終わったときにOrchestratorへ送り、
+   * 送ってから上限時間の間だけ、終わったrunへの`propose_plan`を受け付ける。項目の無い保存データは
+   * 終了レビューを送っていない（再開0回）と読む。読むときは`readTaskRunEndReview`を通す。
+   */
+  endReview?: TaskRunEndReview;
+  /**
    * `start_run`で渡された最適化の依頼（Issue #2109）。指標・正しさの確認・パス・予算の案を含む外部由来の
    * テキストで、承認済みの仕様ではない（仕様は`propose_plan`の`optimization`を人が承認して初めて決まる）。
    * 項目の無い保存データは依頼なしと読む。
@@ -496,6 +502,16 @@ export interface TaskRunGoal {
 }
 
 export type TaskRunGoalSource = 'start' | 'roadmap' | 'orchestrator';
+
+/** 終了レビューの記録（Issue #2194）。 */
+export interface TaskRunEndReview {
+  /** 最後に送った終了レビューが対象にした終わり（その時の`finishedAt`）。 */
+  finishedAt: string;
+  /** 最後に終了レビューを送った時刻（ISO8601）。再計画の受付時間はここから数える。 */
+  sentAt: string;
+  /** 終了レビューからの再計画で再開した回数（累計）。 */
+  reopens: number;
+}
 
 /** `set_goal`でgoalを直した記録（Issue #2193）。 */
 export interface TaskRunGoalRevision {

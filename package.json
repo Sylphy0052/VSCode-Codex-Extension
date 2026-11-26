@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.1126.9",
+  "version": "2026.1126.10",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1987,6 +1987,28 @@
           "default": "human",
           "scope": "window",
           "markdownDescription": "オーケストレータモード（Issue #1505）で計画を承認する主体（Issue #2073）。`orchestrator`にするとReflexモード（`agent.chat.reflex.enabled`）が必要で、OFFのときは承認せずKanbanでの人の承認を待つ。`orchestrator`では`agent.taskRun.planAutoApprove.enabled`の自動承認は使わず、承認はすべて`approve_plan`の3段を通す。既定は`human`。"
+        },
+        "agent.taskRun.endReview.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "オーケストレータモード（Issue #1505）で、承認済みの計画の全タスクが終わってrunが終わったとき、review結果の集計とrunの目的（goal）を載せた「終了レビュー」をOrchestratorへ送る（Issue #2194）。goalがありReflexモード（`agent.chat.reflex.enabled`）が有効なら、完了条件を満たしたかをReflexで1回判定して添え、結果を会話に1行残す（判定に失敗したら「判定なし」として送る）。目的が未達なら、送ってから`agent.taskRun.endReview.replanWindowSeconds`秒の間だけ、終わったrunへの`propose_plan`（新しいタスクを1件以上含むもの）を受け付けてrunを再開する。足したタスクは計画の承認の設定どおりに承認待ちになる。runの終了・指標の記録・振り返りは今までどおり走る。無効にすると今までと同じ動き（終了の通知だけを送り、終わったrunの計画は断る）。既定は有効。"
+        },
+        "agent.taskRun.endReview.replanWindowSeconds": {
+          "type": "number",
+          "default": 600,
+          "minimum": 60,
+          "maximum": 86400,
+          "scope": "window",
+          "markdownDescription": "終了レビュー（`agent.taskRun.endReview.enabled`、Issue #2194）を送ってから、終わったrunへの`propose_plan`を受け付ける時間（秒）。過ぎたら今までどおり断り、runは終わったまま。範囲外の値は既定の600秒に戻す。"
+        },
+        "agent.taskRun.endReview.maxReopens": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 10,
+          "scope": "window",
+          "markdownDescription": "終了レビュー（`agent.taskRun.endReview.enabled`、Issue #2194）からの再計画でrunを再開できる回数の上限（run全体の累計）。上限に達したら終了レビューに「再開の上限」と書き、`propose_plan`を受け付けない。0にすると終了レビューは送るが再開は受け付けない。範囲外・整数でない値は既定の2回に戻す。"
         },
         "agent.taskRun.autoStartStages.enabled": {
           "type": "boolean",

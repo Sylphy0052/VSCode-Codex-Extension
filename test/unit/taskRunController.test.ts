@@ -1851,3 +1851,51 @@ describe('最適化の仕様と人だけの承認・関門（Issue #2106）', ()
     });
   });
 });
+
+describe('終了レビューからの再計画（Issue #2194）', () => {
+  const finished = (reopens: number, sentAt = FIXTURE_NOW.toISOString()): TaskRun => ({
+    ...makeRun([makeTask('T1', 'mergeCleanup', 'done')]),
+    finishedAt: FIXTURE_NOW.toISOString(),
+    endReview: { finishedAt: FIXTURE_NOW.toISOString(), sentAt, reopens },
+  });
+  const config = { enabled: true, replanWindowSeconds: 600, maxReopens: 2 };
+
+  it('受付時間内のpropose_planでrunが再開し、足したタスクが承認待ちの計画に入る', async () => {
+    const h = await setup([finished(0)], { endReview: () => config });
+    const result = await h.controller.proposePlan(RUN_ID, planArgs('new1'));
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain('終わったrunを再開した');
+    const run = runOf(h);
+    expect(run.finishedAt).toBeUndefined();
+    expect(run.reopenedAt).toBeUndefined();
+    expect(run.planStatus).toBe('awaitingApproval');
+    expect(run.taskOrder).toContain('T2');
+    expect(run.endReview?.reopens).toBe(1);
+  });
+
+  it('設定がOFF・受付時間切れ・再開の上限では断り、runは終わったまま', async () => {
+    const cases: [TaskRun, typeof config | undefined, string][] = [
+      [finished(0), undefined, 'このrunは終わっている'],
+      [finished(0, new Date(FIXTURE_NOW.getTime() - 601_000).toISOString()), config, '受付時間'],
+      [finished(2), config, '上限の2回'],
+    ];
+    for (const [run, cfg, expected] of cases) {
+      const h = await setup([run], cfg === undefined ? {} : { endReview: () => cfg });
+      const result = await h.controller.proposePlan(RUN_ID, planArgs('new1'));
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain(expected);
+      expect(runOf(h).finishedAt).toBe(FIXTURE_NOW.toISOString());
+      expect(runOf(h).taskOrder).toEqual(['T1']);
+    }
+  });
+
+  it('同じロードマップIssueを扱う終わっていない別のrunがあれば断る', async () => {
+    const roadmap = { issueNumber: 7 } as NonNullable<TaskRun['roadmap']>;
+    const other = { ...drafting(), runId: 'run-2', roadmap };
+    const h = await setup([{ ...finished(0), roadmap }, other], { endReview: () => config });
+    const result = await h.controller.proposePlan(RUN_ID, planArgs('new1'));
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('同じロードマップIssue');
+    expect(runOf(h).finishedAt).toBe(FIXTURE_NOW.toISOString());
+  });
+});
