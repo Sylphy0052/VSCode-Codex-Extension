@@ -2295,14 +2295,6 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   ): Promise<string>;
 
   /**
-   * エディタの選択範囲（issue #292）を送る先。最後にアクティブだった画面を返す
-   * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
-   *
-   * Codex/Claude Codeそれぞれの`activeSequence`を比べて、呼び出し側（`extension.ts`）が
-   * どちらへ挿すかを決める。ここではプロバイダ内の判定だけを行い、実際の送り先の決定・
-   * パスの組み立て・0件時の新規会話は行わない。
-   */
-  /**
    * `id`の会話の入力欄へ`text`を入れる（送信しない。Issue #2180のTodoからの起動）。
    * 開いた直後でwebviewがまだ読み込み中なら、`ready`が届いてから入れる。会話が無い・入力欄を
    * 閉じたタブなら`false`。
@@ -2329,6 +2321,14 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     void entry.panel.webview.postMessage({ type: 'insertComposerText', text });
   }
 
+  /**
+   * エディタの選択範囲（issue #292）を送る先。最後にアクティブだった画面を返す
+   * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
+   *
+   * Codex/Claude Codeそれぞれの`activeSequence`を比べて、呼び出し側（`extension.ts`）が
+   * どちらへ挿すかを決める。ここではプロバイダ内の判定だけを行い、実際の送り先の決定・
+   * パスの組み立て・0件時の新規会話は行わない。
+   */
   getActiveComposerTarget(): ActiveComposerTarget | undefined {
     const entry = this.active;
     if (entry === undefined || entry.panel === undefined || entry.inputLock) {

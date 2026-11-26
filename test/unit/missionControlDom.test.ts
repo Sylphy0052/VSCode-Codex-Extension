@@ -1457,6 +1457,10 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       press('D', { shiftKey: true });
       await tick();
       expect(posted.some((m) => m.type === 'todoDelete')).toBe(false);
+      // 押し続けたときの自動の繰り返しは2回目に数えない
+      press('D', { shiftKey: true, repeat: true });
+      await tick();
+      expect(posted.some((m) => m.type === 'todoDelete')).toBe(false);
       press('D', { shiftKey: true });
       await tick();
       expect(posted.filter((m) => m.type === 'todoDelete').at(-1)).toMatchObject({ id: 't1' });
@@ -1500,6 +1504,63 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
         cwd: '/w/app',
         provider: 'claude',
         prompt: '',
+        draft: '/gitlab-develop 設計を詰める',
+      });
+    });
+
+    it('別のCLIのプリセットを選ぶと、入力欄へ入れる文のskillの呼び方もそのCLIに合わせる', async () => {
+      const { window, posted, deliver, key } = boot();
+      window.HTMLElement.prototype.scrollIntoView = () => undefined;
+      await tick();
+      deliver({ type: 'snapshot', snapshot: snapshot([]) });
+      await tick();
+      key('y');
+      await tick();
+      const doc = window.document;
+      const todosRequest = posted.filter((m) => m.type === 'todos').at(-1);
+      deliver({
+        type: 'reply',
+        seq: todosRequest?.seq,
+        ok: true,
+        todos: [todo({ provider: 'codex' })],
+      });
+      await tick();
+      (doc.activeElement ?? doc.body).dispatchEvent(
+        new window.KeyboardEvent('keydown', { key: 's', bubbles: true, cancelable: true }),
+      );
+      await tick();
+      const providerChoices = {
+        models: [],
+        efforts: [],
+        approvals: [],
+        current: { model: '', effort: '', approval: '' },
+      };
+      const options = posted.filter((m) => m.type === 'launchOptions').at(-1);
+      deliver({
+        type: 'reply',
+        seq: options?.seq,
+        ok: true,
+        repos: [{ path: '/w/app', key: '/w/app', label: 'app', source: 'history' }],
+        choices: {
+          providers: { codex: providerChoices, claude: providerChoices },
+          presets: [{ name: 'cl', provider: 'claude', model: '', effort: '', approval: '' }],
+          defaults: {},
+        },
+      });
+      await tick();
+      const dialog = doc.querySelector('[aria-label="新規セッション"]') as HTMLElement;
+      const draft = (): string => (dialog.querySelector('textarea') as HTMLTextAreaElement).value;
+      expect(draft()).toBe('$gitlab-develop 設計を詰める');
+      const preset = dialog.querySelector('select[aria-label="プリセット"]') as HTMLSelectElement;
+      preset.value = 'cl';
+      preset.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await tick();
+      expect(draft()).toBe('/gitlab-develop 設計を詰める');
+      (dialog.querySelector('form') as HTMLFormElement).requestSubmit();
+      await tick();
+      expect(posted.filter((m) => m.type === 'launch').at(-1)).toMatchObject({
+        provider: 'claude',
+        preset: 'cl',
         draft: '/gitlab-develop 設計を詰める',
       });
     });

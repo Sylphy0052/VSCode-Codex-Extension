@@ -12,6 +12,7 @@ import {
 } from '../../src/view/missionControlTodos';
 import {
   launchMissionControlSession,
+  openSessionWithDraft,
   parseLaunchRequest,
 } from '../../src/view/missionControlLaunch';
 import type { McLaunchDeps } from '../../src/view/missionControlLaunch';
@@ -273,5 +274,34 @@ describe('Todoから起動する新規セッションの下書き（Issue #2180�
     );
     expect(result).toEqual({ ok: true, cwd: '/w/app', threadId: 'thread-1' });
     expect(open).toHaveBeenCalledWith('claude', '/w/app', '', undefined, '/s 作業');
+  });
+
+  it('openSessionWithDraftはdraftを最初の指示として送らず、開いた会話の入力欄へ入れる', async () => {
+    const open = vi.fn(async () => 'thread-1');
+    const insertDraft = vi.fn(() => true);
+    const warn = vi.fn();
+    const deps = { open, insertDraft, warn };
+    await expect(
+      openSessionWithDraft(deps, 'codex', '/w/app', '', undefined, '$s 作業'),
+    ).resolves.toBe('thread-1');
+    expect(open).toHaveBeenCalledWith('codex', '/w/app', '', undefined);
+    expect(insertDraft).toHaveBeenCalledWith('codex', 'thread-1', '$s 作業');
+    expect(warn).not.toHaveBeenCalled();
+    // draftが無ければ従来どおり最初の指示を送り、入力欄へは入れない
+    await openSessionWithDraft(deps, 'claude', '/w/app', 'go', undefined, undefined);
+    expect(open).toHaveBeenLastCalledWith('claude', '/w/app', 'go', undefined);
+    expect(insertDraft).toHaveBeenCalledTimes(1);
+    // 入れられなければ警告だけ残し、開いた会話のidは返す
+    insertDraft.mockReturnValueOnce(false);
+    await expect(
+      openSessionWithDraft(deps, 'claude', '/w/app', '', undefined, '/s 作業'),
+    ).resolves.toBe('thread-1');
+    expect(warn).toHaveBeenCalledTimes(1);
+    // 開けなければ入れない
+    open.mockResolvedValueOnce(undefined as never);
+    await expect(
+      openSessionWithDraft(deps, 'claude', '/w/app', '', undefined, '/s 作業'),
+    ).resolves.toBeUndefined();
+    expect(insertDraft).toHaveBeenCalledTimes(2);
   });
 });

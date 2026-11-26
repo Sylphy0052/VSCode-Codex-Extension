@@ -2714,7 +2714,8 @@ function LaunchDialog(props: {
     setSettings(normalizeLaunchSettings(remembered.provider, remembered, choices));
   }, [choices, chosenKey, todo]);
 
-  const changeProvider = (next: McProvider): void => {
+  /** CLIを切り替える。Todoからのときは入力欄へ入れる文のskillの呼び方も合わせる。 */
+  const switchProvider = (next: McProvider): void => {
     if (todo !== undefined) {
       // 入れる文を書き換えていなければ、skillの呼び方（Claudeは`/`、Codexは`$`）を合わせる
       setPrompt((current) =>
@@ -2724,6 +2725,9 @@ function LaunchDialog(props: {
       );
     }
     setProvider(next);
+  };
+  const changeProvider = (next: McProvider): void => {
+    switchProvider(next);
     setSettings((prev) => normalizeLaunchSettings(next, prev, choices));
   };
 
@@ -2841,7 +2845,7 @@ function LaunchDialog(props: {
           value={settings}
           disabled={busy}
           onChange={setSettings}
-          onProvider={setProvider}
+          onProvider={switchProvider}
         />
         <label>
           {todo === undefined

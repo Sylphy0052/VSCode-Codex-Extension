@@ -116,6 +116,8 @@ export function useTodoKeys(options: {
       return true;
     }
     if (e.key === 'D' && e.shiftKey) {
+      // 押し続けたときの自動の繰り返しは2回目に数えない（1回押しただけで消さない）
+      if (e.repeat) return true;
       if (confirmDelete === selected.id) {
         setConfirmDelete(undefined);
         ops.remove(selected);

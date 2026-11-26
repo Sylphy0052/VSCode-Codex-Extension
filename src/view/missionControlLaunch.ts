@@ -97,6 +97,42 @@ export interface McLaunchDeps {
   ): Promise<string | undefined>;
 }
 
+/** `openSessionWithDraft`が使う会話の操作（`extension.ts`がCodex / Claude Codeの画面を渡す）。 */
+export interface McOpenWithDraftDeps {
+  /** 会話を開き、`prompt`が空でなければ最初の指示として送る。開いた会話のidを返す。 */
+  open(
+    provider: McProvider,
+    cwd: string,
+    prompt: string,
+    settings: EffectiveLaunchSettings | undefined,
+  ): Promise<string | undefined>;
+  /** 開いた会話の入力欄へ文を入れる（送信しない）。入れられなければ`false`。 */
+  insertDraft(provider: McProvider, id: string, text: string): boolean;
+  warn(message: string): void;
+}
+
+/**
+ * 会話を開く。`draft`があれば（Todoからの起動。Issue #2180）最初の指示は送らずに開き、
+ * 開いた会話の入力欄へ`draft`を入れる。
+ */
+export async function openSessionWithDraft(
+  deps: McOpenWithDraftDeps,
+  provider: McProvider,
+  cwd: string,
+  prompt: string,
+  settings: EffectiveLaunchSettings | undefined,
+  draft: string | undefined,
+): Promise<string | undefined> {
+  if (draft === undefined || draft.trim() === '') {
+    return deps.open(provider, cwd, prompt, settings);
+  }
+  const opened = await deps.open(provider, cwd, '', settings);
+  if (opened !== undefined && !deps.insertDraft(provider, opened, draft)) {
+    deps.warn('Mission Control: 開いた会話の入力欄へTodoの内容を入れられませんでした');
+  }
+  return opened;
+}
+
 export type McLaunchResult =
   { ok: true; cwd: string; threadId: string } | { ok: false; error: string };
 
