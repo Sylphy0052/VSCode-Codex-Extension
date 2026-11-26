@@ -177,7 +177,8 @@ function unmetReopenSignal(run: TaskRun, merged: readonly OrchestratedTask[]): S
     return { ...base, active: false, value: 0, detail: '終了レビューの判定は対象外（goalなし）' };
   }
   const review = readTaskRunEndReview(run);
-  const value = review?.unmetReopens ?? 0;
+  // 直近の判定が達していれば、未達の続きは途切れている（再開時に0へ戻すのと同じ扱いを再開前から）
+  const value = review?.lastVerdict === 'met' ? 0 : (review?.unmetReopens ?? 0);
   const detail = `終了レビューで完了条件が未達のまま再開${String(value)}回`;
   if (review === undefined || value < STAGNATION_UNMET_REOPEN_THRESHOLD) {
     return { ...base, active: false, value, detail };

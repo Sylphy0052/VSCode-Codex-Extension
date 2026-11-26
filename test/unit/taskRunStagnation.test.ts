@@ -373,6 +373,18 @@ describe('終了レビューの判定の保存（Issue #2195）', () => {
     expect(readTaskRunEndReview(reset)?.unmetReopens).toBeUndefined();
   });
 
+  it('未達が続いた後でも、直近の終了レビューが達した判定なら（再開前でも）信号4を立てない', () => {
+    const now = new Date(at(11));
+    const first = reopenByEndReviewReplan(markEndReviewSent(finished(), at(10), now, unmet));
+    const second = reopenByEndReviewReplan(
+      markEndReviewSent({ ...first, finishedAt: at(20) }, at(20), now, unmet),
+    );
+    const metSent = markEndReviewSent({ ...second, finishedAt: at(30) }, at(30), now, met);
+    expect(readTaskRunEndReview(metSent)?.unmetReopens).toBe(2);
+    expect(signal(metSent, 'endReviewUnmetReopens')).toMatchObject({ active: false, value: 0 });
+    expect(formatTaskRunState(metSent, none).text).toContain('停滞の信号: なし（');
+  });
+
   it('壊れた新項目は無いものとして読む', () => {
     expect(
       readTaskRunEndReview({
