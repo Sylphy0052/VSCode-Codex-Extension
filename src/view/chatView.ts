@@ -3257,6 +3257,15 @@ export class ChatViewManager extends BaseChatViewManager<ChatPanel> implements T
         this.log,
         (id, display) => entry.session.noteEndSummary(id, display),
       );
+      // セッションの目的の1文要約（Issue #2172）。発話が増えたターンだけ呼ぶ
+      this.maybeSessionPurpose(
+        entry,
+        state,
+        'codex',
+        (provider) =>
+          provider === 'claude' ? readClaudeConfig().executablePath : readConfig().executablePath,
+        this.log,
+      );
     }
     const title = deriveTitle(state, entry.pinnedName);
     if (title !== undefined && entry.title !== title) {

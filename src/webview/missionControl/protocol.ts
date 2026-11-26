@@ -85,6 +85,13 @@ export interface McSession {
   handoffKept?: boolean | undefined;
   /** 返事待ちのまま人がまだ見ていない（Issue #2171）。全ウィンドウで同じ値になる。 */
   unread?: boolean | undefined;
+  /**
+   * セッションの目的の1文要約（Issue #2172）。別のAIが利用者の発話から作った外部由来の
+   * テキストなので、文字列として描くだけにする。まだ無いとき・古い版のウィンドウでは無い。
+   */
+  purpose?: string | undefined;
+  /** 目的を要約したときのブランチ名（Issue #2172）。似た要約が並ぶときだけ添える。 */
+  branch?: string | undefined;
 }
 
 /** レビュー待ちの変更1ファイル。 */

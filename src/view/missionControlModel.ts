@@ -328,6 +328,9 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
       taskManaged: session.taskManaged === true ? true : undefined,
       handoffKept: session.handoffKept === true ? true : undefined,
       unread: session.unread === true ? true : undefined,
+      // セッションの目的の1文要約（Issue #2172）
+      purpose: session.purpose,
+      branch: session.branch,
     });
     for (const item of items) {
       addPending(item);

@@ -17,6 +17,7 @@ import {
   stalledSince,
   mapKey,
   moveSelection,
+  purposeLabels,
   reconcileSelection,
   setOther,
 } from '../../src/webview/missionControl/logic';
@@ -257,6 +258,50 @@ describe('選択肢と「その他」の下書き', () => {
       f1: ['x'],
       f2: [],
     });
+  });
+});
+
+describe('セッションの目的の1文要約（Issue #2172）', () => {
+  it('要約のあるセッションだけ載せ、似た要約が並ぶときはブランチ名を添える', () => {
+    const labels = purposeLabels([
+      { key: 'a', purpose: 'ログイン画面を直す', branch: 'fix/1/login' },
+      { key: 'b', purpose: 'ログイン画面を直す。', branch: 'fix/2/login' },
+      { key: 'c', purpose: 'ログイン画面を直す' },
+      { key: 'd', purpose: 'READMEを書く', branch: 'docs/3/readme' },
+      { key: 'e' },
+    ]);
+    expect(labels.get('a')).toBe('ログイン画面を直す（fix/1/login）');
+    expect(labels.get('b')).toBe('ログイン画面を直す。（fix/2/login）');
+    // ブランチ名が分からなければ要約だけ出す
+    expect(labels.get('c')).toBe('ログイン画面を直す');
+    expect(labels.get('d')).toBe('READMEを書く');
+    expect(labels.has('e')).toBe(false);
+  });
+
+  it('要約の語でもセッションを絞り込める', () => {
+    const base: McSession = {
+      key: 's',
+      windowId: 'w1',
+      threadId: 't',
+      provider: 'codex',
+      isCurrentWindow: true,
+      repoKey: '/w/app',
+      title: 'タイトル',
+      activity: 'idle',
+      activitySince: 0,
+      cwdLabel: 'app',
+      cwdFull: '/w/app',
+      pendingCount: 0,
+    };
+    const result = filterSessions(
+      [
+        { ...base, key: 'a', purpose: '決済の不具合を調べる' },
+        { ...base, key: 'b' },
+      ],
+      repos,
+      { ...EMPTY_FILTER, query: '決済' },
+    );
+    expect(result.map((s) => s.key)).toEqual(['a']);
   });
 });
 

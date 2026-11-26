@@ -180,6 +180,11 @@ button:focus-visible, .row:focus-visible { outline: 2px solid var(--vscode-focus
 .badge.unread { display: inline-block; margin-right: 4px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 15px; color: var(--vscode-foreground); background: color-mix(in srgb, var(--vscode-charts-blue) 28%, transparent); border: 1px solid var(--vscode-charts-blue); }
 .row-facts { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; font-variant-numeric: tabular-nums; }
 .grid .row-facts { grid-column: 1 / 3; }
+/* 目的の1文要約（Issue 2172）。タイトルの次に読む行なので本文の色で出す */
+.row-purpose { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--vscode-foreground); }
+.grid .row-purpose { grid-column: 1 / 3; }
+.detail-purpose { margin: 0; }
+.detail-purpose .muted { color: var(--vscode-descriptionForeground); }
 .row-sub .badge { margin-left: 6px; }
 .badge.attention { display: inline-block; color: var(--vscode-foreground); background: color-mix(in srgb, var(--vscode-charts-yellow) 28%, transparent); border: 1px solid var(--vscode-charts-yellow); line-height: 15px; }
 .pane-title .badge { margin-left: 6px; letter-spacing: 0; }

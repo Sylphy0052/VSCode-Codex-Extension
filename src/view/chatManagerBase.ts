@@ -5,7 +5,12 @@ import type { ChatItem, ChatState, PendingApproval } from '../appserver/chatStat
 import type { PendingPrompt, PromptSubmission } from '../appserver/prompts';
 import type { AskUserQuestionSelections } from '../claude/askUserQuestion';
 import { toTrackedChatState, type ChatConversationTracker } from '../chat/chatConversationTracker';
-import { readChatEndSummaryConfig, readNotificationsConfig, readReflexEnabled } from '../config';
+import {
+  readChatEndSummaryConfig,
+  readNotificationsConfig,
+  readReflexEnabled,
+  readSessionPurposeConfig,
+} from '../config';
 import type { HeadlessProvider } from '../loop/headlessCli';
 import type { Logger } from '../log';
 import type { SessionModelSettings } from '../sessionModelSettings';
@@ -28,6 +33,7 @@ import { planBackgroundOpen, trackChatPanel } from './backgroundPanelTabs';
 import {
   decideStopTurnAfterHandoff,
   needsAttentionAfterHandoff,
+  resolveGitBranch,
   triggerLabel,
   type HandoffTrigger,
   type OldTabKeptReason,
@@ -36,6 +42,7 @@ import { PendingHandoffChoice } from './handoffPending';
 import type { SkillSelectGate } from './skillSelectGate';
 import { buildEndSummaryMaterial, EndSummaryRunner, type EndSummaryDisplay } from './endSummary';
 import { playNotificationSound } from './notificationSound';
+import { SessionPurposeRunner } from './sessionPurpose';
 import { ALREADY_ANSWERED_MESSAGE, validateAskUserQuestionAnswers } from './pendingItem';
 import type { AttachmentBox, AttachmentInput } from '../provider/attachments';
 import type { SlashCommand } from '../provider/slashCommands';
@@ -50,7 +57,7 @@ import type {
   SharedApprovalDecision,
   SharedHandoffDecision,
 } from './sessionHub';
-import { MAX_QUEUED_TEXT_CHARS } from './sessionHub';
+import { inlineText, MAX_QUEUED_TEXT_CHARS, MAX_SHARED_BRANCH_CHARS } from './sessionHub';
 import {
   decoratePanelTitle,
   deriveSessionActivityState,
@@ -178,6 +185,12 @@ export interface BaseChatPanel {
   skillSelectGate?: SkillSelectGate;
   /** 要約エージェント（issue #1473）の実行役。初めて要約するときに作る。 */
   endSummary?: EndSummaryRunner;
+  /** セッションの目的の1文要約（Issue #2172）の実行役。初めて要約するときに作る。 */
+  sessionPurpose?: SessionPurposeRunner;
+  /** セッションの目的の1文要約（Issue #2172）。まだ無ければ`undefined`。 */
+  purpose?: string | undefined;
+  /** 目的を要約したときの作業ディレクトリのブランチ名。似た要約を見分けるのに使う。 */
+  purposeBranch?: string | undefined;
   /** `TaskSession.onApprovalResolved` のリスナー。 */
   approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
   /**
@@ -833,6 +846,10 @@ export interface ManagedChatSession {
   taskManaged?: boolean | undefined;
   /** 返事待ちのまま、まだ人が見ていないか（Issue #2171）。 */
   replyUnread?: boolean | undefined;
+  /** セッションの目的の1文要約（Issue #2172）。まだ無ければ`undefined`。 */
+  purpose?: string | undefined;
+  /** 目的を要約したときのブランチ名（Issue #2172）。取れなければ`undefined`。 */
+  branch?: string | undefined;
 }
 
 /**
@@ -1007,6 +1024,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         handoffKept: entry.handoffKept,
         taskManaged: entry.taskManaged,
         replyUnread: entry.replyUnread === true,
+        purpose: entry.purpose,
+        branch: entry.purposeBranch,
       });
     }
     return sessions;
@@ -2534,6 +2553,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     entry.skillSelectGate?.abortAll();
     // 要約エージェント（issue #1473）の実行中に閉じたら、要約のプロセスも止める
     entry.endSummary?.dispose();
+    entry.sessionPurpose?.dispose();
     entry.session.dispose();
     entry.panel?.dispose();
     entry.panel = undefined;
@@ -2586,6 +2606,51 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       logWarn: (message) => log.warn(message),
       logInfo: (message) => log.info(message),
     });
+  }
+
+  /**
+   * セッションの目的の1文要約（Issue #2172）の発火判定。ターン完了時に呼ぶ。
+   *
+   * 無効のときは何も起動しない。ループ・ワークフロー（タスク管理下のセッション）・自動返信の
+   * 実行中は、発話が人のものではないため要約しない。呼び直すかどうか（発話が増えたか・回数の
+   * 上限）は`SessionPurposeRunner`が判定する。要約ができたら一覧を数え直させる。
+   */
+  protected maybeSessionPurpose(
+    entry: TPanel,
+    state: ChatState,
+    host: HeadlessProvider,
+    executableFor: (provider: HeadlessProvider) => string,
+    log: Logger,
+  ): void {
+    const settings = readSessionPurposeConfig();
+    if (!settings.enabled || entry.taskManaged || entry.loop.running || state.autoReply) {
+      return;
+    }
+    entry.sessionPurpose ??= new SessionPurposeRunner();
+    entry.sessionPurpose.maybeStart({
+      settings,
+      host,
+      executableFor,
+      items: state.items,
+      onPurpose: (purpose) => {
+        void this.resolvePurposeBranch(entry.cwd).then((branch) => {
+          if (entry.disposed) {
+            return;
+          }
+          entry.purpose = purpose;
+          // ブランチ名はgitが制御文字を拒むが、双方向制御文字は通るため同じ処理で1行へ畳む
+          entry.purposeBranch = inlineText(branch, MAX_SHARED_BRANCH_CHARS);
+          this.panelsChanged.fire();
+        });
+      },
+      logWarn: (message) => log.warn(message),
+      logInfo: (message) => log.info(message),
+    });
+  }
+
+  /** 目的の要約に添えるブランチ名を取る（Issue #2172）。テストで差し替える。 */
+  protected resolvePurposeBranch(cwd: string | undefined): Promise<string | undefined> {
+    return resolveGitBranch(cwd);
   }
 
   /**
