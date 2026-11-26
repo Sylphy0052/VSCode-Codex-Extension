@@ -22,7 +22,9 @@ import {
  * statelessな1回の実行とする。作業中のAIへは何も送らない。
  *
  * 呼び出しはターン終了ごとに最大1回で、利用者の発話が前回より増えたときだけにする。
- * 1つの会話で呼ぶ回数にも上限（`MAX_PURPOSE_CALLS_PER_SESSION`）を設ける。
+ * 1つの会話で呼ぶ回数にも上限（`MAX_PURPOSE_CALLS_PER_SESSION`）を設ける。数は実行役（タブ）ごとに
+ * メモリへ持つだけなので、ウィンドウの再読み込みや会話の開き直しで0へ戻る。それでも呼ぶのは
+ * 利用者の発話が増えたターンだけなので、呼ぶ回数は利用者の発話の数を超えない。
  *
  * このファイルは`vscode`に依存しない。設定の読み出しと発火条件の判定は画面側が持つ。
  */
@@ -34,7 +36,7 @@ export interface SessionPurposeSettings {
   runner: Pick<EndSummarySettings, 'provider' | 'model' | 'effort'>;
 }
 
-/** 1つの会話で要約を呼ぶ回数の上限。費用の上限を固定するため。 */
+/** 1つの実行役（タブ）で要約を呼ぶ回数の上限。費用の上限を固定するため。 */
 export const MAX_PURPOSE_CALLS_PER_SESSION = 10;
 
 /** 要約に使う直近の発話の件数（最初の1件とは別に数える）。 */

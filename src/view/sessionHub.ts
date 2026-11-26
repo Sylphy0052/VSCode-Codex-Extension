@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
+import { stripControlChars } from '../orchestrator/sanitize';
 import { isApprovalLevel, type ApprovalLevel } from '../provider/approvalLevel';
 import { parseAttachmentInputs, type AttachmentInput } from '../provider/attachments';
 import {
@@ -269,16 +270,18 @@ function normalizeSharedSession(session: SharedSession, windowId: string): Share
   };
 }
 
-/** 文字列なら改行・制御文字を空白へ畳み、長さを切る。空・文字列以外は`undefined`。 */
-function inlineText(value: unknown, max: number): string | undefined {
+/**
+ * 文字列なら1行へ畳み、長さを切る。空・文字列以外は`undefined`。
+ *
+ * 改行・制御文字（C0・C1・U+2028/2029）は空白へ、双方向制御文字・不可視文字は除く
+ * （`stripControlChars`）。書き手が古い版でも、ファイルが書き換えられていても、
+ * 一覧の行を崩したり表示を逆向きにしたりさせない。
+ */
+export function inlineText(value: unknown, max: number): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
   }
-  const text = value
-    // eslint-disable-next-line no-control-regex -- 改行・制御文字で一覧の行を崩さない
-    .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
-    .trim()
-    .slice(0, max);
+  const text = stripControlChars(value).replace(/\s+/gu, ' ').trim().slice(0, max);
   return text === '' ? undefined : text;
 }
 

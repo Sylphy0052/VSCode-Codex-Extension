@@ -1016,7 +1016,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "利用者の発話（最初の1件と直近の3件）から、セッションの目的を別のAIに1文で要約させ、Mission Controlのカードと詳細ペインに出す（Issue #2172）。呼び出しはターンが終わるたびに最大1回で、発話が前回より増えたときだけ。1つの会話で呼ぶのは10回まで。起動するCLI・model・effortは `agent.chat.endSummary.provider` / `model` / `effort` に従う（`agent.chat.endSummary.enabled` は見ない）。送る前に資格情報らしい文字列を伏せる。ループ・ワークフロー（オーケストレータ配下）・自動返信の実行中は動かない。OFFにすると追加のCLIを起動しない。"
+          "markdownDescription": "利用者の発話（最初の1件と直近の3件）から、セッションの目的を別のAIに1文で要約させ、Mission Controlのカードと詳細ペインに出す（Issue #2172）。呼び出しはターンが終わるたびに最大1回で、発話が前回より増えたときだけ。1つのタブで呼ぶのは10回まで（ウィンドウの再読み込みや会話の開き直しで数え直す。そのあとも発話が増えたターンでしか呼ばない）。起動するCLI・model・effortは `agent.chat.endSummary.provider` / `model` / `effort` に従う（`agent.chat.endSummary.enabled` は見ない）。送る前に資格情報らしい文字列を伏せる。ループ・ワークフロー（オーケストレータ配下）・自動返信の実行中は動かない。OFFにすると追加のCLIを起動しない。"
         },
         "agent.sessionAutoName.enabled": {
           "type": "boolean",

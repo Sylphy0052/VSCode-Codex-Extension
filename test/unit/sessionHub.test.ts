@@ -409,6 +409,29 @@ describe('SessionHubReader', () => {
     expect(sessions[1]?.branch).toBeUndefined();
   });
 
+  it('目的の要約とブランチ名から行区切り・C1制御文字・双方向制御文字・不可視文字を除く（Issue #2172）', async () => {
+    const { reader, internals } = makeReader();
+    const other = randomUUID();
+    const lineSep = String.fromCodePoint(0x2028);
+    const paraSep = String.fromCodePoint(0x2029);
+    const nel = String.fromCodePoint(0x85);
+    const rlo = String.fromCodePoint(0x202e);
+    const zwsp = String.fromCodePoint(0x200b);
+    await putSessionFile(
+      other,
+      fileBody(other, [
+        session('ok', {
+          purpose: `A${lineSep}B${nel}C${rlo}D${zwsp}E`,
+          branch: `x${paraSep}y${rlo}z`,
+        }),
+      ]),
+    );
+    await internals.reconcileAll();
+    const s = reader.getOthers()[0]?.sessions[0];
+    expect(s?.purpose).toBe('A B CDE');
+    expect(s?.branch).toBe('x yz');
+  });
+
   it('stale（mtimeまたはupdatedAtが45秒超）のウィンドウは除外する', async () => {
     const { reader, internals } = makeReader();
     const oldMtime = randomUUID();

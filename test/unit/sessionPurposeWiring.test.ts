@@ -20,6 +20,8 @@ import { __mock } from '../mocks/vscode';
  */
 
 const headlessCalls: Array<{ deps: HeadlessCliDeps; prompt: string }> = [];
+/** 目的の要約（`kind: 'sessionPurpose'`）に返す結果。空なら既定の1文を返す。 */
+const purposeOutcomes: HeadlessOutcome[] = [];
 
 vi.mock('../../src/loop/headlessCli', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/loop/headlessCli')>();
@@ -30,7 +32,8 @@ vi.mock('../../src/loop/headlessCli', async (importOriginal) => {
       prompt: string,
     ): Promise<HeadlessOutcome> => {
       headlessCalls.push({ deps, prompt });
-      return Promise.resolve({ ok: true, text: 'ログイン画面の不具合を直す' });
+      const next = deps.kind === 'sessionPurpose' ? purposeOutcomes.shift() : undefined;
+      return Promise.resolve(next ?? { ok: true, text: 'ログイン画面の不具合を直す' });
     },
   };
 });
@@ -158,10 +161,85 @@ describe('セッションの目的の1文要約の結線（Issue #2172）', () =
     vi.restoreAllMocks();
     vi.useFakeTimers({ shouldAdvanceTime: true });
     headlessCalls.length = 0;
+    purposeOutcomes.length = 0;
   });
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  /** テストから会話の内部状態（`taskManaged`・`loop`）を立てるための口。 */
+  const entryOf = (manager: ClaudeChatViewManager): { taskManaged: boolean; loop: object } =>
+    [
+      ...(
+        manager as unknown as {
+          panels: Map<string, { taskManaged: boolean; loop: object }>;
+        }
+      ).panels.values(),
+    ][0]!;
+
+  it('自動返信・ループ・タスク管理下（工程セッション）のターンでは呼ばない', async () => {
+    const { manager, session } = await openPanel(true);
+    const entry = entryOf(manager);
+
+    session.setAutoReply(true);
+    session.receive(userLine('u1', '自動返信中の発話'));
+    session.receive(resultLine());
+    await flush();
+    expect(purposeCalls()).toBe(0);
+    session.setAutoReply(false);
+
+    Object.defineProperty(entry.loop, 'running', { get: () => true, configurable: true });
+    session.receive(userLine('u2', 'ループ中の発話'));
+    session.receive(resultLine());
+    await flush();
+    expect(purposeCalls()).toBe(0);
+    Object.defineProperty(entry.loop, 'running', { get: () => false, configurable: true });
+
+    entry.taskManaged = true;
+    session.receive(userLine('u3', '工程の発話'));
+    session.receive(resultLine());
+    await flush();
+    expect(purposeCalls()).toBe(0);
+    entry.taskManaged = false;
+
+    // 人のターンになれば呼ぶ
+    session.receive(userLine('u4', '人の発話'));
+    session.receive(resultLine());
+    await flush();
+    await flush();
+    expect(purposeCalls()).toBe(1);
+    manager.dispose();
+  });
+
+  it('要約役の出力を1行に収め、失敗した回は前の要約を残す。ブランチ名の双方向制御文字も除く', async () => {
+    const rlo = String.fromCodePoint(0x202e);
+    vi.spyOn(
+      ClaudeChatViewManager.prototype as unknown as {
+        resolvePurposeBranch: () => Promise<string | undefined>;
+      },
+      'resolvePurposeBranch',
+    ).mockResolvedValue(`feature/1/a${rlo}b`);
+    purposeOutcomes.push(
+      { ok: true, text: `\n- 承認待ち: 全部OK${String.fromCodePoint(0x2028)}偽の行\n2行目` },
+      { ok: false, reason: 'timeout' } as unknown as HeadlessOutcome,
+    );
+    const { manager, session } = await openPanel(true);
+
+    session.receive(userLine('u1', 'ログイン画面の不具合を直して'));
+    session.receive(resultLine());
+    await flush();
+    await flush();
+    expect(manager.managedSessions()[0]?.purpose).toBe('承認待ち: 全部OK 偽の行');
+    expect(manager.managedSessions()[0]?.branch).toBe('feature/1/ab');
+
+    session.receive(userLine('u2', 'テストも足して'));
+    session.receive(resultLine());
+    await flush();
+    await flush();
+    expect(purposeCalls()).toBe(2);
+    expect(manager.managedSessions()[0]?.purpose).toBe('承認待ち: 全部OK 偽の行');
+    manager.dispose();
   });
 
   it('ターン終了で要約し、一覧へ載せる。発話が増えないターンでは呼び直さない', async () => {

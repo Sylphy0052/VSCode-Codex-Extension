@@ -57,7 +57,7 @@ import type {
   SharedApprovalDecision,
   SharedHandoffDecision,
 } from './sessionHub';
-import { MAX_QUEUED_TEXT_CHARS } from './sessionHub';
+import { inlineText, MAX_QUEUED_TEXT_CHARS, MAX_SHARED_BRANCH_CHARS } from './sessionHub';
 import {
   decoratePanelTitle,
   deriveSessionActivityState,
@@ -2638,7 +2638,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
             return;
           }
           entry.purpose = purpose;
-          entry.purposeBranch = branch;
+          // ブランチ名はgitが制御文字を拒むが、双方向制御文字は通るため同じ処理で1行へ畳む
+          entry.purposeBranch = inlineText(branch, MAX_SHARED_BRANCH_CHARS);
           this.panelsChanged.fire();
         });
       },
