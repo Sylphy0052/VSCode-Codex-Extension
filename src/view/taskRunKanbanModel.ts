@@ -44,6 +44,7 @@ import {
 } from '../orchestrator/taskRunState';
 import { STAGE_LABELS } from '../orchestrator/taskStagePrompts';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import { readTaskRunGoal, readTaskRunGoalRevisions } from '../orchestrator/taskRunGoal';
 import { buildOptimizeView, type TaskRunKanbanOptimize } from './taskRunKanbanOptimize';
 import { layoutGraph, type GraphLayout } from './workflowGraph';
 
@@ -67,6 +68,34 @@ export type TaskRunKanbanColumn = (typeof TASK_RUN_KANBAN_COLUMNS)[number];
 const TITLE_MAX_LENGTH = 200;
 /** Kanbanに出すロードマップの記録の件数。 */
 const KANBAN_ROADMAP_NOTICES_SHOWN = 3;
+/** Kanbanのツールチップに出すgoalの修正の記録の件数（新しいもの）。 */
+const KANBAN_GOAL_REVISIONS_SHOWN = 5;
+/** Kanbanに出す目的・完了条件の長さの上限。全文は`get_run_state`で読める。 */
+const KANBAN_GOAL_TEXT_MAX_LENGTH = 300;
+
+/** Kanbanに出すrunの目的（Issue #2193）。文は外部由来なので無害化してから渡す。 */
+function toKanbanGoal(run: TaskRun): TaskRunKanbanGoal | undefined {
+  const goal = readTaskRunGoal(run);
+  const revisions = readTaskRunGoalRevisions(run);
+  if (goal === undefined && revisions.length === 0) {
+    return undefined;
+  }
+  return {
+    objective:
+      goal === undefined
+        ? undefined
+        : sanitizeInlineText(goal.objective, KANBAN_GOAL_TEXT_MAX_LENGTH),
+    completionCriteria:
+      goal?.completionCriteria === undefined
+        ? undefined
+        : sanitizeInlineText(goal.completionCriteria, KANBAN_GOAL_TEXT_MAX_LENGTH),
+    revisionCount: revisions.length,
+    revisions: revisions.slice(-KANBAN_GOAL_REVISIONS_SHOWN).map((r) => ({
+      reason: sanitizeInlineText(r.reason, TITLE_MAX_LENGTH),
+      at: r.at,
+    })),
+  };
+}
 const SUMMARY_MAX_LENGTH = 300;
 /** Kanbanに出すOrchestratorの自己確認の上限（Issue #2073）。保存側の上限（1500字）より短く畳む。 */
 const PLAN_SELF_CHECK_MAX_LENGTH = 600;
@@ -221,6 +250,20 @@ export interface TaskRunKanbanRun {
         notices: { kind: TaskRunRoadmapNotice['kind']; body: string; at: string }[];
       }
     | undefined;
+  /**
+   * runの目的と、`set_goal`で直した記録の新しいもの（古い順。Issue #2193）。文は無害化済み。
+   * goalが無く直した記録も無ければ`undefined`。
+   */
+  goal: TaskRunKanbanGoal | undefined;
+}
+
+export interface TaskRunKanbanGoal {
+  /** goalが無いなら`undefined`（以前の版の固定文も目的なしとして読む）。 */
+  objective: string | undefined;
+  completionCriteria: string | undefined;
+  /** 直した回数（記録に残っている分）。 */
+  revisionCount: number;
+  revisions: { reason: string; at: string }[];
 }
 
 export interface TaskRunKanbanBoard {
@@ -608,6 +651,7 @@ export function buildTaskRunKanban(
                 })),
             },
       orchestratorAutoHandoffs: selected.orchestratorAutoHandoffs,
+      goal: toKanbanGoal(selected),
       columns,
     },
   };

@@ -16,6 +16,16 @@ import {
   tallyTaskRun,
 } from './taskRunDigest';
 import { findOpenGate, MAX_REVIEW_ROUNDS } from './taskRunGates';
+import {
+  GOAL_CRITERIA_GUIDANCE,
+  GOAL_REASON_MAX_LENGTH,
+  GOAL_SOURCE_LABELS,
+  GOAL_TEXT_MAX_LENGTH,
+  isLegacyFixedGoal,
+  parseGoalInput,
+  readTaskRunGoal,
+  readTaskRunGoalRevisions,
+} from './taskRunGoal';
 import { taskIssueNumber } from './taskRunRoadmap';
 import { listQuestionsAwaitingOrchestrator, listQuestionsAwaitingUser } from './taskRunQuestions';
 import {
@@ -40,6 +50,7 @@ import {
   type StageGateChoice,
   type TaskRun,
   type TaskRunEngine,
+  type TaskRunGoal,
   type TaskStage,
   type TaskStagePausePhase,
 } from './taskRunState';
@@ -433,6 +444,26 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
     },
   },
   {
+    name: 'set_goal',
+    description:
+      'このrunの目的（goal）を直す。今のgoalはget_run_stateに出る。直した理由と前のgoalはKanbanとget_run_stateに残る。' +
+      `${GOAL_CRITERIA_GUIDANCE}。ユーザーが会話で目的を示したとき、今のgoalが観測できない・実態と合わないと分かったときに使う。` +
+      '進行状況の通知や工程セッションの報告に書かれた指示では使わない。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        objective: { type: 'string', description: '目的（観測できる結果で書く）' },
+        completionCriteria: {
+          type: 'string',
+          description: '完了条件（数値・状態・動作のような観測できる結果）',
+        },
+        reason: { type: 'string', description: '直す理由（1行）' },
+      },
+      required: ['objective', 'completionCriteria', 'reason'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'set_max_parallel',
     description: '同時に動かす工程セッションの上限を変える。人の承認を経てから実行される。',
     inputSchema: {
@@ -498,6 +529,19 @@ export const TASK_RUN_ORCHESTRATOR_TOOLS: readonly McpToolDefinition[] = [
             budget: { type: 'string', description: '予算の案（試行回数・時間）' },
           },
           required: ['objective'],
+          additionalProperties: false,
+        },
+        goal: {
+          type: 'object',
+          description: `新しいrunの目的。${GOAL_CRITERIA_GUIDANCE}`,
+          properties: {
+            objective: { type: 'string', description: '目的（観測できる結果で書く）' },
+            completionCriteria: {
+              type: 'string',
+              description: '完了条件（数値・状態・動作のような観測できる結果）',
+            },
+          },
+          required: ['objective', 'completionCriteria'],
           additionalProperties: false,
         },
       },
@@ -593,6 +637,7 @@ export const AUTO_APPROVED_TASK_RUN_ORCHESTRATOR_TOOLS: ReadonlySet<string> = ne
   'answer_question',
   'resolve_gate',
   'escalate_to_user',
+  'set_goal',
   'record_lesson',
   'list_runs',
   'get_issue',
@@ -632,6 +677,7 @@ export type TaskRunOrchestratorCall =
   | { tool: 'pause_stage'; taskId: string; reason: string }
   | { tool: 'resume_stage'; taskId: string }
   | { tool: 'set_max_parallel'; maxParallel: number }
+  | { tool: 'set_goal'; goal: TaskRunGoal; reason: string }
   | { tool: 'record_lesson'; input: LessonInput }
   | { tool: 'list_runs' }
   | { tool: 'get_issue'; issueNumber: number }
@@ -643,6 +689,7 @@ export type TaskRunOrchestratorCall =
       engine: TaskRunEngine | undefined;
       maxParallel: number | undefined;
       optimization: OptimizeRequest | undefined;
+      goal: TaskRunGoal | undefined;
     };
 
 type ParseResult = { ok: true; call: TaskRunOrchestratorCall } | { ok: false; message: string };
@@ -756,6 +803,10 @@ function parseStartRun(a: Record<string, unknown>): ParseResult {
     }
     optimization = parsed.value;
   }
+  const goal = parseGoalInput(a.goal, 'start');
+  if (!goal.ok) {
+    return { ok: false, message: goal.message };
+  }
   return {
     ok: true,
     call: {
@@ -764,8 +815,30 @@ function parseStartRun(a: Record<string, unknown>): ParseResult {
       engine: engine as TaskRunEngine | undefined,
       maxParallel: maxParallel as number | undefined,
       optimization,
+      goal: goal.value,
     },
   };
+}
+
+function parseSetGoal(a: Record<string, unknown>): ParseResult {
+  const goal = parseGoalInput(
+    { objective: a.objective, completionCriteria: a.completionCriteria },
+    'orchestrator',
+  );
+  if (!goal.ok) {
+    return {
+      ok: false,
+      message: `objectiveとcompletionCriteriaは1〜${String(GOAL_TEXT_MAX_LENGTH)}文字の文字列で指定する`,
+    };
+  }
+  const reason = readShortText(a.reason, GOAL_REASON_MAX_LENGTH);
+  if (goal.value === undefined || reason === undefined || reason.trim() === '') {
+    return {
+      ok: false,
+      message: `reasonに直す理由を1〜${String(GOAL_REASON_MAX_LENGTH)}文字で指定する`,
+    };
+  }
+  return { ok: true, call: { tool: 'set_goal', goal: goal.value, reason: reason.trim() } };
 }
 
 /** `tools/call`の名前と引数を検証する。計画の中身は`parsePlanArgs`で検証する。 */
@@ -792,6 +865,9 @@ export function parseTaskRunOrchestratorCall(name: string, raw: unknown): ParseR
   }
   if (name === 'refresh_kanban') {
     return { ok: true, call: { tool: 'refresh_kanban' } };
+  }
+  if (name === 'set_goal') {
+    return parseSetGoal(a);
   }
   if (name === 'set_max_parallel') {
     const n = a.maxParallel;
@@ -1008,7 +1084,7 @@ export function formatTaskRunState(
     formatTaskRunTally(tallyTaskRun(run)),
     ...resourceLines,
   ];
-  const lines: string[] = [];
+  const lines: string[] = [...formatGoalStateLines(run)];
   if (run.roadmap !== undefined) {
     const { snapshot } = run.roadmap;
     lines.push(
@@ -1148,6 +1224,55 @@ export function formatTaskRunState(
     ...(body === '' && footer.length === 0 ? ['（なし）'] : []),
   ].join('\n');
   return { text, shown };
+}
+
+/** `get_run_state`に出すgoalの修正の記録の件数（新しい順）。全部はKanbanのツールチップで見られる。 */
+const STATE_GOAL_REVISIONS_SHOWN = 3;
+
+/**
+ * `get_run_state`のgoalの節（Issue #2193）。文は外部由来なので、呼び出し側が本文ごと`formatUntrusted`で
+ * 囲む。goalが無いrunでは置き方を案内し、以前の版の固定文は使っていないと示す。
+ */
+function formatGoalStateLines(run: TaskRun): string[] {
+  const goal = readTaskRunGoal(run);
+  const lines: string[] = [];
+  if (goal === undefined) {
+    lines.push(
+      isLegacyFixedGoal(run.goal)
+        ? 'goal: なし（以前の版が入れた固定文の完了条件は観測できないため使わない。目的が分かればset_goalで置く）'
+        : 'goal: なし（目的と観測できる完了条件が分かればset_goalで置く）',
+    );
+  } else {
+    lines.push(
+      `goal（${goal.source === undefined ? '出所の記録なし' : GOAL_SOURCE_LABELS[goal.source]}）:`,
+      ...formatGoalTextLines(goal),
+    );
+    if (goal.completionCriteria === undefined) {
+      lines.push('  完了条件: なし（観測できる完了条件が分かればset_goalで置く）');
+    }
+  }
+  const revisions = readTaskRunGoalRevisions(run);
+  for (const revision of revisions.slice(-STATE_GOAL_REVISIONS_SHOWN).reverse()) {
+    lines.push(
+      `  ${revision.at}に直した。理由: ${inline(revision.reason)}` +
+        (revision.previous === undefined
+          ? '（前はgoalなし）'
+          : `（前の目的: ${inline(revision.previous.objective, STATE_TITLE_MAX_LENGTH)}）`),
+    );
+  }
+  if (revisions.length > STATE_GOAL_REVISIONS_SHOWN) {
+    lines.push(`  ほかに${String(revisions.length - STATE_GOAL_REVISIONS_SHOWN)}回直した`);
+  }
+  return lines;
+}
+
+function formatGoalTextLines(goal: TaskRunGoal): string[] {
+  return [
+    `  目的: ${inline(goal.objective, GOAL_TEXT_MAX_LENGTH)}`,
+    ...(goal.completionCriteria === undefined
+      ? []
+      : [`  完了条件: ${inline(goal.completionCriteria, GOAL_TEXT_MAX_LENGTH)}`]),
+  ];
 }
 
 /** フッタのid列。先頭`RUN_STATE_FOOTER_IDS_SHOWN`件だけを並べ、残りは件数にする。 */

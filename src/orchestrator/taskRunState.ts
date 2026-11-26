@@ -464,6 +464,11 @@ export interface TaskRun {
    */
   goal?: TaskRunGoal;
   /**
+   * `set_goal`でgoalを直した記録（古い順、`MAX_GOAL_REVISIONS`件まで。Issue #2193）。Kanbanに出す。
+   * 項目の無い保存データは修正なしと読む。読むときは`readTaskRunGoalRevisions`を通す。
+   */
+  goalRevisions?: readonly TaskRunGoalRevision[];
+  /**
    * `start_run`で渡された最適化の依頼（Issue #2109）。指標・正しさの確認・パス・予算の案を含む外部由来の
    * テキストで、承認済みの仕様ではない（仕様は`propose_plan`の`optimization`を人が承認して初めて決まる）。
    * 項目の無い保存データは依頼なしと読む。
@@ -471,12 +476,35 @@ export interface TaskRun {
   optimizeRequest?: OptimizeRequest;
 }
 
-/** runの目的と完了条件（Issue #2088）。 */
+/**
+ * runの目的と完了条件（Issue #2088・#2193）。どれも外部由来の文字列で、保存前に1行へ均してある。
+ * 読むときは`readTaskRunGoal`（`taskRunGoal.ts`）を通す（以前の版の固定文を目的なしとして扱うため）。
+ */
 export interface TaskRunGoal {
   /** 目的。 */
   objective: string;
-  /** 完了条件（観測できる結果）。満たしたら残りのタスクがあっても終了を提案する。 */
-  completionCriteria: string;
+  /**
+   * 完了条件（観測できる結果）。満たしたら残りのタスクがあっても終了を提案する。ロードマップ本文に
+   * 目的の節しか無かったときは無い。
+   */
+  completionCriteria?: string;
+  /**
+   * 出所（Issue #2193）。`start`は起動時の引数、`roadmap`はロードマップ本文の節、`orchestrator`は
+   * `set_goal`。項目の無い保存データは以前の版が入れたもの。
+   */
+  source?: TaskRunGoalSource;
+}
+
+export type TaskRunGoalSource = 'start' | 'roadmap' | 'orchestrator';
+
+/** `set_goal`でgoalを直した記録（Issue #2193）。 */
+export interface TaskRunGoalRevision {
+  /** 直した理由。外部由来（Orchestrator）の文字列で、保存前に1行へ均してある。 */
+  reason: string;
+  /** ISO8601。 */
+  at: string;
+  /** 直す前のgoal。無かったときは省く。 */
+  previous?: TaskRunGoal;
 }
 
 /** runが対象にするロードマップIssue（Issue #1623）。 */

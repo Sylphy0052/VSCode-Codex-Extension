@@ -1607,6 +1607,38 @@ describe('ロードマップ', () => {
     expect(again).toEqual({ ok: true, runId: started.runId, reused: true });
   });
 
+  it('goalを渡さなければrunにgoalを置かず、渡せば記録する（Issue #2193）', async () => {
+    const h = await setup();
+    const plain = await h.controller.startRoadmapRun(input);
+    if (!plain.ok) {
+      throw new Error('開始できなかった');
+    }
+    expect(runOf(h, plain.runId).goal).toBeUndefined();
+
+    const goal = { objective: '目的', completionCriteria: '条件', source: 'start' as const };
+    const withGoal = await h.controller.startRoadmapRun({
+      ...input,
+      roadmapIssueNumber: 101,
+      goal,
+    });
+    if (!withGoal.ok) {
+      throw new Error('開始できなかった');
+    }
+    expect(runOf(h, withGoal.runId).goal).toEqual(goal);
+  });
+
+  it('setGoalは理由と前のgoalを記録する（Issue #2193）', async () => {
+    const h = await setup([makeRun([])]);
+    const goal = { objective: '目的', completionCriteria: '条件', source: 'orchestrator' as const };
+
+    expect((await h.controller.setGoal('missing', goal, '理由')).ok).toBe(false);
+    expect((await h.controller.setGoal(RUN_ID, goal, '観測できる条件にした')).ok).toBe(true);
+    expect(runOf(h).goal).toEqual(goal);
+    expect(runOf(h).goalRevisions).toEqual([
+      { reason: '観測できる条件にした', at: expect.any(String) as string },
+    ]);
+  });
+
   it('並列上限が範囲外なら始めない', async () => {
     const h = await setup();
 

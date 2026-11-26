@@ -7,6 +7,7 @@ import { SerialQueue } from './serialQueue';
 import { recommendationKey, type TaskRunOrchestratorCall } from './taskRunOrchestratorTools';
 import type { OptimizeTrialRecord } from './optimizeLedger';
 import type { OptimizeRequest } from './optimizeRequest';
+import { GOAL_REASON_MAX_LENGTH, setTaskRunGoal } from './taskRunGoal';
 import type { RoadmapChild } from './roadmapImport';
 import type { RoadmapPlanNode } from './roadmapShared';
 import {
@@ -93,6 +94,7 @@ import {
   type TaskPlanReview,
   type TaskRun,
   type TaskRunEngine,
+  type TaskRunGoal,
 } from './taskRunState';
 import { requestPlanSecondOpinion } from './planSecondOpinion';
 import { reviewTaskRunPlanProposal } from './taskRunPlanReview';
@@ -984,6 +986,8 @@ export class TaskRunController {
     parallel?: boolean;
     /** 最適化の依頼（Issue #2109）。既存のrunを返すときは使わない。 */
     optimizeRequest?: OptimizeRequest;
+    /** runの目的（Issue #2193）。`parseGoalInput`で均した値。既存のrunを返すときは使わない。 */
+    goal?: TaskRunGoal | undefined;
   }): Promise<StartTaskRunOutcome> {
     return this.startQueue.enqueue(async (): Promise<StartTaskRunOutcome> => {
       const active = this.deps.store.listActive(input.workspaceRoot)[0];
@@ -1002,6 +1006,7 @@ export class TaskRunController {
         maxParallel: input.maxParallel,
         ...(input.title === undefined ? {} : { title: input.title }),
         ...(input.optimizeRequest === undefined ? {} : { optimizeRequest: input.optimizeRequest }),
+        ...(input.goal === undefined ? {} : { goal: input.goal }),
         runId: this.newId(),
         now: this.now(),
       });
@@ -1037,6 +1042,11 @@ export class TaskRunController {
     planNodes: readonly RoadmapPlanNode[] | undefined;
     /** 計画区画の中身のハッシュ。区画が無い・読めないときは`undefined`。 */
     planSectionHash: string | undefined;
+    /**
+     * runの目的（Issue #2193）。起動時の引数か、ロードマップ本文の「目的」「完了条件」の節から
+     * 呼び出し側が決める。どちらも無ければ`undefined`で、goalを置かない（固定文は入れない）。
+     */
+    goal?: TaskRunGoal | undefined;
   }): Promise<StartTaskRunOutcome & { planMessage?: ControllerResult }> {
     const closedIssueNumbers = await findClosedRoadmapChildren(
       (n) => this.deps.observation.fetchIssueState(input.workspaceRoot, n),
@@ -1071,10 +1081,7 @@ export class TaskRunController {
           title: sanitizeInlineText(input.roadmapTitle, MAX_PLAN_TITLE_LENGTH),
           snapshot: plan.snapshot,
         },
-        goal: {
-          objective: sanitizeInlineText(input.roadmapTitle, MAX_PLAN_TITLE_LENGTH),
-          completionCriteria: `ロードマップIssue #${String(input.roadmapIssueNumber)}の目的を満たす観測できる結果が揃う`,
-        },
+        ...(input.goal === undefined ? {} : { goal: input.goal }),
         runId: this.newId(),
         now: this.now(),
       });
@@ -1760,6 +1767,27 @@ export class TaskRunController {
     return ok
       ? { ok: true, message: `${taskId}へ指示を渡した。次の指示の頭に添えて届く` }
       : { ok: false, message: `${taskId}へ指示を渡せなかった（工程セッションが動いていない）` };
+  }
+
+  /**
+   * runの目的を直す（Orchestratorの`set_goal`と、既存runへの`start_roadmap_orchestrator`。Issue #2193）。
+   * 理由と前のgoalを`goalRevisions`へ残し、Kanbanに出す。`goal`と`reason`は呼び出し側で均した値。
+   */
+  async setGoal(runId: string, goal: TaskRunGoal, reason: string): Promise<ControllerResult> {
+    const leased = await this.ensureLease(runId);
+    if (!leased.ok) {
+      return leased;
+    }
+    const next = await this.updateRun(runId, (r) =>
+      setTaskRunGoal(r, goal, reason, this.now().toISOString()),
+    );
+    if (next === undefined) {
+      return { ok: false, message: 'runが見つからない' };
+    }
+    return {
+      ok: true,
+      message: `goalを直した（理由: ${sanitizeInlineText(reason, GOAL_REASON_MAX_LENGTH)}）。理由と前のgoalはKanbanとget_run_stateに残る`,
+    };
   }
 
   async setMaxParallel(runId: string, maxParallel: number): Promise<ControllerResult> {
