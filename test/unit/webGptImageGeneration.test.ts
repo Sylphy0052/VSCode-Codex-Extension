@@ -528,6 +528,22 @@ describe('generateImage の遅れログ', () => {
     expect(lines[0]).not.toContain(SECRET);
   });
 
+  it('logInfoが例外を投げても生成は成功する', async () => {
+    setScript({ answer: [done([BLOB])] });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const r = await generateImage(
+      { prompt: 'p' },
+      {
+        endpoint: 'e',
+        outputDir: outDir,
+        logInfo: () => {
+          throw new Error('log down');
+        },
+      },
+    );
+    expect(r.ok).toBe(true);
+  });
+
   it('画像なしで確定したら、確定までの回数と回答の文字数だけ記録する', async () => {
     const lines: string[] = [];
     setScript({ answer: [done([], { text: SECRET })] });

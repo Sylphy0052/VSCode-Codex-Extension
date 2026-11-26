@@ -202,7 +202,12 @@ async function runInTab(
   try {
     const answer = await waitForAnswer(evaluate, sleep);
     conversationUrl = answer.conversationUrl;
-    deps.logInfo?.(formatImageTimingLog(answer.timing));
+    // 記録の失敗で、送信済みの生成を失敗扱いにしない
+    try {
+      deps.logInfo?.(formatImageTimingLog(answer.timing));
+    } catch {
+      // ログは補助なので握りつぶす
+    }
     if (
       request.conversationUrl !== undefined &&
       answer.conversationUrl !== request.conversationUrl
