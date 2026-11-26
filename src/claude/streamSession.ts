@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { ApprovalDecision } from '../appserver/approvals';
 import {
   addApproval,
@@ -148,14 +149,22 @@ export type ClaudeSpawnPort = (
  */
 export class ClaudeStreamSession {
   private proc: ChildProcessWithoutNullStreams | undefined;
+  /** `halt`で止めた直後は、待ち行列の指示を送ってCLIを起こさない（Issue #2146）。 */
+  private holdQueueAfterStop = false;
   /** sandboxの外へ回らない形のネットワークコマンドを止めるhookを登録するか（Issue #1668）。 */
   private sandboxBashGuard = false;
+  /** 設定で足したsandboxの除外パターン。hookの判定へ渡す（Issue #2133）。 */
+  private sandboxExtraExcludedCommands: readonly string[] = [];
+  /** 直近の起動でargvへ載せたmodel/effort（Issue #2016）。 */
+  private launchedModel: { model: string; effort: string } | undefined;
   private buffer = '';
   private state: ChatState = initialClaudeState;
   private nextControlId = 1;
   private readonly waiting = new Map<string, WaitingApproval>();
   /** こちらから出した要求の用途。応答は種類ごとに形が違うため、idで引く。 */
   private readonly outgoing = new Map<string, Outgoing>();
+  /** 取り込み待ちがあるため、`interrupt()`がターンの確定を中断の応答まで見送った（Issue #2022）。 */
+  private interruptDeferred = false;
   /** 承認要求が一度でも届いたか。届かない構成を利用者へ知らせるために見る。 */
   private sawApprovalRequest = false;
   private handshakeDone = false;
@@ -335,7 +344,7 @@ export class ClaudeStreamSession {
 
   /**
    * CLIとはやり取りせず、拡張機能側だけで完結した出来事を会話に1行残す
-   * （issue #6のメモリ追記など）。プロセスが生きていなくても呼べる
+   * （issue #5のシェルコマンド入力など）。プロセスが生きていなくても呼べる
    * （会話を閉じた後の操作を弾く理由が無いため）。
    */
   noteLocalEvent(id: string, text: string): void {
@@ -407,6 +416,7 @@ export class ClaudeStreamSession {
       autoCompactLimit: readClaudeAutoCompactWindow(options.cwd, undefined, undefined, this.log),
     };
     this.sandboxBashGuard = options.config.sandboxBashGuard === true;
+    this.sandboxExtraExcludedCommands = options.config.sandboxExtraExcludedCommands ?? [];
 
     this.launch(options);
 
@@ -431,6 +441,22 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 直近の起動でargvの`--model` / `--effort`へ載せた値（Issue #2016）。載せなかった項目は
+   * 空文字。まだ起動していなければ`undefined`。
+   */
+  getLaunchedModel(): { model: string; effort: string } | undefined {
+    return this.launchedModel;
+  }
+
+  /** 工程セッションでpluginのStop hook（skill-retro）を止める環境変数を渡すか（Issue #2087）。 */
+  private suppressSkillRetro = false;
+
+  /** `SKILL_RETRO_DISABLE=1`を次回起動から渡す。起動前に呼ぶ。 */
+  setSuppressSkillRetro(on: boolean): void {
+    this.suppressSkillRetro = on;
+  }
+
+  /**
    * CLIを起動し、stdout・終了の受け口を配線する。会話の状態には触れない（`start()`と、
    * 休止からの再開（Issue #1808）の`resumeProcess()`で共用する）。
    */
@@ -442,11 +468,15 @@ export class ClaudeStreamSession {
       sessionId: options.sessionId,
       cwd: options.cwd,
       config: options.config,
-      pluginDirs: omitDuplicatedBundledRoot(extensionPluginRoots(), this.configDir),
+      pluginDirs: omitDuplicatedBundledRoot(extensionPluginRoots(), this.configDir, (m) =>
+        this.log.warn(m),
+      ),
     });
     for (const w of warnings) {
       this.log.warn(w);
     }
+    // 起動前の検証（Issue #2016）のため、実際にargvへ載せた値を覚えておく
+    this.launchedModel = { model: argValue(args, '--model'), effort: argValue(args, '--effort') };
 
     const proc = this.spawnProcess(this.claudePath(), args, {
       cwd: options.cwd,
@@ -470,6 +500,8 @@ export class ClaudeStreamSession {
           ? {}
           : { CLAUDE_CONFIG_DIR: this.configDir }),
         ...(this.state.autoHandoff ? { AGENT_EXTENSION_AUTO_HANDOFF: '1' } : {}),
+        // 工程セッションでpluginのStop hookが停止を止めないようにする（Issue #2087）
+        ...(this.suppressSkillRetro ? { SKILL_RETRO_DISABLE: '1' } : {}),
       },
     });
     this.proc = proc;
@@ -626,12 +658,56 @@ export class ClaudeStreamSession {
     if (proc === undefined || !this.idleForSuspend) {
       return false;
     }
+    await this.stopProcessKeepingSession(proc, relaunch, graceMs);
+    return true;
+  }
+
+  /**
+   * ターンの途中でもCLIを終了する（引き継ぎで前の世代を止める。Issue #2146）。`suspend`と違い
+   * 使っていない状態を求めない。session-idとタブは残し、次の送信で`--resume`する。
+   *
+   * @returns プロセスが無ければ`undefined`。あれば、`graceMs`の間に終わらずシグナルで止めたか
+   */
+  async halt(
+    relaunch: { cwd: string; config: () => ClaudeConfig },
+    graceMs = SUSPEND_GRACE_MS,
+  ): Promise<{ forced: boolean } | undefined> {
+    const proc = this.proc;
+    if (proc === undefined) {
+      return undefined;
+    }
+    // 待たせていた指示を終了の直後に送ると、止めたCLIをすぐ起こしてしまう
+    this.holdQueueAfterStop = true;
+    if (this.lifecycle === 'running') {
+      return this.stopProcessKeepingSession(proc, relaunch, graceMs);
+    }
+    // running以外でもプロセスが生きていれば止める。再開中は発言を失わないよう失敗として
+    // 呼び出し側へ返し、停止中・その他は既に進んでいる終了の完了を待つ（必要なら強制終了）
+    if (this.lifecycle === 'resuming') {
+      this.failResume('引き継ぎのため停止しました');
+    }
+    return this.stopProcess(proc, graceMs);
+  }
+
+  private async stopProcessKeepingSession(
+    proc: ChildProcessWithoutNullStreams,
+    relaunch: { cwd: string; config: () => ClaudeConfig },
+    graceMs: number,
+  ): Promise<{ forced: boolean }> {
     this.lifecycle = 'stopping';
     // Plan modeは起動引数ではなく実行中の切り替えで入るため、再開後に入れ直す
     this.relaunchOptions = { ...relaunch, planMode: this.state.planMode };
     this.mcpBeforeSuspend = this.lastInitMcpServers;
     this.resumeMcpPending = false;
     this.update({ ...this.state, processSuspension: 'stopping' });
+    return this.stopProcess(proc, graceMs);
+  }
+
+  /** stdinを閉じ、`graceMs`で終わらなければシグナルで止めて、終了を待つ。 */
+  private async stopProcess(
+    proc: ChildProcessWithoutNullStreams,
+    graceMs: number,
+  ): Promise<{ forced: boolean }> {
     const exited = new Promise<void>((resolve) => {
       if (typeof proc.exitCode === 'number' || typeof proc.signalCode === 'string') {
         resolve();
@@ -640,13 +716,17 @@ export class ClaudeStreamSession {
       proc.once('exit', () => resolve());
     });
     proc.stdin.end();
-    const timer = setTimeout(() => killWithEscalation(proc), graceMs);
+    let forced = false;
+    const timer = setTimeout(() => {
+      forced = true;
+      killWithEscalation(proc);
+    }, graceMs);
     try {
       await exited;
     } finally {
       clearTimeout(timer);
     }
-    return true;
+    return { forced };
   }
 
   /** 休止のための終了を見届けた後の状態にする。終了を待つ間に来た送信があれば再開して送る。 */
@@ -665,7 +745,9 @@ export class ClaudeStreamSession {
     });
     this.log.info('使っていないためClaude Codeを終了しました。次の送信で再開します');
     this.wakeLifecycleWaiters();
-    if (this.state.queued.length > 0) {
+    const hold = this.holdQueueAfterStop;
+    this.holdQueueAfterStop = false;
+    if (!hold && this.state.queued.length > 0) {
       this.sendNextQueued();
     }
   }
@@ -964,6 +1046,18 @@ export class ClaudeStreamSession {
   }
 
   /**
+   * 自動引き継ぎがバックグラウンド処理の終了だけを待っていること（Issue #2004）を切り替える。
+   *
+   * `setAutoReplyActivity` と同じく拡張機能側だけで完結する状態なのでCLIへは何も送らない。
+   */
+  setAutoHandoffBackgroundWait(waiting: boolean): void {
+    if ((this.state.autoHandoffBackgroundWait ?? false) === waiting) {
+      return;
+    }
+    this.update({ ...this.state, autoHandoffBackgroundWait: waiting });
+  }
+
+  /**
    * 会話中にeffortを変える。
    *
    * 専用の制御要求が無いため `apply_flag_settings` に載せる。**効いたことは観測できない**
@@ -979,6 +1073,22 @@ export class ClaudeStreamSession {
       `effort を ${effort} で送りました（CLIが結果を返さないため、効いたかどうかは確かめられません）`,
     );
     this.write(buildSetEffortRequest(requestId, effort));
+  }
+
+  /**
+   * 会話中にeffortを変え、CLI自身の応答で変わったことを確かめられる経路（Issue #2056）。
+   *
+   * TUIと同じ `/effort <level>` をユーザー発言として送る。`setEffort`（`apply_flag_settings`）と
+   * 違い、CLIが `Set effort level to <level> (this session only)` を返す（CLI 2.1.325で
+   * 実測。モデル呼び出しを経由しない `<synthetic>` 応答で、`num_turns` は0）。応答は会話に残る。
+   * 呼び出し側は、ターン中でないこと・値が既知の集合にあることを確かめてから呼ぶ。
+   */
+  setEffortBySlashCommand(effort: string): void {
+    if (this.proc === undefined || effort === '') {
+      return;
+    }
+    this.update({ ...this.state, busy: true, turnFailed: false });
+    this.write(buildUserMessage(`/effort ${effort}`));
   }
 
   /**
@@ -1542,7 +1652,7 @@ export class ClaudeStreamSession {
     });
   }
 
-  send(text: string, attachments: readonly Attachment[] = []): void {
+  send(text: string, attachments: readonly Attachment[] = [], uuid?: string): void {
     // 休止のための終了を待っている間（Issue #1808）は積んでおき、終了を見届けてから再開して送る
     if (this.lifecycle === 'stopping') {
       this.update(enqueue(this.state, text, [...attachments]));
@@ -1563,7 +1673,7 @@ export class ClaudeStreamSession {
       throw new Error('セッションが起動していません');
     }
     this.update({ ...this.state, busy: true, turnFailed: false });
-    this.write(buildUserMessage(text, attachments));
+    this.write(buildUserMessage(text, attachments, uuid));
   }
 
   /** 発言を送る。応答中なら待ち行列へ積む。 */
@@ -1597,28 +1707,37 @@ export class ClaudeStreamSession {
     return last;
   }
 
-  /** 応答を止めて、待機中の指示をすぐ送る。 */
+  /** 待機中の先頭の指示をすぐ送る。応答中なら走っているターンへ差し込む。 */
   flushQueue(): void {
     this.sendQueued(0);
   }
 
-  /** 待機中の指定した指示をすぐ送る。 */
+  /**
+   * 待機中の指定した指示をすぐ送る。
+   *
+   * 応答中でも`interrupt`は出さない（Issue #2020）。CLIは応答中に届いた発言を中断せずに
+   * 走っているターンへ取り込む（実測: CLI 2.1.296。subagentの実行中に書き込んだ発言が、
+   * ターンを止めずに同じターンの最終応答へ反映された）。中断すると走っていたsubagentまで
+   * 止まる。止めてから送りたいときは中断ボタンを使う。
+   *
+   * 応答中に送った指示は、CLIが取り込むまで`held`に残して画面に出し続ける（Issue #2022）。
+   * 取り込まれるのは実行中のツール呼び出しが終わってからで、エコーもそのとき返るため、
+   * 残さないと長いツールの実行中は指示が画面から消えて見える。
+   */
   sendQueued(index: number): void {
     const { message, next } = takeQueuedAt(this.state, index);
     if (message === undefined) {
       return;
     }
-    const wasBusy = this.state.busy;
-    // interrupt()がbusy=falseを通知すると、Viewの自動送信が残りの先頭を先に取り出す。
-    // 選択した項目を先に送る間はbusyを保ったまま、待機列から先に外す。
-    this.update(next);
-    if (wasBusy) {
-      this.interrupt(false);
-    }
+    const uuid = this.state.busy ? randomUUID() : undefined;
+    this.update(
+      uuid === undefined ? next : { ...next, held: [...next.held, { ...message, uuid }] },
+    );
     try {
-      this.send(message.text, message.attachments);
+      this.send(message.text, message.attachments, uuid);
     } catch (e) {
-      this.update(restoreQueued(this.state, index, message));
+      const restored = restoreQueued(this.state, index, message);
+      this.update({ ...restored, held: restored.held.filter((m) => m.uuid !== uuid) });
       throw e;
     }
   }
@@ -1632,8 +1751,14 @@ export class ClaudeStreamSession {
     if (this.proc === undefined) {
       return;
     }
-    this.write(buildControlRequest(`req_${this.nextControlId++}`, { subtype: 'interrupt' }));
-    if (updateState) {
+    this.write(buildControlRequest(this.claim('interrupt'), { subtype: 'interrupt' }));
+    // 取り込み待ちの指示は中断しても捨てられない（Issue #2022）。CLIは`interrupt`の応答の
+    // `still_queued`にそのuuidを返し、中断の直後に次のターンとして処理する（実測: CLI 2.1.296）。
+    // 残っている間は応答中のままにする（`result`での扱いと同じ）。CLIが持っていない分は
+    // 応答を受けたときに外す（`releaseHeldAfterInterrupt`）
+    if (updateState && this.state.held.length > 0) {
+      this.interruptDeferred = true;
+    } else if (updateState) {
       // 走っていたターンがあったときだけ確定させる（issue #939）。CLIは中断後に`result`を
       // 返さないことがあるためここが確定点になるが、ターンを抱えていない状態で進めると、
       // 直前のターンの成果を作業記録へ二重に残すなど、無かった完了を1つ作ってしまう
@@ -1797,7 +1922,12 @@ export class ClaudeStreamSession {
   private handleControlRequest(request: IncomingControlRequest): void {
     if (request.subtype === 'hook_callback') {
       // 登録するhookはsandboxのBash判定だけ（Issue #1668）。知らないidには空（続行）を返す
-      this.write(buildControlResponse(request.requestId, answerSandboxBashGuard(request.payload)));
+      this.write(
+        buildControlResponse(
+          request.requestId,
+          answerSandboxBashGuard(request.payload, this.sandboxExtraExcludedCommands),
+        ),
+      );
       return;
     }
     if (request.subtype !== 'can_use_tool') {
@@ -1871,9 +2001,44 @@ export class ClaudeStreamSession {
     this.update(addApproval(this.state, approval));
   }
 
+  /**
+   * 中断の応答で、CLIがまだ持っている指示（`still_queued`）だけを取り込み待ちに残す
+   * （Issue #2022）。残っていた指示がすべて外れたら、`interrupt()`で見送ったターンの確定を
+   * ここで行う。CLIが持っていない指示を残すと、エコーが来ないまま応答中に見え続ける。
+   */
+  private releaseHeldAfterInterrupt(response: ControlResponse): void {
+    const deferred = this.interruptDeferred;
+    this.interruptDeferred = false;
+    const raw = response.payload?.['still_queued'];
+    const stillQueued = new Set(
+      Array.isArray(raw) ? raw.filter((v): v is string => typeof v === 'string') : [],
+    );
+    const held = this.state.held.filter((m) => stillQueued.has(m.uuid));
+    if (held.length > 0 || !deferred) {
+      if (held.length !== this.state.held.length) {
+        this.update({ ...this.state, held });
+      }
+      return;
+    }
+    // 中断の応答より先にエコーが届いて外れていた場合も、ここで確定させる
+    this.update({
+      ...this.state,
+      held,
+      busy: false,
+      turnCompletionSeq: this.state.busy
+        ? this.state.turnCompletionSeq + 1
+        : this.state.turnCompletionSeq,
+    });
+  }
+
   private handleControlResponse(response: ControlResponse): void {
     const outgoing = this.outgoing.get(response.requestId);
     this.outgoing.delete(response.requestId);
+
+    if (outgoing?.kind === 'interrupt') {
+      this.releaseHeldAfterInterrupt(response);
+      return;
+    }
 
     if (outgoing?.kind === 'mcpConfigure') {
       this.mcpConfigureWaiting.get(response.requestId)?.resolve(response);
@@ -2069,6 +2234,8 @@ export class ClaudeStreamSession {
       ...this.state,
       busy: false,
       turnFailed: true,
+      // CLIが消えれば取り込み待ちの指示も届かない（Issue #2022）
+      held: [],
       // 走っていたターンが「失敗として確定した」（issue #939）。`result`を受け取れない
       // まま終わった経路なので、完了の世代はここで進める。**走っていたターンがあるとき
       // だけ**進めるのは、この関数がプロセスの`exit`・`error`（起動失敗を含む）から
@@ -2176,6 +2343,7 @@ export class ClaudeStreamSession {
 /** こちらから出した制御要求の用途。 */
 type OutgoingKind =
   | 'initialize'
+  | 'interrupt'
   | 'contextUsage'
   | 'sessionCost'
   | 'settings'
@@ -2192,4 +2360,10 @@ interface Outgoing {
   subject: string;
   /** 成功したとき画面に残す一言。空なら残さない（別の通知で判るとき）。 */
   note: string;
+}
+
+/** argvの`flag`の直後の値。無ければ空文字。 */
+function argValue(args: readonly string[], flag: string): string {
+  const index = args.indexOf(flag);
+  return index >= 0 ? (args[index + 1] ?? '') : '';
 }

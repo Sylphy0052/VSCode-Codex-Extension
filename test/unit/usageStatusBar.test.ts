@@ -200,6 +200,50 @@ describe('UsageStatusBar のClaude制限表示（issue #1221）', () => {
     bar.updateClaude(undefined);
     expect(claudeTextOf(bar)).toBe('');
   });
+
+  it('/usageの5時間枠と週次はMission Control用に持つだけで、表示（Codex分を含む）は変えない（Issue #2174）', () => {
+    const bar = new UsageStatusBar();
+    bar.update(snapshot(42));
+    bar.updateClaude(claudeUsage({ limitLabel: '5時間', resetsAt: inHours(3) }));
+    bar.updateClaude(claudeUsage({ limitLabel: 'セッション', usedPercent: 16 }));
+    const before = {
+      codex: textOf(bar),
+      codexTooltip: tooltipOf(bar),
+      claude: claudeTextOf(bar),
+      claudeTooltip: claudeTooltipOf(bar),
+      claudeBackground: claudeBackgroundOf(bar),
+    };
+    let fired = 0;
+    bar.onDidChange(() => {
+      fired += 1;
+    });
+    const probed = {
+      slots: {
+        fiveHour: { pct: 95, resetsAt: Date.now() + 3_600_000 },
+        weekly: { pct: 99, resetsAt: Date.now() + 86_400_000 },
+      },
+      readAt: Date.now(),
+    };
+    bar.updateClaudeSlots(probed);
+    expect({
+      codex: textOf(bar),
+      codexTooltip: tooltipOf(bar),
+      claude: claudeTextOf(bar),
+      claudeTooltip: claudeTooltipOf(bar),
+      claudeBackground: claudeBackgroundOf(bar),
+    }).toEqual(before);
+    expect(bar.current().claudeSlots).toBe(probed);
+    expect(bar.current().claude.map((e) => e.label)).toEqual(['5時間', 'セッション']);
+    expect(fired).toBe(1);
+    // 今の値が無いと渡されたら捨てる（アカウントの切り替え後。表示は変えない）
+    bar.updateClaudeSlots(undefined);
+    expect(bar.current().claudeSlots).toBeUndefined();
+    expect(fired).toBe(2);
+    expect(claudeTextOf(bar)).toBe(before.claude);
+    // 持っていなければ発火しない
+    bar.updateClaudeSlots(undefined);
+    expect(fired).toBe(2);
+  });
 });
 
 describe('UsageStatusBar の定期描画（issue #1224）', () => {

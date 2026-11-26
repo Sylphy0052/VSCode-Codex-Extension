@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { basename } from 'node:path';
 import * as vscode from 'vscode';
 import {
   buildWebGptDiscussionLoopPlan,
@@ -7,7 +6,25 @@ import {
   buildWebGptMcpConfig,
   WEB_GPT_MCP_SERVER,
 } from '../webGpt/discussion';
-import { prepareWebGptDiscussion, reportDiscussionError } from './webGptDiscussionCommand';
+import { prepareAskQuestionDiscussion } from './askQuestionDiscussion';
+import {
+  prepareWebGptDiscussion,
+  reportDiscussionError,
+  type PrepareWebGptDiscussionOptions,
+} from './webGptDiscussionCommand';
+import {
+  chatPanelToolRequestHost,
+  WebGptToolRequests,
+  type PreparedWebGptDiscussion,
+} from './webGptDiscussionFromTool';
+import { applySessionProfileTool, type SessionProfile } from './sessionProfileTool';
+import type {
+  SessionProfileToolArgs,
+  SessionProfileToolResult,
+  StartRoadmapOrchestratorToolArgs,
+  StartRoadmapOrchestratorToolResult,
+} from '../orchestrator/messaging';
+import { startRoadmapOrchestratorFromTool } from './startRoadmapOrchestratorTool';
 import { isApprovalDecision } from '../appserver/approvals';
 import type { OutputOffloadPort } from '../appserver/outputOffload';
 import {
@@ -17,7 +34,10 @@ import {
   type ChatState,
   type ChatUsage,
 } from '../appserver/chatState';
-import { buildTranscriptMarkdown } from '../appserver/transcriptMarkdown';
+import {
+  buildExecutionRecordMarkdown,
+  buildTranscriptMarkdown,
+} from '../appserver/transcriptMarkdown';
 import { isAskUserQuestionSelections } from '../claude/askUserQuestion';
 import type { AskUserQuestionItem, AskUserQuestionSelections } from '../claude/askUserQuestion';
 import { debugLogCandidates } from '../claude/cliLocator';
@@ -34,6 +54,7 @@ import {
   type SecondOpinionPanelPort,
 } from './secondOpinionCommand';
 import { AdvisorSessionStore } from '../secondOpinion/advisorSession';
+import { LedgerStore } from '../secondOpinion/ledger';
 import type { HandoffDraft } from '../secondOpinion/handoff';
 import { secondOpinionParentPortFor } from './secondOpinionParent';
 import {
@@ -54,6 +75,7 @@ import {
 } from '../claude/streamSession';
 import { createTranscriptBuilder } from '../claude/transcript';
 import { effortsFor } from '../codex/modelCatalog';
+import { extractProfileRecommendation } from '../claude/profileRecommendation';
 import {
   currentWorkspaceFolder,
   readChatComposerButtonsConfig,
@@ -81,6 +103,8 @@ import {
   readAutoHandoffSoftThresholdPercent,
   readAutoHandoffOnProfileChange,
   readAutoHandoffOnAssistantSuggestion,
+  readAutoHandoffOnHandoffPrompt,
+  readAutoHandoffBoundaryAction,
   readAutoHandoffOnMilestone,
   readAutoHandoffReflexConfig,
   readHandoffAcceptanceThreshold,
@@ -96,6 +120,7 @@ import {
   readLoopDoneCheckConfig,
   readClaudeAutoSwitchConfig,
   readClaudeConfig,
+  readClaudeSandboxExtraExcludedCommands,
   readConfig,
   readIdleShutdownMinutes,
   readWorkflowsConfig,
@@ -138,10 +163,9 @@ import {
 import { SkillSelectGate } from './skillSelectGate';
 import type { Logger } from '../log';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
-import type { FileSystemPort, MemoryFileSystemPort, SymlinkResolution } from '../session/ports';
-import { nodeMemoryFileSystem } from '../session/nodeFileSystem';
+import type { FileSystemPort } from '../session/ports';
 import type { AccountAutoSwitcher, LimitHit } from '../claude/accountAutoSwitch';
-import { ClaudeUsageProbe } from '../claude/usageProbe';
+import { ClaudeUsageProbe, type ProbedSlots } from '../claude/usageProbe';
 import { ClaudeSandboxProbe, claudeSandboxArgs, nodeSandboxProbePorts } from '../claude/sandbox';
 import { CommandCatalog } from '../provider/commandCatalog';
 import {
@@ -171,7 +195,6 @@ import {
   confirmClaudeImport,
   confirmCompact,
   confirmDebugCommand,
-  confirmMemoryAppend,
   confirmRewindFiles,
   confirmRunShellCommand,
   confirmStopBackgroundTask,
@@ -184,6 +207,7 @@ import {
   noteDropRejected,
   openChatFileLink,
   openCodeInNewFile,
+  fileMentionCandidates,
   postFileMentions,
   postImageData,
   renderShell,
@@ -196,42 +220,38 @@ import {
 import type { FileMentionCatalog } from '../provider/fileMentions';
 import { decoratePanelTitle, deriveSessionActivityState } from './sessionActivity';
 import { buildSessionPanelTitle } from './sessionTitle';
-import {
-  appendMemoryLine,
-  buildProjectMemoryCandidates,
-  describeMemoryAppendResult,
-  MEMORY_LAST_SELECTED_PATH_KEY,
-  orderMemoryCandidates,
-  resolveUserMemoryFile,
-  routeInputMode,
-  symlinkResolutionEquals,
-  type InputModeCall,
-  type MemoryCandidate,
-  type MemoryModeMemento,
-} from '../provider/inputModes';
+import { routeInputMode, type InputModeCall } from '../provider/inputModes';
 import { readPersistedThreadId } from './panelState';
 import { buildItemsDelta, stripHostOnlyItems, stripHostOnlyState } from './stateDelta';
 import {
   abortAsRejection,
   BaseChatViewManager,
   HELD_TASK_PANEL_NOTICE,
+  INPUT_LOCKED_MESSAGE,
   type BaseChatPanel,
 } from './chatManagerBase';
+import type { SessionSettingChange, SessionSettingsDetail } from './sessionHub';
+import { buildSettingModelOptions } from './sessionSettingsDetail';
 import {
   advanceCompactionCount,
   buildHandoffPrompt,
+  buildMilestonePrompt,
   chooseHandoffPrompt,
+  isBareHandoffAttempt,
   handoffAttemptTexts,
   containsHandoffPrompt,
   detectHandoffMilestone,
   countCompactions,
   decideAutoHandoff,
+  offersInsteadOfAutoHandoff,
+  probeIsRedundantAfterOffer,
   deriveHandoffBaseName,
   invokedHandoffSkill,
   parseHandoffPrompt,
   endsWithUserQuestion,
   HANDOFF_PROMPT_DETECTED_REASON,
   buildHandoffSessionName,
+  isWaitingOnlyForBackground,
   passesSafeBoundaryGate,
   safeBoundaryProbeKey,
   recentUserMessages,
@@ -248,6 +268,16 @@ import {
   type HandoffTrigger,
 } from './handoff';
 import {
+  describeModelGiveUp,
+  describeModelRebuild,
+  findLaunchMismatch,
+  observedModelView,
+  settleHandoffDestination,
+  type HandoffDestination,
+  type ObservedModelView,
+} from './handoffModelVerify';
+import { readTranscriptModel } from '../session/observedModelLog';
+import {
   buildHandoffFactsSection,
   extractCreatedReferences,
   newHandoffId,
@@ -263,6 +293,7 @@ import {
   describeProfile,
 } from './handoffTrace';
 import { appendHandoffLog } from './handoffLog';
+import { reportWorkHistoryHandoff } from './workHistoryRecorder';
 import {
   applyHandoffReflexThresholds,
   describeHandoffBoundaryMaterial,
@@ -406,6 +437,12 @@ interface ClaudePanel extends BaseChatPanel {
    */
   autoHandoffFailedTurnSeq: number | undefined;
   /**
+   * 自動引き継ぎを始めず、提案だけで止めたターンの`ChatState.turnCompletionSeq`（Issue #1947）。
+   *
+   * 同じターンの材料で状態が更新されるたびに提案を出し直さないための目印。
+   */
+  autoHandoffOfferedTurnSeq: number | undefined;
+  /**
    * 直前に見た圧縮項目（`kind: 'contextCompaction'`）の件数。増えたら自動圧縮が
    * 走ったと判る。専用のイベントを`ChatState`へ足さずに済ませるため、項目を数える。
    *
@@ -489,12 +526,16 @@ interface ChatSettingsPayload {
     agent: undefined;
   };
   profile: string;
+  /** CLIが通知した実測のmodel/effort（Issue #2016）。通知が無ければ`undefined`。 */
+  observed: ObservedModelView | undefined;
 }
 
 const VIEW_TYPE = 'claude.chat';
 const LABEL = 'Claude Code';
 /** アカウントの使用率を見に行く周期。実際の取得間隔は`ClaudeUsageProbe`が決める（Issue #1924）。 */
 const ACCOUNT_POLL_INTERVAL_MS = 2 * 60_000;
+/** 切り替え直後の強制取得が失敗してから取り直すまでの待ち。取得権の再試行の間隔と揃える。 */
+const USAGE_RETRY_DELAY_MS = 60_000;
 /** 上限でのアカウント切り替えを覚えておく時間。同じ上限で止まった別の会話が重ねて切り替えない。 */
 const LIMIT_SWITCH_MEMO_MS = 10 * 60_000;
 const LIMIT_AUTO_RESUME_INSTRUCTION = '前回の作業を続けて。現在の状態を確認してから再開して。';
@@ -542,7 +583,11 @@ function openShellCommandTerminal(cwd: string, command: string): void {
  * ユーザー設定・YAMLの経路とは無関係（§16.16の信頼境界を壊さない。`TaskSessionConfig`
  * 自体に`additionalArgs`が無いことがそれを裏付ける）。
  */
-function toClaudeConfig(input: TaskSessionInput, sandboxArgs: readonly string[]): ClaudeConfig {
+function toClaudeConfig(
+  input: TaskSessionInput,
+  sandboxArgs: readonly string[],
+  extraExcludedCommands: readonly string[] = [],
+): ClaudeConfig {
   return {
     model: input.config.model,
     effort: input.config.effort,
@@ -559,7 +604,9 @@ function toClaudeConfig(input: TaskSessionInput, sandboxArgs: readonly string[])
         : []),
       ...sandboxArgs,
     ],
-    ...(sandboxArgs.length > 0 ? { sandboxBashGuard: true } : {}),
+    ...(sandboxArgs.length > 0
+      ? { sandboxBashGuard: true, sandboxExtraExcludedCommands: [...extraExcludedCommands] }
+      : {}),
   };
 }
 
@@ -580,6 +627,8 @@ export class ClaudeChatViewManager
   private readonly catalog: CommandCatalog;
   private readonly usageProbe: ClaudeUsageProbe;
   private accountPollTimer: ReturnType<typeof setInterval> | undefined;
+  /** 切り替え直後の強制取得が失敗したときの、1回きりの再試行（Issue #1957）。 */
+  private usageRetryTimer: ReturnType<typeof setTimeout> | undefined;
   /** 直近に上限でアカウントを切り替えた上限の識別子と時刻。 */
   private lastLimitSwitch: { key: string; at: number } | undefined;
   /** Claude CLIのsandboxを使えるかの確認（Issue #1541）。拡張ホストの間、結果を共有する。 */
@@ -594,6 +643,10 @@ export class ClaudeChatViewManager
    * 相談相手のセッションは開いたままにしておき、会話（パネル）が閉じるまで持つ。
    */
   private readonly advisorStore = new AdvisorSessionStore();
+
+  /** 場面の台帳（Issue #2065）。会話ごとに、同じ会話の再考の間だけ引き継ぐ。 */
+  private readonly ledgerStore = new LedgerStore();
+
   /**
    * 承認待ちの下書き（Issue #929 Handoff）。会話ごとに最新の1件だけを持つ。
    *
@@ -631,21 +684,6 @@ export class ClaudeChatViewManager
      */
     private readonly isTaskManagedThread: (sessionId: string) => boolean = () => false,
     /**
-     * メモリ追記（issue #6/#144）専用の読み取り口。ENOENT以外の例外は投げる・
-     * シンボリックリンクの実体パスを解決する、の2つを共有の `FileSystemPort` から
-     * 切り出したもの（`src/session/ports.ts` を参照）。既定はNode実装。
-     */
-    private readonly memoryFs: MemoryFileSystemPort = nodeMemoryFileSystem,
-    /**
-     * 直前に選んだメモリ追記先を覚えておく口（issue #144）。`vscode.Memento` と構造的に
-     * 一致するため `context.workspaceState` をそのまま渡せる（`extension.ts` 参照）。
-     * 既定は何も覚えない no-op（テスト等でワークスペースを想定しない呼び出しでも壊れない）。
-     */
-    private readonly memoryMemento: MemoryModeMemento = {
-      get: (_key, defaultValue) => defaultValue,
-      update: () => Promise.resolve(),
-    },
-    /**
      * `claude` プロセスの起こし方（統合テストの差し替え口。Issue #186）。セッションを
      * 作るたびに読み直すので、`activate()` が終わった後からでも差し替えられる。
      * `undefined` を返す間は `ClaudeStreamSession` の既定（実際に起動する）が使われる。
@@ -665,11 +703,19 @@ export class ClaudeChatViewManager
     private readonly autoName?: SessionAutoNameHost,
     /** アカウントの自動切り替え（Issue #1924）。渡さなければ使用率を記録せず、切り替えもしない。 */
     private readonly accounts?: AccountAutoSwitcher,
+    /** `/usage`から5時間枠と週次を読めたときの受け取り先（Issue #2174。Mission Controlの見込み用）。 */
+    onUsageSlots?: (probed: ProbedSlots | undefined) => void,
   ) {
     super(pinnedSessions, 'claude');
     this.catalog = new CommandCatalog(fs);
     // 取得結果をウィンドウ間で共有し、`claude`の起動を全ウィンドウで間引く（Issue #1809）
-    this.usageProbe = new ClaudeUsageProbe(claudePath, log, globalStorageDir, accounts);
+    this.usageProbe = new ClaudeUsageProbe(
+      claudePath,
+      log,
+      globalStorageDir,
+      accounts,
+      onUsageSlots,
+    );
     if (accounts !== undefined) {
       this.startAccountPolling();
     }
@@ -733,7 +779,14 @@ export class ClaudeChatViewManager
     if (entry.taskManaged) {
       return;
     }
-    const registration = this.sessionMessaging?.register('claude');
+    const registration = this.sessionMessaging?.register('claude', {
+      // チャットの発話からWebGPTとの議論を始めるツール（Issue #2051）
+      webGptDiscussion: (args) => this.webGptToolRequests.request(entry, args),
+      // エージェントが自分のmodel/effortを変えるツール（Issue #2053）
+      sessionProfile: (args) => this.setSessionProfileFromTool(entry, args),
+      // ロードマップのオーケストレータモードを起動するツール（Issue #2070）
+      startRoadmapOrchestrator: (args) => this.startRoadmapOrchestratorFromTool(entry, args),
+    });
     if (registration === undefined) {
       return;
     }
@@ -811,17 +864,20 @@ export class ClaudeChatViewManager
     };
   }
 
-  private async persistModelSettings(entry: ClaudePanel, sessionId?: string): Promise<void> {
+  /** 保存に失敗したときだけ`false`を返す（保存先が無く保存しなかった場合は`true`）。 */
+  private async persistModelSettings(entry: ClaudePanel, sessionId?: string): Promise<boolean> {
     const id = sessionId ?? entry.session.threadId;
     if (id === undefined || this.sessionSettings === undefined) {
-      return;
+      return true;
     }
     try {
       await this.sessionSettings.set('claude', id, entry.modelSettings);
+      return true;
     } catch (e) {
       this.log.warn(
         `セッションのモデル設定を保存できませんでした: ${e instanceof Error ? e.message : e}`,
       );
+      return false;
     }
   }
 
@@ -874,16 +930,81 @@ export class ClaudeChatViewManager
     if (entry.disposed || entry.panel === undefined) {
       return;
     }
+    const commands = await this.listSlashCommands(entry);
+    void entry.panel.webview.postMessage({ type: 'commands', commands });
+  }
+
+  /** `/`の候補。タブの入力欄とMission Controlの補完（Issue #2158）が同じ一覧を使う。 */
+  protected override async listSlashCommands(entry: ClaudePanel): Promise<SlashCommand[]> {
     const fromCli = entry.session.commands;
     const commands =
       fromCli.length > 0
         ? fromCli
         : (this.commands ??= await this.catalog.forClaude(this.claudeHome, workspaceFolderPaths()));
     // `/btw`（脇道の質問、issue #334）はCLIの一覧に無いため、拡張機能側で先頭へ足す
-    void entry.panel.webview.postMessage({
-      type: 'commands',
-      commands: withPseudoCommands(CLAUDE_PSEUDO_COMMANDS, commands),
-    });
+    return withPseudoCommands(CLAUDE_PSEUDO_COMMANDS, commands);
+  }
+
+  /** `@`の候補（Issue #2158）。 */
+  protected override async listFileCandidates(
+    entry: ClaudePanel,
+    query: string,
+  ): Promise<string[]> {
+    return (await fileMentionCandidates(this.mentions, entry.cwd, query)) ?? [];
+  }
+
+  /**
+   * Mission Controlの設定欄（Issue #2159）。承認レベルはこのタブだけの値（Issue #1888）。
+   * fast modeはCLIが`initialize`で状態を返したときだけ出す（`state.fastMode`が無ければ使えない）。
+   */
+  protected override sessionSettingsOf(entry: ClaudePanel): SessionSettingsDetail {
+    const state = entry.session.getState();
+    return {
+      model: entry.modelSettings.model,
+      effort: entry.modelSettings.effort,
+      models: buildSettingModelOptions(
+        this.settings.claudeSnapshot().models,
+        entry.modelSettings.model,
+        CLAUDE_EFFORTS,
+      ),
+      approvalLevel: this.buildSettingsPayload(entry).approvalLevel,
+      approvalScope: 'session',
+      planMode: state.planMode,
+      fastMode: state.fastMode,
+      editable: !entry.inputLock,
+    };
+  }
+
+  /**
+   * タブの設定行（`config` / `approvalLevel` / `planMode` / `fastMode`の分岐）と同じ経路で
+   * 変える（Issue #2159）。
+   */
+  protected override async applySessionSetting(
+    entry: ClaudePanel,
+    change: SessionSettingChange,
+  ): Promise<string | undefined> {
+    switch (change.setting) {
+      case 'model':
+        await this.applyConfig(entry, 'model', change.value);
+        return undefined;
+      case 'effort':
+        await this.applyConfig(entry, 'reasoningEffort', change.value);
+        return undefined;
+      case 'approvalLevel':
+        await this.applyApprovalLevel(entry, change.value);
+        // タブの値は同意の取り消し・作業中で全承認へ上げられなかったときに元へ戻る
+        return entry.permissionMode === claudePermissionModeForLevel(change.value)
+          ? undefined
+          : '承認レベルは変わりませんでした（取り消された、またはタスクの設定・作業中で変えられません）';
+      case 'planMode':
+        this.noteUserAction(entry);
+        entry.session.setPlanMode(change.value, entry.permissionMode);
+        return undefined;
+      case 'fastMode':
+        this.noteUserAction(entry);
+        entry.session.setFastMode(change.value);
+        return undefined;
+    }
   }
 
   /**
@@ -920,6 +1041,8 @@ export class ClaudeChatViewManager
         agent: undefined,
       },
       profile: '',
+      // CLIが通知した実測値（Issue #2016）。選択欄は設定値のまま、入力欄の下に並べて出す
+      observed: observedModelView(entry.modelSettings, entry.session.getState().observedModel),
     };
   }
 
@@ -1060,7 +1183,7 @@ export class ClaudeChatViewManager
    * `attachPanel` が `panel.webview.onDidReceiveMessage` に登録しているのと同じ
    * `handleMessage` を直接呼ぶ入口をここへ用意する。本番のwebviewが送るメッセージは
    * 形が同じであれば区別なく処理されるため、実際に通る経路（承認の決定・発言の送信・
-   * 設定変更・巻き戻し・行頭 `!`/`#` の処理など）はここを通しても変わらない。呼び出し口は
+   * 設定変更・巻き戻し・行頭 `!` の処理など）はここを通しても変わらない。呼び出し口は
    * `ChatTestApi.simulateClaudeWebviewMessage`（`extension.ts`）で、
    * `AGENT_SESSIONS_INTEGRATION_TEST=1` のときだけ公開される。
    *
@@ -1129,9 +1252,16 @@ export class ClaudeChatViewManager
     return sessionId;
   }
 
-  /** 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。 */
-  async openNewWithPrompt(cwd: string, prompt: string): Promise<string | undefined> {
-    const sessionId = await this.openNew(cwd);
+  /**
+   * 指定cwdで会話を開き、開始指示を1件だけ送る。外部UIの明示操作から使う。
+   * `config`はMission Controlの起動オプション（Issue #2149の2）。`openNew`へそのまま渡す。
+   */
+  async openNewWithPrompt(
+    cwd: string,
+    prompt: string,
+    config?: ClaudeConfig,
+  ): Promise<string | undefined> {
+    const sessionId = await this.openNew(cwd, config);
     if (sessionId === undefined) return undefined;
     const entry = this.panels.get(sessionId);
     if (entry === undefined) return undefined;
@@ -1199,7 +1329,14 @@ export class ClaudeChatViewManager
     if (manual && this.rejectIfInputLocked(entry)) {
       return;
     }
+    if (manual) {
+      // 自動の契機は呼出し元がログへ出す。手動は自動承認のログだけでは自動と見分けられない
+      entry.trace.info(describeDecision(trigger));
+    }
     if (!manual && this.autoHandoffHeld(entry, entry.session.getState())) {
+      return;
+    }
+    if (!manual && this.offerHandoffInstead(entry, trigger)) {
       return;
     }
     const sessionId = [...this.panels.entries()].find(([, v]) => v === entry)?.[0];
@@ -1246,12 +1383,45 @@ export class ClaudeChatViewManager
   }
 
   /**
+   * 区切りの契機で、新セッションを開かず提案だけで止める（Issue #1947）。止めたら`true`。
+   *
+   * 提案はターンごとに1回だけ出す。
+   */
+  private offerHandoffInstead(entry: ClaudePanel, trigger: HandoffTrigger): boolean {
+    const state = entry.session.getState();
+    if (
+      !offersInsteadOfAutoHandoff(
+        trigger,
+        state.context?.remainingPercent,
+        readAutoHandoffSoftThresholdPercent(),
+        readAutoHandoffBoundaryAction(),
+      )
+    ) {
+      return false;
+    }
+    // 同じターンでは提案を出し直さない。止めるのはこの契機だけで、残量の閾値・自動圧縮は止めない
+    if (entry.autoHandoffOfferedTurnSeq === state.turnCompletionSeq) {
+      entry.trace.info(`区切りの契機（${trigger.kind}）は提案済みのため何もしない`);
+      return true;
+    }
+    entry.autoHandoffOfferedTurnSeq = state.turnCompletionSeq;
+    entry.trace.info(`区切りの契機（${trigger.kind}）のため引き継がず提案で止めた`);
+    entry.session.noteLocalEvent(
+      `autoHandoffOffer:${Date.now()}`,
+      '区切りです。新しいセッションで続ける場合は引き継ぎボタンを押してください（区切りでは自動で引き継ぎません）',
+    );
+    this.log.info(`区切りの契機（${trigger.kind}）のため、自動引き継ぎを始めず提案で止めました`);
+    return true;
+  }
+
+  /**
    * 自動引き継ぎをもう一度起こせるようにする（トグルのOFF→ON、タスク用セッションの
    * `rearmAutoHandoff`）。人が求めた操作なので、失敗したターンの目印も消す。
    */
   private rearmAutoHandoff(entry: ClaudePanel): void {
     entry.autoHandoffStarted = false;
     entry.autoHandoffFailedTurnSeq = undefined;
+    entry.autoHandoffOfferedTurnSeq = undefined;
   }
 
   /**
@@ -1265,6 +1435,16 @@ export class ClaudeChatViewManager
 
   private readonly webGptPreparing = new Set<ClaudePanel>();
 
+  /** エージェントのツール呼び出しから受けた議論の依頼（Issue #2051）。 */
+  private readonly webGptToolRequests = new WebGptToolRequests<ClaudePanel>(
+    chatPanelToolRequestHost<ClaudePanel>({
+      isListed: (entry) => [...this.panels.values()].includes(entry),
+      preparing: this.webGptPreparing,
+      inputLockedMessage: INPUT_LOCKED_MESSAGE,
+      start: (entry, request) => this.discussWithWebGptIn(entry, request),
+    }),
+  );
+
   /** 三点メニューからはentryを固定し、入力中に別タブへ移っても送り先を変えない。 */
   async discussWithWebGpt(): Promise<void> {
     const entry = this.active;
@@ -1275,8 +1455,23 @@ export class ClaudeChatViewManager
     await this.discussWithWebGptIn(entry);
   }
 
-  private async discussWithWebGptIn(entry: ClaudePanel): Promise<void> {
+  /**
+   * @param prepared エージェントの依頼（Issue #2051）で利用者が確認済みの入力。渡したときは
+   *   入力欄を開き直さない
+   * @param prepareOptions 入力欄へ渡す設定。質問ファイルの本文を議題にするとき（Issue #2057）に使う
+   */
+  private async discussWithWebGptIn(
+    entry: ClaudePanel,
+    prepared?: PreparedWebGptDiscussion,
+    prepareOptions?: PrepareWebGptDiscussionOptions,
+  ): Promise<void> {
     if (this.webGptPreparing.has(entry) || this.rejectIfInputLocked(entry)) return;
+    if (prepared === undefined && this.webGptToolRequests.has(entry)) {
+      void vscode.window.showInformationMessage(
+        'この会話ではエージェントの依頼によるWebGPTとの議論が確認中か開始待ちです',
+      );
+      return;
+    }
     this.webGptPreparing.add(entry);
     const assertReady = () => {
       const state = entry.session.getState();
@@ -1293,7 +1488,7 @@ export class ClaudeChatViewManager
     };
     try {
       assertReady();
-      const request = await prepareWebGptDiscussion(true);
+      const request = prepared ?? (await prepareWebGptDiscussion(true, prepareOptions));
       if (request === undefined) return;
       assertReady();
       await vscode.window.withProgress(
@@ -1461,7 +1656,19 @@ export class ClaudeChatViewManager
     const pointerHead = buildHandoffPrompt(pointerPath);
     // replayの本文を載せずポインタだけを指す本文にも系列の在処を付け、次の世代で系列を切らない
     const pointerText = buildHandoffPrompt(pointerPath, replay?.marker);
-    let firstText = chooseHandoffPrompt(pointerPath, handoffSource, replay?.text);
+    // 節目の契機では、次のコマンドだけを渡す（Issue #1967）
+    const milestonePrompt = buildMilestonePrompt({
+      trigger,
+      cwd: entry.cwd,
+      createdReferences: extractCreatedReferences(state.items),
+      ...(choice.settings.model === entry.modelSettings.model &&
+      choice.settings.effort === entry.modelSettings.effort
+        ? {}
+        : { profileChange: choice.settings }),
+    });
+    const chosen = chooseHandoffPrompt(pointerPath, handoffSource, replay?.text, milestonePrompt);
+    // handoffプロンプトの本文だけを渡す試行には、事実節・受領確認の指示を付けない（Issue #1950）
+    let firstText = chosen.text;
     const savedPromptPath = await writeHandoffPromptFile(
       this.globalStorageDir,
       sessionId,
@@ -1521,126 +1728,155 @@ export class ClaudeChatViewManager
     const handoffId =
       (handoffSource === undefined ? undefined : parseHandoffPrompt(handoffSource)?.handoffId) ??
       newHandoffId(createdAt);
-    const factsSection = buildHandoffFactsSection(
-      await resolveHandoffGitFacts(entry.cwd, gitBranch),
-      extractCreatedReferences(state.items),
-    );
+    // 事実節のgit呼出は、本文だけでない試行に初めて要るときまで遅らせる（Issue #1952）
+    let factsSection: string | undefined;
     for (const attemptText of handoffAttemptTexts(firstText, pointerText)) {
       // ポインタだけを指す本文へ戻した試行にはreplayが無いので、確認一覧も求めない
       const asksChecklist = attemptText !== pointerText && (replay?.userCount ?? 0) > 0;
-      const promptText = withHandoffAcceptance(
-        `${attemptText}\n\n${factsSection}`,
-        handoffId,
-        asksChecklist,
-      );
-      const newSessionId = await this.openNew(
-        entry.cwd,
-        entry.taskConfig,
-        choice.settings,
-        preserveFocus,
-        targetViewColumn,
-        // 承認方法は引き継ぎ元のタブの値を持ち越す（Issue #1888）
-        entry.permissionMode,
-      );
-      if (newSessionId === undefined) {
-        this.log.warn('引き継ぎ先セッションを開けませんでした');
-        continue;
-      }
-      const newEntry = this.panels.get(newSessionId);
-      if (newEntry === undefined) {
-        this.log.warn(`引き継ぎ先セッション(${newSessionId})がパネル一覧に見つかりませんでした`);
-        continue;
-      }
-      // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す。持ち越さないと、自動で引き継いだ
-      // 先が毎回OFFになり、次の逼迫を人が見張る羽目になる（Issue #1079の目的と逆）
-      newEntry.session.setAutoHandoff(state.autoHandoff);
-      // 自動承認のON/OFFも同じ理由で持ち越す（Issue #1350）
-      newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
-      // タブ単位のReflexの上書き（Issue #1505）も引き継ぎ先へ持ち越す。画面の表示は開いた
-      // 時点のグローバル設定で描かれているため、上書きした値で描き直す
-      newEntry.reflexOverride = entry.reflexOverride;
-      void newEntry.panel?.webview.postMessage({
-        type: 'reflex',
-        enabled: this.reflexEnabledFor(newEntry),
-      });
-      // 持ち越したら引き継ぎ元では止める。旧タブを残したとき、新旧2つのセッションが同じ作業を
-      // 自動で進めるのを防ぐ。`state`は確認ダイアログの前に取った値のため、待っている間の
-      // トグル操作を拾えるよう`autoReply`は読み直した値を使う
-      newEntry.session.setAutoReply(autoReply);
-      // 引き継ぎ先へ名前を付ける（Issue #1145）。付けないと引き継ぎ先の表示名が初回
-      // プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けがつかなくなる。
-      // `renameActive`と同じく保存を先にし、CLIへは副送信にする。名前を付けられなくても
-      // 引き継ぎ自体は成立するので、失敗は記録に留める。
-      //
-      // タブ名の本体はhandoffプロンプトのIssue・MR番号と `作業:` 行から毎回作り直し、
-      // 世代の印を進める（Issue #1410）。取れなければ引き継ぎ元の名前を継ぐ
-      const previousName = deriveHandoffBaseName(state, entry.pinnedName);
-      const handoffBlock =
-        handoffSource === undefined ? undefined : parseHandoffPrompt(handoffSource);
-      const handoffPrompt = handoffBlock?.body;
-      if (handoffBlock !== undefined) {
-        // 受領確認（Issue #1751）で引き継ぎ先が返す値と照らすため、記録に残す
-        entry.trace.info(
-          `handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`,
+      const isBareAttempt = isBareHandoffAttempt(chosen, attemptText);
+      if (!isBareAttempt) {
+        factsSection ??= buildHandoffFactsSection(
+          await resolveHandoffGitFacts(entry.cwd, gitBranch),
+          extractCreatedReferences(state.items),
         );
       }
-      const handoffName = buildHandoffSessionName({
-        ...(previousName === undefined ? {} : { previousName }),
-        isPinned: entry.pinnedName !== undefined && entry.pinnedName.trim() !== '',
-        ...(handoffPrompt === undefined ? {} : { handoffPrompt }),
-        ...(gitBranch === undefined ? {} : { gitBranch }),
-      });
-      try {
-        await this.store.rename(newSessionId, handoffName);
-        newEntry.session.setName(handoffName);
-      } catch (e) {
-        this.log.warn(
-          `引き継ぎ先の名前を設定できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      const promptText = isBareAttempt
+        ? attemptText
+        : withHandoffAcceptance(`${attemptText}\n\n${factsSection}`, handoffId, asksChecklist);
+      // 開いて初回プロンプトを送るまで。model/effortがズレたときの作り直し（Issue #2016）でも
+      // 同じ内容をもう一度送るため、まとめておく。開けない・送れないときは`undefined`
+      // 作業履歴の親子（Issue #2175）に使う、開けた引き継ぎ先のid
+      let launchedSessionId: string | undefined;
+      const launch = async (): Promise<HandoffDestination<ClaudePanel> | undefined> => {
+        const newSessionId = await this.openNew(
+          entry.cwd,
+          entry.taskConfig,
+          choice.settings,
+          preserveFocus,
+          targetViewColumn,
+          // 承認方法は引き継ぎ元のタブの値を持ち越す（Issue #1888）
+          entry.permissionMode,
         );
-      }
-      // 送信より前に初回ターンの監視を張る（Issue #1162）。`dispatch` は今のところ同期だが、
-      // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく。
-      // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
-      const giveUp = new AbortController();
-      // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）。
-      // 系列のreplay（Issue #1896）はポインタを指す文の後ろへ足すので、前方一致で見る
-      const sentPointerPath = attemptText.startsWith(pointerHead) ? pointerPath : undefined;
-      // 受領行もpointerの読み込みも無いまま決着しそうなときは、Reflexに受領を判定させる（Issue #1840）
-      const firstResponse = waitForDestinationResponse(
-        newEntry,
-        undefined,
-        giveUp.signal,
-        handoffId,
-        sentPointerPath,
-        createHandoffAcceptanceJudge({
-          enabled: () => this.reflexEnabledFor(newEntry),
-          threshold: readHandoffAcceptanceThreshold,
-          deps: reflexJudgeDeps(
-            'claude',
-            this.claudePath(),
-            (message) => entry.trace.warn(message),
-            giveUp.signal,
-          ),
-          sentPrompt: promptText,
-          pointerPath: sentPointerPath,
-          destinationDisposed: () => newEntry.disposed,
-          trace: entry.trace,
-        }),
-      );
-      try {
-        // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
-        this.dispatch(newEntry, promptText);
-      } catch (e) {
-        // 標準入力への書き込みで投げるため、初回プロンプトは届いていない。届いていない
-        // 新タブは閉じて次の試行へ進む（Issue #1750）
-        giveUp.abort();
-        this.log.warn(
-          `引き継ぎ先へ初回プロンプトを送れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+        if (newSessionId === undefined) {
+          this.log.warn('引き継ぎ先セッションを開けませんでした');
+          return undefined;
+        }
+        const newEntry = this.panels.get(newSessionId);
+        if (newEntry === undefined) {
+          this.log.warn(`引き継ぎ先セッション(${newSessionId})がパネル一覧に見つかりませんでした`);
+          return undefined;
+        }
+        // 起動前の検証（Issue #2016）。argvへ載せた値が指定と違えば拡張機能側の取り違えで、
+        // 作り直しても同じ値になる。送ったうえで通知だけする
+        const launchMismatch = findLaunchMismatch(
+          choice.settings,
+          newEntry.session.getLaunchedModel(),
         );
-        this.teardown(newEntry);
+        // 自動引き継ぎのON/OFFは引き継ぎ先へ持ち越す。持ち越さないと、自動で引き継いだ
+        // 先が毎回OFFになり、次の逼迫を人が見張る羽目になる（Issue #1079の目的と逆）
+        newEntry.session.setAutoHandoff(state.autoHandoff);
+        // 自動承認のON/OFFも同じ理由で持ち越す（Issue #1350）
+        newEntry.session.setAutoHandoffAutoApprove(state.autoHandoffAutoApprove);
+        // タブ単位のReflexの上書き（Issue #1505）も引き継ぎ先へ持ち越す。画面の表示は開いた
+        // 時点のグローバル設定で描かれているため、上書きした値で描き直す
+        newEntry.reflexOverride = entry.reflexOverride;
+        void newEntry.panel?.webview.postMessage({
+          type: 'reflex',
+          enabled: this.reflexEnabledFor(newEntry),
+        });
+        // 持ち越したら引き継ぎ元では止める。旧タブを残したとき、新旧2つのセッションが同じ作業を
+        // 自動で進めるのを防ぐ。`state`は確認ダイアログの前に取った値のため、待っている間の
+        // トグル操作を拾えるよう`autoReply`は読み直した値を使う
+        newEntry.session.setAutoReply(autoReply);
+        // 引き継ぎ先へ名前を付ける（Issue #1145）。付けないと引き継ぎ先の表示名が初回
+        // プロンプトの「前セッションの続き。…」になり、履歴もタブも見分けがつかなくなる。
+        // `renameActive`と同じく保存を先にし、CLIへは副送信にする。名前を付けられなくても
+        // 引き継ぎ自体は成立するので、失敗は記録に留める。
+        //
+        // タブ名の本体はhandoffプロンプトのIssue・MR番号と `作業:` 行から毎回作り直し、
+        // 世代の印を進める（Issue #1410）。取れなければ引き継ぎ元の名前を継ぐ
+        const previousName = deriveHandoffBaseName(state, entry.pinnedName);
+        const handoffBlock =
+          handoffSource === undefined ? undefined : parseHandoffPrompt(handoffSource);
+        const handoffPrompt = handoffBlock?.body;
+        if (handoffBlock !== undefined) {
+          // 受領確認（Issue #1751）で引き継ぎ先が返す値と照らすため、記録に残す
+          entry.trace.info(
+            `handoffプロンプトを本文として渡す（handoff_id: ${handoffBlock.handoffId}）`,
+          );
+        }
+        const handoffName = buildHandoffSessionName({
+          ...(previousName === undefined ? {} : { previousName }),
+          isPinned: entry.pinnedName !== undefined && entry.pinnedName.trim() !== '',
+          ...(handoffPrompt === undefined ? {} : { handoffPrompt }),
+          ...(gitBranch === undefined ? {} : { gitBranch }),
+        });
+        try {
+          await this.store.rename(newSessionId, handoffName);
+          newEntry.session.setName(handoffName);
+        } catch (e) {
+          this.log.warn(
+            `引き継ぎ先の名前を設定できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+        // 送信より前に初回ターンの監視を張る（Issue #1162）。`dispatch` は今のところ同期だが、
+        // 非同期になった途端にCodex側と同じ取りこぼしが起きるため、順序で先に潰しておく。
+        // 送信が失敗したときに監視だけが残らないよう、その場で打ち切るのもCodex側と同じ
+        const giveUp = new AbortController();
+        // pointerファイルを指して渡したときは、それを読んだことも受領とみなす（Issue #1797）。
+        // 系列のreplay（Issue #1896）はポインタを指す文の後ろへ足すので、前方一致で見る
+        const sentPointerPath = attemptText.startsWith(pointerHead) ? pointerPath : undefined;
+        // 受領行もpointerの読み込みも無いまま決着しそうなときは、Reflexに受領を判定させる（Issue #1840）
+        const firstResponse = waitForDestinationResponse(
+          newEntry,
+          undefined,
+          giveUp.signal,
+          // 受領確認を指示していない本文だけの試行では、受領行を待たない
+          isBareAttempt ? undefined : handoffId,
+          sentPointerPath,
+          // 受領行を待たない本文だけの試行では判定も使わない
+          isBareAttempt
+            ? undefined
+            : createHandoffAcceptanceJudge({
+                enabled: () => this.reflexEnabledFor(newEntry),
+                threshold: readHandoffAcceptanceThreshold,
+                deps: reflexJudgeDeps(
+                  'claude',
+                  this.claudePath(),
+                  (message) => entry.trace.warn(message),
+                  giveUp.signal,
+                ),
+                sentPrompt: promptText,
+                pointerPath: sentPointerPath,
+                destinationDisposed: () => newEntry.disposed,
+                trace: entry.trace,
+              }),
+        );
+        try {
+          // 引き継ぎ元がhandoffプロンプトを出していれば、その本文だけを渡す（Issue #1354）
+          this.dispatch(newEntry, promptText);
+        } catch (e) {
+          // 標準入力への書き込みで投げるため、初回プロンプトは届いていない。届いていない
+          // 新タブは閉じて次の試行へ進む（Issue #1750）
+          giveUp.abort();
+          this.log.warn(
+            `引き継ぎ先へ初回プロンプトを送れませんでした: ${e instanceof Error ? e.message : String(e)}`,
+          );
+          this.teardown(newEntry);
+          return undefined;
+        }
+        launchedSessionId = newSessionId;
+        return { entry: newEntry, firstResponse, abandon: () => giveUp.abort(), launchMismatch };
+      };
+      const launched = await launch();
+      if (launched === undefined) {
         continue;
       }
       await recordHandoff();
+      // 作業履歴へ親子を残す（Issue #2175）
+      if (launchedSessionId !== undefined) {
+        reportWorkHistoryHandoff('claude', sessionId, launchedSessionId);
+      }
       if (autoReply) {
         this.stopAutoReply(entry, 'handedOff');
       }
@@ -1650,9 +1886,19 @@ export class ClaudeChatViewManager
         this.log.info('引き継ぎ済みのため、引き継ぎ元が自分で始めたターンを止めます');
         entry.session.interrupt();
       }
-      void this.confirmStopAfterFirstResponse(
+      // 旧セッションを止める前に、引き継ぎ先のmodel/effortを確かめる（Issue #2016）
+      void this.settleThenConfirmStop(
         entry,
-        firstResponse,
+        launched,
+        choice.settings,
+        // 作り直した引き継ぎ先も親子として残す（Issue #2175）
+        async () => {
+          const relaunched = await launch();
+          if (relaunched !== undefined && launchedSessionId !== undefined) {
+            reportWorkHistoryHandoff('claude', sessionId, launchedSessionId);
+          }
+          return relaunched;
+        },
         trigger.kind === 'assistantSuggested' && trigger.keepOldTab === true,
       );
       return 'started';
@@ -1664,6 +1910,70 @@ export class ClaudeChatViewManager
       void vscode.window.showErrorMessage(message);
     }
     return 'failed';
+  }
+
+  /**
+   * 引き継ぎ先のmodel/effortを確かめ、ズレていれば作り直してから旧セッションの停止へ進む
+   * （Issue #2016）。作り直しで開けなかったときは、旧セッションを止めずに残す。
+   */
+  private async settleThenConfirmStop(
+    oldEntry: ClaudePanel,
+    first: HandoffDestination<ClaudePanel>,
+    expected: SessionModelSettings,
+    relaunch: () => Promise<HandoffDestination<ClaudePanel> | undefined>,
+    keepForReading: boolean,
+  ): Promise<void> {
+    let settled: HandoffDestination<ClaudePanel> | undefined;
+    try {
+      settled = await settleHandoffDestination(first, {
+        expected,
+        readLogged: async (panel) => {
+          const sessionId = panel.session.getState().threadId;
+          const filePath =
+            sessionId === undefined ? undefined : await this.store.resolveTranscriptPath(sessionId);
+          const observed = filePath === undefined ? undefined : await readTranscriptModel(filePath);
+          if (observed === undefined) {
+            this.log.info(
+              '引き継ぎ先のtranscriptからmodel/effortを読めなかったため、事後確認を省きます',
+            );
+          }
+          return observed;
+        },
+        discard: (destination, mismatch) => {
+          const message = describeModelRebuild(
+            destination.entry.session.getState().threadId,
+            mismatch,
+          );
+          this.log.warn(message);
+          oldEntry.trace.warn(message);
+          destination.abandon();
+          destination.entry.session.interrupt();
+          this.teardown(destination.entry);
+        },
+        relaunch: () => relaunch(),
+        giveUp: (mismatch, reason) => {
+          const message = describeModelGiveUp(mismatch, reason);
+          this.log.warn(message);
+          oldEntry.trace.warn(message);
+          void vscode.window.showWarningMessage(message);
+        },
+      });
+    } catch (e) {
+      // 作り直しの途中（開く・送る）で投げた。引き継ぎ先が無いものとして扱う
+      this.log.warn(
+        `引き継ぎ先の作り直しに失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      settled = undefined;
+    }
+    if (settled === undefined) {
+      // 作り直しを開けなかった。引き継ぎ先が無いので旧セッションを使い続けられるようにする
+      oldEntry.handedOff = undefined;
+      const message = '引き継ぎ先を作り直せませんでした。旧タブはそのまま残ります';
+      this.log.warn(message);
+      void vscode.window.showErrorMessage(message);
+      return;
+    }
+    await this.confirmStopAfterFirstResponse(oldEntry, settled.firstResponse, keepForReading);
   }
 
   /**
@@ -1737,7 +2047,11 @@ export class ClaudeChatViewManager
     );
     entry.lastCompactionCount = lastCompactionCount;
 
-    if (entry.disposed || entry.panel === undefined || entry.autoHandoffDisabled) {
+    if (entry.disposed || entry.panel === undefined) {
+      return;
+    }
+    if (entry.autoHandoffDisabled) {
+      this.markBackgroundWait(entry, undefined);
       return;
     }
     const trigger = decideAutoHandoff({
@@ -1751,11 +2065,61 @@ export class ClaudeChatViewManager
       thresholdPercent: readAutoHandoffThresholdPercent(),
     });
     if (trigger !== undefined) {
+      this.markBackgroundWait(entry, undefined);
+      entry.trace.info(describeDecision(trigger));
       void this.requestHandoff(entry, trigger);
       return;
     }
     void this.maybeAutoHandoffAtSafeBoundary(entry, state);
   }
+
+  /**
+   * 自動引き継ぎがバックグラウンド処理の終了だけを待っているか（Issue #2004）を画面とログへ反映する。
+   *
+   * `gateDetail`は待ちに入るときの前段の状態（`describeGate`）で、`undefined`なら待ちを解く。
+   * 値が変わったときだけ`ChatState`を更新し、ログを1行出す。`onSessionChange`から毎回通るため、
+   * 同じ値のまま呼ばれても何もしない。
+   *
+   * `ChatState`の更新は同期で`onSessionChange`を呼び直すため、判定の途中で入れると再入する。
+   * 判定を終えてから反映するようmicrotaskへ回し、反映前の値だけを`backgroundWaitPending`に持つ。
+   * 正本は`ChatState`に置く（状態が作り直されて値が消えても、次の判定で出し直せるように）。
+   */
+  private markBackgroundWait(entry: ClaudePanel, gateDetail: string | undefined): void {
+    const waiting = gateDetail !== undefined;
+    const current =
+      this.backgroundWaitPending.get(entry) ??
+      entry.session.getState().autoHandoffBackgroundWait ??
+      false;
+    if (current === waiting) {
+      return;
+    }
+    entry.trace.info(
+      waiting
+        ? `gate blocked (バックグラウンド処理の終了待ち: ${gateDetail})`
+        : 'バックグラウンド処理の終了待ちが解けた',
+    );
+    this.backgroundWaitPending.set(entry, waiting);
+    queueMicrotask(() => {
+      // 同じtickで逆の値が後から来ていれば、そちらのmicrotaskに任せる
+      if (this.backgroundWaitPending.get(entry) !== waiting) {
+        return;
+      }
+      this.backgroundWaitPending.delete(entry);
+      if (entry.disposed) {
+        return;
+      }
+      try {
+        entry.session.setAutoHandoffBackgroundWait(waiting);
+      } catch (error) {
+        entry.trace.warn(
+          `終了待ちの表示を更新できなかった: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    });
+  }
+
+  /** 終了待ちの表示のうち、`ChatState`へまだ反映していない値（Issue #2004）。 */
+  private readonly backgroundWaitPending = new WeakMap<ClaudePanel, boolean>();
 
   /** タブ名の自動付け直し（Issue #1426）の実行役。1セッション1本に限るためパネルごとに持つ。 */
   private readonly autoNamers = new WeakMap<ClaudePanel, SerialRerun>();
@@ -2300,17 +2664,29 @@ export class ClaudeChatViewManager
     entry: ClaudePanel,
     state: ChatState,
   ): Promise<void> {
-    if (!state.autoHandoff || this.autoHandoffHeld(entry, state) || entry.safeBoundaryProbing) {
+    if (!state.autoHandoff || this.autoHandoffHeld(entry, state)) {
+      this.markBackgroundWait(entry, undefined);
+      return;
+    }
+    if (entry.safeBoundaryProbing) {
       return;
     }
     const softThresholdPercent = readAutoHandoffSoftThresholdPercent();
     const onProfileChange = readAutoHandoffOnProfileChange();
     const onAssistantSuggestion = readAutoHandoffOnAssistantSuggestion();
+    const onHandoffPrompt = readAutoHandoffOnHandoffPrompt();
     const onMilestone = readAutoHandoffOnMilestone();
     const remainingPercent = state.context?.remainingPercent;
     const withinSoft = remainingPercent !== undefined && remainingPercent <= softThresholdPercent;
-    if (!withinSoft && !onProfileChange && !onAssistantSuggestion && !onMilestone) {
+    if (
+      !withinSoft &&
+      !onProfileChange &&
+      !onAssistantSuggestion &&
+      !onHandoffPrompt &&
+      !onMilestone
+    ) {
       // 区切り待ちの契機が全部OFF。分類器を起動しても使い道が無い
+      this.markBackgroundWait(entry, undefined);
       entry.trace.info('区切り待ちの契機が全部OFFのため分類器を起動しない');
       return;
     }
@@ -2335,11 +2711,17 @@ export class ClaudeChatViewManager
       // 引き継ぎ元が再び動くため、ここで引き継ぐと両方のセッションが同じ作業を進める
       backgroundRunning: state.backgroundTerminals.length > 0,
     };
+    // 止めている理由がバックグラウンド処理の実行中だけなら、終わるまで待っていると示す
+    // （Issue #2004）。ログは待ちに入ったときと解けたときだけ出す
+    const waitingOnBackground = isWaitingOnlyForBackground(gate, reflex.enabled);
+    this.markBackgroundWait(entry, waitingOnBackground ? describeGate(gate) : undefined);
     if (!passesSafeBoundaryGate(gate)) {
       // Reflexで判定するときは、質問で終わったターンも後段へ回す。引き継ぐかどうかを尋ねる
       // 質問は返答待ちとして扱わず、それ以外の質問は返答待ちとして止める（Issue #1707）
       if (!reflex.enabled || !passesSafeBoundaryGate({ ...gate, awaitingUserAnswer: false })) {
-        entry.trace.info(`gate blocked (${describeGate(gate)})`);
+        if (!waitingOnBackground) {
+          entry.trace.info(`gate blocked (${describeGate(gate)})`);
+        }
         return;
       }
       entry.trace.info('質問で終わったターンのため、決定論の契機を飛ばしてReflexで判定する');
@@ -2348,9 +2730,10 @@ export class ClaudeChatViewManager
     // 書式は `handoff` skillで固定されているため決定論的に拾える。分類器が無効・時間切れ・
     // JSON不正のときに `assistantSuggested` が丸ごと素通りしていたのをここで塞ぐ
     // Claude Codeでは、同じターンでhandoff skillを呼んだことも求める（Issue #1748）
+    // 地の文の提案（`onAssistantSuggestion`）とは独立の設定で制御する（Issue #2066）
     if (
       !questionEnded &&
-      onAssistantSuggestion &&
+      onHandoffPrompt &&
       invokedHandoffSkill(state.items) &&
       assistantMessages.some(containsHandoffPrompt)
     ) {
@@ -2379,6 +2762,11 @@ export class ClaudeChatViewManager
       }
       entry.trace.info('handoffプロンプトを検知したが契機が成立しなかった');
     }
+    // 残る契機がhandoffプロンプトの検知だけなら、分類器を起動しても使い道が無い（Issue #2066）
+    if (!withinSoft && !onProfileChange && !onAssistantSuggestion && !onMilestone) {
+      entry.trace.info('handoffプロンプト以外の区切り待ちの契機が全部OFFのため分類器を起動しない');
+      return;
+    }
     // 作業の節目（Issue起票・PR/MR作成・マージ）のコマンドが成功して終わったターンは、
     // 分類器を待たずに発火する（Issue #1351）。履歴から開いた直後は過去のターンを拾わない
     // よう、このパネルでターンが1回以上終わっていることを求める
@@ -2405,6 +2793,19 @@ export class ClaudeChatViewManager
         return;
       }
       entry.trace.info('作業の節目を検知したが契機が成立しなかった');
+    }
+    if (
+      probeIsRedundantAfterOffer({
+        action: readAutoHandoffBoundaryAction(),
+        remainingPercent,
+        softThresholdPercent,
+        onProfileChange,
+        offeredTurnSeq: entry.autoHandoffOfferedTurnSeq,
+        turnCompletionSeq: state.turnCompletionSeq,
+      })
+    ) {
+      entry.trace.info('このターンは引き継ぎを提案済みのため分類器・Reflexを起動しない');
+      return;
     }
     if (reflex.enabled) {
       await this.maybeAutoHandoffByReflex(entry, state, {
@@ -2681,7 +3082,18 @@ export class ClaudeChatViewManager
   async openTaskSession(input: TaskSessionInput): Promise<TaskSession> {
     // sandboxの起動引数は`taskConfig.additionalArgs`へ入れる。同じパネルでCLIを起動し直す
     // （モデル変更・中断後の再開）ときも`configFor`がこれを読むため、sandboxが外れない
-    const taskConfig = toClaudeConfig(input, await this.resolveSandboxArgs(input));
+    // 設定で足した除外パターン（Issue #2133）は、sandboxの設定・指示文・hookの判定へ同じ値を渡す
+    const { commands: extraExcludedCommands, unsafe } = readClaudeSandboxExtraExcludedCommands();
+    if (input.cliSandbox !== undefined && unsafe.length > 0) {
+      this.log.warn(
+        `agent.claude.sandbox.extraExcludedCommandsのうち ${unsafe.join(' / ')} は、どんなコマンドでもsandboxの外へ出せてしまうため使わない（Issue #2133）`,
+      );
+    }
+    const taskConfig = toClaudeConfig(
+      input,
+      await this.resolveSandboxArgs(input, extraExcludedCommands),
+      extraExcludedCommands,
+    );
     // 一時停止した工程の再開（Issue #1629）は新しい会話を作らず、同じ会話を`-r`で開き直す
     const resumeId = input.resume?.sessionId;
     // CLIが会話を書き出す前に終わった会話（最初の指示の処理前など）は`-r`で開けないため、
@@ -2751,7 +3163,10 @@ export class ClaudeChatViewManager
    * 同じ判断を済ませる（`probeClaudeSandbox`）。作業ディレクトリの中身のせいでsandbox内の
    * Bashが全て失敗する場合も、sandbox無しで起動する（`ClaudeSandboxProbe.checkCwd`、Issue #1630）。
    */
-  private async resolveSandboxArgs(input: TaskSessionInput): Promise<string[]> {
+  private async resolveSandboxArgs(
+    input: TaskSessionInput,
+    extraExcludedCommands: readonly string[],
+  ): Promise<string[]> {
     if (input.cliSandbox === undefined) {
       return [];
     }
@@ -2769,7 +3184,12 @@ export class ClaudeChatViewManager
     if (!inspection.ok) {
       return withoutSandbox(inspection.reason);
     }
-    return claudeSandboxArgs(input.cliSandbox, input.cwd, availability.environment);
+    return claudeSandboxArgs(
+      input.cliSandbox,
+      input.cwd,
+      availability.environment,
+      extraExcludedCommands,
+    );
   }
 
   /** 既存のセッションを開く。過去のやり取りはtranscriptから復元する。 */
@@ -3058,6 +3478,25 @@ export class ClaudeChatViewManager
     this.summaryRollout = deps;
   }
 
+  /** 場面の台帳で再考する（Issue #2065）。台帳が埋まっていなければ、作業中のAIへ差し込む。 */
+  private async startReconsiderationFor(entry: ClaudePanel): Promise<void> {
+    const host = this.secondOpinionHost;
+    if (host === undefined) {
+      void vscode.window.showErrorMessage('再考の依頼先（Codex）を利用できません');
+      return;
+    }
+    await startSecondOpinion(
+      this.secondOpinionPortFor(entry),
+      host,
+      this.secondOpinionRegistry,
+      this.log,
+      undefined,
+      undefined,
+      this.advisorStore,
+      { ledgers: this.ledgerStore },
+    );
+  }
+
   /**
    * セカンドオピニオン（Issue #894）を起動する。
    *
@@ -3092,12 +3531,15 @@ export class ClaudeChatViewManager
     // タブを閉じたら、この会話に割り当てたメッセージング用MCPのURLを失効させる（Issue #1305）
     this.sessionMessagingRegistrations.get(entry)?.dispose();
     this.sessionMessagingRegistrations.delete(entry);
+    // 確認中・開始待ちのWebGPTとの議論（Issue #2051）を破棄する
+    this.webGptToolRequests.cancel(entry);
     this.cancelLimitAutoResume(entry);
     if (entry.idleShutdownTimer !== undefined) {
       clearTimeout(entry.idleShutdownTimer);
       entry.idleShutdownTimer = undefined;
     }
     endSecondOpinionConsult(entry.secondOpinionKey, this.advisorStore, 'parentDisposed');
+    this.ledgerStore.delete(entry.secondOpinionKey);
     this.handoffDrafts.delete(entry.secondOpinionKey);
     // 自動返信（Issue #1353）の返信役も同じ理由で残さない（元のタブを閉じたとき）
     entry.autoReplyAgent?.close('tabClosed');
@@ -3115,21 +3557,56 @@ export class ClaudeChatViewManager
       clearInterval(this.accountPollTimer);
       this.accountPollTimer = undefined;
     }
+    if (this.usageRetryTimer !== undefined) {
+      clearTimeout(this.usageRetryTimer);
+      this.usageRetryTimer = undefined;
+    }
   }
 
   /**
-   * アカウントの自動切り替えが有効なとき、会話が動いていなくても使用率を見に行く（Issue #1924）。
+   * 会話が動いていなくても稼働中のアカウントの使用率を見に行く（Issue #1924）。
+   * 自動切り替えが無効でもサイドバーの使用率を古くしないため、常に回す（Issue #1955）。
    * 実際に`claude`を起動する間隔は`ClaudeUsageProbe`が使用率に応じて決める。
    */
   private startAccountPolling(): void {
     this.accountPollTimer = setInterval(() => {
-      if (readClaudeAutoSwitchConfig().enabled) {
-        void this.refreshUsage();
-        // 待機中のアカウントの記録も古くしない（Issue #1943）。計測の間隔は60分
-        void this.accounts?.pollStandby(Date.now());
-      }
+      void this.pollAccounts();
     }, ACCOUNT_POLL_INTERVAL_MS);
     this.accountPollTimer.unref();
+  }
+
+  private async pollAccounts(): Promise<void> {
+    await Promise.allSettled([
+      this.refreshUsage(),
+      // 待機中のアカウントの記録も古くしない（Issue #1943）。計測の間隔は60分。
+      // 自動切り替えが無効なら`pollStandby`が何もしない
+      this.accounts?.pollStandby(Date.now()),
+    ]);
+    // 他のウィンドウが記録した分も含めて、サイドバーの一覧を描き直す
+    await this.accounts?.usageChanged();
+  }
+
+  /**
+   * 稼働中のアカウントの使用率を、間隔に関わらず取り直す（Issue #1955）。
+   * アカウントを切り替えた直後に呼ぶ。
+   */
+  async refreshUsageNow(): Promise<void> {
+    const usage = await this.usageProbe.readFresh();
+    if (usage !== undefined) {
+      this.onUsage(usage);
+      return;
+    }
+    // 取れなかったら、次のポーリングを待たずに1回だけ取り直す。取得権を持つ他のウィンドウがあれば
+    // 再試行の間隔で`read`が何もしないので、`claude`の過剰な起動にはならない
+    this.usageRetryTimer ??= setTimeout(() => {
+      this.usageRetryTimer = undefined;
+      void this.usageProbe.readFresh().then((retried) => {
+        if (retried !== undefined) {
+          this.onUsage(retried);
+        }
+      });
+    }, USAGE_RETRY_DELAY_MS);
+    this.usageRetryTimer.unref();
   }
 
   /**
@@ -3228,6 +3705,8 @@ export class ClaudeChatViewManager
       // 親セッションへは何も送らない
       conversationTranscript: () =>
         buildTranscriptMarkdown(entry.session.getState().items, 'Claude Code'),
+      executionRecords: () =>
+        buildExecutionRecordMarkdown(entry.session.getState().items, 'Claude Code'),
       note: (id, display) => entry.session.noteSecondOpinion(id, display),
       setRunning: (running) => {
         void entry.panel?.webview.postMessage({ type: 'secondOpinionRunning', running });
@@ -3526,14 +4005,19 @@ export class ClaudeChatViewManager
     }
 
     try {
-      // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない。要約を待っている
-      // 付け直しが保存の直前に印を見るため、保存より先に付ける
-      await this.autoName?.marks.add(pinKeyFor({ provider: 'claude', id: sessionId }));
-      await this.store.rename(sessionId, name.trim());
-      entry.session.setName(name.trim());
+      await this.applyName(entry, sessionId, name.trim());
     } catch (e) {
       this.reportError(e);
     }
+  }
+
+  /** 名前を保存する。コマンドとMission Controlの名前の変更（Issue #2160）が通る。 */
+  private async applyName(entry: ClaudePanel, sessionId: string, name: string): Promise<void> {
+    // 手で付けた名前を自動の付け直し（Issue #1426）で上書きしない。要約を待っている
+    // 付け直しが保存の直前に印を見るため、保存より先に付ける
+    await this.autoName?.marks.add(pinKeyFor({ provider: 'claude', id: sessionId }));
+    await this.store.rename(sessionId, name);
+    entry.session.setName(name);
   }
 
   /**
@@ -3577,11 +4061,94 @@ export class ClaudeChatViewManager
       }
     }
 
+    await this.resetEntry(entry);
+  }
+
+  /** タブを閉じて同じフォルダで開き直す（`clearEntry`とMission Controlのクリアの実処理）。 */
+  private async resetEntry(entry: ClaudePanel): Promise<void> {
     const cwd = entry.cwd;
     // 会話を消しても、このタブで選んだ承認方法は持ち越す（Issue #1888）
     const permissionMode = entry.permissionMode;
     this.teardown(entry);
     await this.openNew(cwd, undefined, undefined, false, undefined, permissionMode);
+  }
+
+  /**
+   * Mission Controlからのクリア（Issue #2160）。確認は要求元が出し済みなので、ここでは
+   * ダイアログを出さず、断る理由を返す（別ウィンドウから操作した人にも見えるように）。
+   */
+  protected override async clearFromHub(entry: ClaudePanel): Promise<string | undefined> {
+    if (entry.taskManaged) {
+      return 'タスクが動かしている画面はクリアできません';
+    }
+    await this.resetEntry(entry);
+    return undefined;
+  }
+
+  /** Mission Controlからの名前の変更（Issue #2160）。 */
+  protected override async renameEntry(
+    entry: ClaudePanel,
+    name: string,
+  ): Promise<string | undefined> {
+    const sessionId = entry.session.threadId;
+    if (sessionId === undefined) {
+      return 'まだ始まっていない会話には名前を付けられません';
+    }
+    await this.applyName(entry, sessionId, name);
+    return undefined;
+  }
+
+  /** Mission Controlからの分岐（Issue #2160）。`-r <id> --fork-session`で会話全体を分岐する。 */
+  protected override async forkEntry(entry: ClaudePanel): Promise<string | undefined> {
+    const sessionId = entry.session.threadId;
+    if (sessionId === undefined) {
+      return 'まだ始まっていない会話は分岐できません';
+    }
+    const name =
+      entry.session.getState().name ?? this.store.getName(sessionId) ?? sessionId.slice(0, 8);
+    await this.openFork(sessionId, `${name} (fork)`, entry.cwd);
+    return undefined;
+  }
+
+  /** Mission Controlからの引き継ぎ（Issue #2160）。押下元のentryを固定して渡す。 */
+  protected override startHandoffFromHub(entry: ClaudePanel): string | undefined {
+    if (this.handoffPreparing.has(entry)) {
+      return '引き継ぎを準備しています。終わるまでお待ちください';
+    }
+    void this.requestHandoff(entry, { kind: 'manual' });
+    return undefined;
+  }
+
+  /**
+   * 巻き戻しで戻るファイル（Issue #2160）。会話の画面の巻き戻し（`rewindFiles`）と同じdry_runを
+   * 使い、確認は要求元のMission Controlが出す。
+   */
+  protected override async previewRewind(
+    entry: ClaudePanel,
+    messageId: string,
+  ): Promise<{ files: string[] } | { error: string }> {
+    const preview = await entry.session.previewRewindFiles(messageId);
+    return preview.ok
+      ? { files: preview.filesChanged }
+      : {
+          error: `この発言まで戻せません: ${preview.error}（CLIのバージョンや実行環境によって使えないことがあります）`,
+        };
+  }
+
+  /** ファイルを発言の直前まで戻す（Issue #2160。会話の履歴には触れない）。 */
+  protected override async applyRewind(
+    entry: ClaudePanel,
+    messageId: string,
+  ): Promise<string | undefined> {
+    const result = await entry.session.applyRewindFiles(messageId);
+    if (!result.ok) {
+      return `ファイルを戻せませんでした: ${result.error}`;
+    }
+    entry.session.noteLocalEvent(
+      `rewind:${randomUUID()}`,
+      `Mission Controlからファイルを発言の直前まで戻しました（会話の履歴は変わりません）`,
+    );
+    return undefined;
   }
 
   /** セッションとループだけを組み立てる。パネルはまだ作らない。 */
@@ -3677,6 +4244,7 @@ export class ClaudeChatViewManager
       limitSwitchKey: undefined,
       autoHandoffStarted: false,
       autoHandoffFailedTurnSeq: undefined,
+      autoHandoffOfferedTurnSeq: undefined,
       lastCompactionCount: undefined,
       lastSafeBoundaryKey: undefined,
       trace: new HandoffTrace(this.log),
@@ -3747,7 +4315,7 @@ export class ClaudeChatViewManager
       // 会話の途中のターンから分岐（issue #333、design.md §14.61）。Codex画面の
       // 「ここから分岐」と同じボタンを、対象を発言自身のidへ切り替えて出す
       showTurnFork: true,
-      // 行頭の !/# の案内（issue #5/#6、design.md §14.29）。CodexのTUIに無い挙動
+      // 行頭の ! の案内（issue #5、design.md §14.29）。CodexのTUIに無い挙動
       showInputModeHints: true,
       // 他エージェントからの設定インポート（issue #200）。Codexは別のコントロールパネル
       // UI（issue #36）を持つため、二重導線を避けてClaude Code画面にだけ出す
@@ -3856,6 +4424,21 @@ export class ClaudeChatViewManager
         this.teardown(entry);
         return { memoryFreed: true };
       },
+      // 引き継ぎで前の世代を止める（Issue #2146）。進行中のターンを中断し、子孫（Bashなど）を
+      // 終わらせてからCLIを止める。タブは残し、次の送信で`--resume`できる
+      haltProcess: async ({ graceMs }) => {
+        const pid = entry.session.pid;
+        if (pid === undefined) {
+          return undefined;
+        }
+        entry.session.interrupt();
+        await terminateDescendants(pid).catch((e: unknown) => {
+          this.log.warn(
+            `[task handoff] 子プロセスを止められませんでした: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        });
+        return entry.session.halt({ cwd: entry.cwd, config: () => this.configFor(entry) }, graceMs);
+      },
       dispose: () => this.teardown(entry),
     };
   }
@@ -3876,6 +4459,8 @@ export class ClaudeChatViewManager
     // 起きないが、境目の意味を両画面で揃える
     const turnFinished = entry.lastTurnCompletionSeq !== state.turnCompletionSeq;
     entry.lastTurnCompletionSeq = state.turnCompletionSeq;
+    // 会話の区切りの追跡（Issue #2123）。次の指示を送る前に、終わったターンを確定させる
+    this.trackConversation(entry, state);
     if (turnFinished && state.queued.length > 0) {
       entry.session.sendNextQueued();
     }
@@ -3893,6 +4478,14 @@ export class ClaudeChatViewManager
         (provider) => (provider === 'claude' ? this.claudePath() : readConfig().executablePath),
         this.log,
         (id, display) => entry.session.noteEndSummary(id, display),
+      );
+      // セッションの目的の1文要約（Issue #2172）。発話が増えたターンだけ呼ぶ
+      this.maybeSessionPurpose(
+        entry,
+        state,
+        'claude',
+        (provider) => (provider === 'claude' ? this.claudePath() : readConfig().executablePath),
+        this.log,
       );
     }
     const next = deriveTitle(state, entry.pinnedName);
@@ -4320,6 +4913,110 @@ export class ClaudeChatViewManager
     await this.applyConfig(entry, 'model', model);
   }
 
+  /**
+   * model/effortを書き換え、永続化・実セッション・表示をそろえる。UIからの変更
+   * （`applyConfig`）とエージェントのツール呼び出し（Issue #2053）の共通経路。
+   * `send`に挙げたキーだけを実セッションへ送る。
+   */
+  private async updateModelSettings(
+    entry: ClaudePanel,
+    next: SessionProfile,
+    send: readonly ('model' | 'effort')[],
+  ): Promise<boolean> {
+    entry.modelSettings.model = next.model;
+    entry.modelSettings.effort = next.effort;
+    const saved = await this.persistModelSettings(entry);
+    for (const key of send) {
+      this.applyToSession(entry, key, key === 'model' ? next.model : next.effort);
+    }
+    this.refreshSettings(entry);
+    return saved;
+  }
+
+  /** エージェントが`start_roadmap_orchestrator`でロードマップのrunを起動する（Issue #2070）。 */
+  private startRoadmapOrchestratorFromTool(
+    entry: ClaudePanel,
+    args: StartRoadmapOrchestratorToolArgs,
+  ): Promise<StartRoadmapOrchestratorToolResult> {
+    return startRoadmapOrchestratorFromTool(
+      {
+        engine: 'claude',
+        folder: () => entry.cwd ?? currentWorkspaceFolder()?.uri.fsPath,
+        note: (text) => entry.session.noteLocalEvent(`startRoadmap:${Date.now()}`, text),
+        log: (text) => entry.trace.info(text),
+      },
+      args,
+    );
+  }
+
+  /** エージェントが`set_session_profile`で自分のmodel/effortを変える（Issue #2053）。 */
+  private setSessionProfileFromTool(
+    entry: ClaudePanel,
+    args: SessionProfileToolArgs,
+  ): Promise<SessionProfileToolResult> {
+    return applySessionProfileTool(
+      {
+        current: () => ({ model: entry.modelSettings.model, effort: entry.modelSettings.effort }),
+        models: () => this.settings.claudeSnapshot().models,
+        fallbackEfforts: CLAUDE_EFFORTS,
+        apply: ({ next, modelChanged, effortChanged }) =>
+          this.updateModelSettings(entry, next, [
+            ...(modelChanged ? (['model'] as const) : []),
+            // 既定（空文字）へ戻した分は実セッションへ送れない（`applyToSession`）
+            ...(effortChanged && next.effort !== '' ? (['effort'] as const) : []),
+          ]),
+        note: (text) => entry.session.noteLocalEvent(`sessionProfile:${Date.now()}`, text),
+        log: (text) => entry.trace.info(text),
+        effortUnverified: true,
+        effortResetDeferred: true,
+        // ターン中に`set_model`を送ると、ターンを壊さず同じターンの次のAPI呼び出しから
+        // 新しいmodelで動く（Issue #2053で実測）。休止中なら`configFor`が`modelSettings`の
+        // 値で次に起動する
+        effectiveFrom: 'このツールの結果を受けた後の応答から効きます（同じターンの続きを含む）',
+      },
+      args,
+    );
+  }
+
+  /**
+   * 応答の「推奨: model=... / effort=...」行のボタンを押したとき、model/effortをその値へ
+   * 切り替える（Issue #2056）。押されたときだけ呼ばれる。
+   *
+   * webviewから届くのは項目のidだけで、値は会話の状態にある本文から読み直す（画面から
+   * 届いた値を信用しない）。modelは`set_model`、effortは`/effort <level>`で送る。
+   * `apply_flag_settings`は効いたことを確かめられないため使わない（`setEffortBySlashCommand`）。
+   */
+  private async applyProfileRecommendation(entry: ClaudePanel, itemId: unknown): Promise<void> {
+    if (typeof itemId !== 'string') {
+      return;
+    }
+    const state = entry.session.getState();
+    const item = state.items.find((i) => i.id === itemId && i.kind === 'agentMessage');
+    const rec = item === undefined ? undefined : extractProfileRecommendation(item.text);
+    if (rec === undefined) {
+      void vscode.window.showWarningMessage(
+        '推奨の行が会話に見つからないため切り替えませんでした。',
+      );
+      return;
+    }
+    if (state.busy) {
+      void vscode.window.showWarningMessage(
+        '応答の途中のため切り替えませんでした。応答が終わってからもう一度押してください。',
+      );
+      return;
+    }
+    const allowed = effortsFor(this.settings.claudeSnapshot().models, rec.model, CLAUDE_EFFORTS);
+    if (!allowed.includes(rec.effort)) {
+      void vscode.window.showWarningMessage(
+        `${rec.model} では effort=${rec.effort} を選べないため切り替えませんでした。`,
+      );
+      return;
+    }
+    entry.trace.info(`推奨行のボタンで model=${rec.model} / effort=${rec.effort} へ切り替える`);
+    await this.updateModelSettings(entry, { model: rec.model, effort: rec.effort }, ['model']);
+    entry.session.setEffortBySlashCommand(rec.effort);
+  }
+
   /** 設定行のキーはCodex画面と共通なので、Claude側のキーへ読み替える。 */
   private async applyConfig(entry: ClaudePanel, key: unknown, value: unknown): Promise<void> {
     if (typeof value !== 'string') {
@@ -4340,19 +5037,18 @@ export class ClaudeChatViewManager
       return;
     }
     if (mapped === 'model' || mapped === 'effort') {
+      let { model, effort } = entry.modelSettings;
       if (mapped === 'model') {
-        entry.modelSettings.model = value;
+        model = value;
         const snapshot = this.settings.claudeSnapshot();
         const allowed = effortsFor(snapshot.models, value, CLAUDE_EFFORTS);
-        if (entry.modelSettings.effort !== '' && !allowed.includes(entry.modelSettings.effort)) {
-          entry.modelSettings.effort = '';
+        if (effort !== '' && !allowed.includes(effort)) {
+          effort = '';
         }
       } else {
-        entry.modelSettings.effort = value;
+        effort = value;
       }
-      await this.persistModelSettings(entry);
-      this.applyToSession(entry, mapped, value);
-      this.refreshSettings(entry);
+      await this.updateModelSettings(entry, { model, effort }, [mapped]);
       return;
     }
     if (mapped === 'permissionMode') {
@@ -4657,7 +5353,7 @@ export class ClaudeChatViewManager
         this.clearLimitAutoResumeSuppression(entry);
         // 手動の発言はループへの割り込み。指示が交互に飛ぶ状態を作らない
         this.noteUserAction(entry);
-        // 行頭が !/# の入力はCLIへ送らず、拡張機能側の機能として扱う（issue #5/#6、
+        // 行頭が ! の入力はCLIへ送らず、拡張機能側の機能として扱う（issue #5、
         // design.md §14.29）。control_requestに相当する経路が無いため、Claudeへ発言として
         // 渡すとモデルのターンを消費して意図とずれる（design.mdの調査結果を参照）
         const inputMode = routeInputMode(text);
@@ -4865,8 +5561,8 @@ export class ClaudeChatViewManager
         void vscode.commands.executeCommand('agent.workflows.view');
         return;
       }
-      if (type === 'sessionKanban') {
-        void vscode.commands.executeCommand('agent.sessionKanban');
+      if (type === 'missionControl') {
+        void vscode.commands.executeCommand('agent.missionControl.open');
         return;
       }
       if (type === 'forgeHub') {
@@ -4889,8 +5585,21 @@ export class ClaudeChatViewManager
         void this.startSecondOpinionFor(entry);
         return;
       }
+      if (type === 'reconsider') {
+        void this.startReconsiderationFor(entry);
+        return;
+      }
       if (type === 'webGptDiscussion') {
         void this.discussWithWebGptIn(entry);
+        return;
+      }
+      if (type === 'askChatGptDiscuss') {
+        // 質問ファイル作成の下のボタン（Issue #2057）。クリックまでは何も送らない
+        void prepareAskQuestionDiscussion(entry.session.getState().items, m['itemId'], [
+          ...new Set([...(entry.cwd === undefined ? [] : [entry.cwd]), ...workspaceFolderPaths()]),
+        ]).then((options) => {
+          if (options !== undefined) void this.discussWithWebGptIn(entry, undefined, options);
+        });
         return;
       }
       if (type === 'secondOpinionContinue') {
@@ -5119,6 +5828,10 @@ export class ClaudeChatViewManager
       }
       if (type === 'approvalLevel') {
         void this.applyApprovalLevel(entry, m['level']);
+        return;
+      }
+      if (type === 'applyProfileRecommendation') {
+        void this.applyProfileRecommendation(entry, m['itemId']);
         return;
       }
       if (type === 'config') {
@@ -5395,16 +6108,12 @@ export class ClaudeChatViewManager
   }
 
   /**
-   * 行頭が !/# の入力を、拡張機能側の機能として実行する（issue #5/#6、design.md §14.29）。
+   * 行頭が ! の入力を、拡張機能側の機能として実行する（issue #5、design.md §14.29）。
    * `routeInputMode` が「送るべきでない」と判定した時点で呼ばれるため、ここではCLIへは
    * 一切送らない。
    */
   private async runInputMode(entry: ClaudePanel, mode: InputModeCall): Promise<void> {
-    if (mode.kind === 'shell') {
-      await this.runShellInputMode(entry, mode.command);
-      return;
-    }
-    await this.runMemoryInputMode(entry, mode.content);
+    await this.runShellInputMode(entry, mode.command);
   }
 
   /**
@@ -5426,146 +6135,6 @@ export class ClaudeChatViewManager
       `shellCommand:${randomUUID()}`,
       `シェルコマンドを統合ターミナルへ入力しました（自動実行はしていません）: ${command}`,
     );
-  }
-
-  /**
-   * 内容をメモリ（CLAUDE.md）へ追記する（issue #6、issue #144で安全性を強化）。
-   *
-   * 追記先を選ばせ（各workspaceFolder + ユーザー、`resolveMemoryCandidates`）、内容・追記先
-   * （シンボリックリンクなら実体パスも、実体パスが特定できなければ警告も）を確認してから
-   * 書き込む。読み取りに`readStrict`（メモリ追記専用、ENOENT以外は投げる）を使うのは、
-   * 既存ファイルの読み込みに失敗したときに「無い」と誤認して追記のつもりで上書きするのを
-   * 防ぐため（issue #144の核心）。書き込み直前にシンボリックリンクの判定を取り直し、
-   * 確認ダイアログを見せた時点の結果と食い違っていれば書き込みを中止する（TOCTOU対策。
-   * 確認からユーザー応答までは不定長で、その間にリンク先が変わりうる）。
-   * 書き込み後は「どこに書いたか」を会話に1行残す（受入基準）。
-   */
-  private async runMemoryInputMode(entry: ClaudePanel, content: string): Promise<void> {
-    const candidates = await this.resolveMemoryCandidates(entry.cwd);
-    const choice = await vscode.window.showQuickPick(
-      candidates.map((c) => ({
-        label: c.label,
-        description: c.exists ? '既存' : '新規作成',
-        detail: c.path,
-        candidate: c,
-      })),
-      { title: `メモリへ追記: ${content}`, placeHolder: '追記先を選んでください' },
-    );
-    if (choice === undefined) {
-      return;
-    }
-    // 書き込み先はQuickPickが列挙した候補のパスに限る（パストラバーサルの入口を作らない。issue #144）
-    const targetPath = choice.candidate.path;
-    const confirmedSymlink = await this.resolveSymlinkTargetSafely(targetPath);
-
-    if (!(await confirmMemoryAppend(content, targetPath, confirmedSymlink))) {
-      return;
-    }
-
-    // TOCTOU対策: モーダル確認（ユーザー応答待ちで不定長）の間にリンク先が変わりうるため、
-    // 書き込み直前に取り直し、確認時に見せた結果と食い違えば中止する（issue #144）。
-    const symlinkAtWrite = await this.resolveSymlinkTargetSafely(targetPath);
-    if (!symlinkResolutionEquals(confirmedSymlink, symlinkAtWrite)) {
-      this.reportError(
-        new Error(
-          `追記先の状態が確認時から変わったため、書き込みを中止しました: ${targetPath}。もう一度操作しなおしてください。`,
-        ),
-      );
-      return;
-    }
-
-    let existing: string | undefined;
-    try {
-      existing = await this.memoryFs.readStrict(targetPath);
-    } catch (e) {
-      // ENOENT以外の理由で読めなかった。「無い」と誤認して既存の内容を消さないよう、
-      // ここで打ち切って書き込まない（issue #144の受入基準）
-      this.reportError(e);
-      return;
-    }
-    const next = appendMemoryLine(existing, content);
-    try {
-      await vscode.workspace.fs.writeFile(vscode.Uri.file(targetPath), Buffer.from(next, 'utf8'));
-    } catch (e) {
-      this.reportError(e);
-      return;
-    }
-    // 追記自体は既に成功しているため、記憶の失敗で処理全体は止めない。ただし黙って握り潰さず
-    // 報告する（`src/orchestrator/runStore.ts` は同型の`update`を常に`await`しており、
-    // fire-and-forgetのまま放置しない流儀に揃える。issue #144レビュー指摘）。
-    try {
-      await this.memoryMemento.update(MEMORY_LAST_SELECTED_PATH_KEY, targetPath);
-    } catch (e) {
-      this.reportError(e);
-    }
-    entry.session.noteLocalEvent(
-      `memoryAppend:${randomUUID()}`,
-      describeMemoryAppendResult(targetPath, symlinkAtWrite),
-    );
-  }
-
-  /**
-   * `this.memoryFs.resolveSymlinkTarget` を安全に呼ぶ。
-   *
-   * `MemoryFileSystemPort.resolveSymlinkTarget` はJSDoc上「例外を投げない」契約で、既定実装
-   * （`nodeMemoryFileSystem`）もそのとおりだが、`memoryFs` はテストで差し替え可能な口のため、
-   * 契約違反があっても追記処理全体を落とさず、実体パスが分からない扱いへ倒す
-   * （防御的プログラミング。issue #144レビュー指摘）。
-   */
-  private async resolveSymlinkTargetSafely(filePath: string): Promise<SymlinkResolution> {
-    try {
-      return await this.memoryFs.resolveSymlinkTarget(filePath);
-    } catch (e) {
-      this.reportError(e);
-      return { kind: 'unresolved' };
-    }
-  }
-
-  /**
-   * メモリ追記先の候補を列挙する（issue #144）。
-   *
-   * プロジェクト側は各workspaceFolderごとに1件出す（マルチルートワークスペースで
-   * どのフォルダのCLAUDE.mdか分からない問題への対処、受入基準）。加えて、この画面の
-   * 実際の作業ディレクトリ（`fallbackCwd`。タスクのworktree等でworkspaceFolderと
-   * 一致しないことがある）がworkspaceFolderに含まれていなければ、それも候補へ足す
-   * （従来どおりworktree自身のCLAUDE.mdへ追記できるようにするため）。
-   * 存在確認は共有の `FileSystemPort.readTextFile`（読めなければ無い扱いでよい。
-   * ここではラベル表示にしか使わず、書き込み判断には使わない）で行う。
-   */
-  private async resolveMemoryCandidates(fallbackCwd: string): Promise<MemoryCandidate[]> {
-    const folders = vscode.workspace.workspaceFolders ?? [];
-    const roots = folders.map((f) => ({ name: f.name, cwd: f.uri.fsPath }));
-    if (!roots.some((r) => r.cwd === fallbackCwd)) {
-      roots.push({ name: basename(fallbackCwd), cwd: fallbackCwd });
-    }
-
-    const projectInputs = await Promise.all(
-      roots.map(async (r) => {
-        const rootExists = (await this.fs.readTextFile(`${r.cwd}/CLAUDE.md`)) !== undefined;
-        const dotClaudeExists =
-          (await this.fs.readTextFile(`${r.cwd}/.claude/CLAUDE.md`)) !== undefined;
-        return {
-          name: r.name,
-          cwd: r.cwd,
-          rootClaudeMdExists: rootExists,
-          dotClaudeMdExists: dotClaudeExists,
-        };
-      }),
-    );
-    const projectCandidates = buildProjectMemoryCandidates(projectInputs);
-
-    const userPath = resolveUserMemoryFile(this.claudeHome);
-    const userCandidate: MemoryCandidate = {
-      label: 'ユーザー',
-      path: userPath,
-      exists: (await this.fs.readTextFile(userPath)) !== undefined,
-    };
-
-    const lastSelected = this.memoryMemento.get<string | undefined>(
-      MEMORY_LAST_SELECTED_PATH_KEY,
-      undefined,
-    );
-    return orderMemoryCandidates([...projectCandidates, userCandidate], lastSelected);
   }
 
   /**

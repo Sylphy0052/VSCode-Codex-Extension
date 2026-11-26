@@ -7,7 +7,12 @@ import { importRoadmap } from '../orchestrator/roadmapImport';
 import { hashRoadmapPlanSectionContent } from '../orchestrator/roadmapPlanHash';
 import { detectRoadmapForgeHost } from '../orchestrator/roadmapRunForge';
 import type { ControllerResult, TaskRunController } from '../orchestrator/taskRunController';
-import { TASK_RUN_TITLE_MAX_LENGTH, type TaskRunEngine } from '../orchestrator/taskRunState';
+import { extractRoadmapGoal } from '../orchestrator/taskRunGoal';
+import {
+  TASK_RUN_TITLE_MAX_LENGTH,
+  type TaskRunEngine,
+  type TaskRunGoal,
+} from '../orchestrator/taskRunState';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import type { GitCommandRunner } from '../orchestrator/worktree';
 
@@ -105,6 +110,8 @@ export async function startRoadmapRunCommand(
       imported.plan.kind === 'valid'
         ? hashRoadmapPlanSectionContent(imported.plan.content)
         : undefined,
+    // 目的はロードマップ本文の「目的」「完了条件」の節から取る。節が無ければ置かない（Issue #2193）
+    goal: extractRoadmapGoal(imported.body, roadmapTitle),
   });
   if (!outcome.ok) {
     deps.log.warn(`[task run] ${outcome.message}`);
@@ -123,6 +130,228 @@ export async function startRoadmapRunCommand(
     );
   }
   deps.showRun(outcome.runId);
+}
+
+/** `start_roadmap_orchestrator`が呼び出し元チャットから渡す値（Issue #2070）。 */
+export interface RoadmapRunFromChatInput {
+  /** 呼び出し元チャットのワークスペースフォルダ。 */
+  folder: string;
+  /** 呼び出し元チャットのengine。 */
+  engine: TaskRunEngine;
+  /** 省略時はroadmapラベルのopenなIssueが1本のときだけそれを使う。 */
+  issueNumber: number | undefined;
+  /** 並列上限。`agent.taskRun.maxParallelPerFolder`を呼び出し側が丸めて渡す。 */
+  maxParallel: number;
+  /**
+   * runの目的（Issue #2193）。`parseGoalInput`で均した値。省略時はロードマップ本文の節から取る。
+   * 既存のrunを読み直すときは、そのrunの目的を`goalReason`の理由で直す。
+   */
+  goal?: TaskRunGoal | undefined;
+  /** 既存runの目的を直すときの理由（起動の理由）。均した値。 */
+  goalReason?: string | undefined;
+}
+
+export interface RoadmapRunFromChatResult {
+  accepted: boolean;
+  reason: string;
+  runId?: string | undefined;
+  reused?: boolean | undefined;
+  /** 渡されたgoalをrunに記録したら`true`（Issue #2193）。渡されていなければ省く。 */
+  goalApplied?: boolean | undefined;
+}
+
+const CANDIDATES_SHOWN = 5;
+
+/**
+ * チャットのモデルからロードマップのrunを起動する（Issue #2070）。QuickPickやInputBoxは出さない。
+ * 同じIssueのrunが既にあれば新しく作らず、中断中なら再開してからロードマップを読み直させる。
+ * 人の関門は従来どおり計画承認（runは`awaitingApproval`で始まる）。
+ */
+export async function startRoadmapRunFromChat(
+  deps: RoadmapRunStartDeps,
+  input: RoadmapRunFromChatInput,
+): Promise<RoadmapRunFromChatResult> {
+  const { folder } = input;
+  const host = await detectRoadmapForgeHost({ git: deps.git, cli: deps.cli }, folder);
+  if (host === undefined) {
+    return {
+      accepted: false,
+      reason: 'originがGitHub/GitLabのリポジトリではないため、ロードマップIssueを読めません',
+    };
+  }
+  const picked = await resolveRoadmapIssueForChat(deps, folder, input.issueNumber);
+  if (!('issueNumber' in picked)) {
+    return { accepted: false, reason: picked.reason };
+  }
+  const existing = deps.controller.findRoadmapRun(folder, picked.issueNumber);
+  if (existing !== undefined) {
+    const reloaded = await reloadExistingRun(
+      deps,
+      existing.runId,
+      existing.suspendedAt !== undefined,
+    );
+    return input.goal === undefined
+      ? reloaded
+      : applyGoalToExistingRun(deps, existing.runId, input, reloaded);
+  }
+  const imported = await importRoadmap(
+    { cli: deps.cli, fs: nodeForgeFileSystem },
+    { host, cwd: folder, roadmapIssueNumber: picked.issueNumber },
+  );
+  if (imported.kind === 'failed') {
+    return { accepted: false, reason: sanitizeInlineText(imported.message, PLAN_ERROR_MAX_LENGTH) };
+  }
+  const roadmapTitle = picked.title ?? `ロードマップIssue #${String(picked.issueNumber)}`;
+  const outcome = await deps.controller.startRoadmapRun({
+    workspaceRoot: folder,
+    engine: input.engine,
+    maxParallel: input.maxParallel,
+    title: sanitizeInlineText(roadmapTitle, TASK_RUN_TITLE_MAX_LENGTH),
+    roadmapIssueNumber: picked.issueNumber,
+    roadmapTitle,
+    children: imported.children,
+    planNodes: imported.plan.kind === 'valid' ? imported.plan.nodes : undefined,
+    planSectionHash:
+      imported.plan.kind === 'valid'
+        ? hashRoadmapPlanSectionContent(imported.plan.content)
+        : undefined,
+    // 引数のgoalを優先し、無ければロードマップ本文の節から取る。どちらも無ければ置かない（Issue #2193）
+    goal: input.goal ?? extractRoadmapGoal(imported.body, roadmapTitle),
+  });
+  if (!outcome.ok) {
+    deps.log.warn(`[task run] ${outcome.message}`);
+    return { accepted: false, reason: sanitizeInlineText(outcome.message, PLAN_ERROR_MAX_LENGTH) };
+  }
+  deps.showRun(outcome.runId);
+  if (outcome.reused && input.goal !== undefined) {
+    // 起動の待ち行列で同じIssueのrunが先にできていた。渡されたgoalはそのrunの目的として直す
+    return applyGoalToExistingRun(deps, outcome.runId, input, {
+      accepted: true,
+      runId: outcome.runId,
+      reused: true,
+      reason: '既存のrunがあるため、新しいrunは作りませんでした。このターンは終えてください',
+    });
+  }
+  return {
+    accepted: true,
+    runId: outcome.runId,
+    reused: outcome.reused,
+    ...(input.goal === undefined ? {} : { goalApplied: !outcome.reused }),
+    reason:
+      `ロードマップIssue #${String(picked.issueNumber)}のrunを始めました。計画は承認待ちで、` +
+      '利用者がKanbanで承認すると工程が進みます。このターンは終えてください',
+  };
+}
+
+/**
+ * 既存runへ渡されたgoalを、起動の理由を添えて記録する（Issue #2193）。読み直しに失敗していても
+ * runはあるので記録する。記録に失敗したら結果の理由へ添える（runの扱いは変えない）。
+ */
+async function applyGoalToExistingRun(
+  deps: RoadmapRunStartDeps,
+  runId: string,
+  input: RoadmapRunFromChatInput,
+  reloaded: RoadmapRunFromChatResult,
+): Promise<RoadmapRunFromChatResult> {
+  if (input.goal === undefined || reloaded.runId === undefined) {
+    return reloaded;
+  }
+  const reason =
+    input.goalReason === undefined || input.goalReason.trim() === ''
+      ? 'start_roadmap_orchestratorで目的が渡された'
+      : `start_roadmap_orchestratorで目的が渡された（${input.goalReason}）`;
+  const set = await deps.controller.setGoal(runId, input.goal, reason);
+  if (!set.ok) {
+    deps.log.warn(`[task run] ${set.message}`);
+    return {
+      ...reloaded,
+      goalApplied: false,
+      reason: `渡された目的は記録できませんでした（${sanitizeInlineText(set.message, PLAN_ERROR_MAX_LENGTH)}）。${reloaded.reason}`,
+    };
+  }
+  return { ...reloaded, goalApplied: true, reason: `runの目的を直しました。${reloaded.reason}` };
+}
+
+/** 既存runを再開（中断中のとき）してロードマップを読み直させる。 */
+async function reloadExistingRun(
+  deps: RoadmapRunStartDeps,
+  runId: string,
+  suspended: boolean,
+): Promise<RoadmapRunFromChatResult> {
+  if (suspended) {
+    const resumed = await deps.resumeRun(runId);
+    if (!resumed.ok) {
+      deps.log.warn(`[task run] ${resumed.message}`);
+      return {
+        accepted: false,
+        runId,
+        reason: `中断中のrunを再開できませんでした: ${sanitizeInlineText(resumed.message, PLAN_ERROR_MAX_LENGTH)}`,
+      };
+    }
+  }
+  const synced = await deps.controller.syncRoadmap(runId);
+  deps.showRun(runId);
+  const base = suspended ? '中断中のrunを再開し、' : '既存のrunがあるため、';
+  if (!synced.ok) {
+    deps.log.warn(`[task run] ${synced.message}`);
+    return {
+      accepted: false,
+      runId,
+      reused: true,
+      reason:
+        `${base}新しいrunは作りませんでした。ただしロードマップの読み直しに失敗しました: ` +
+        sanitizeInlineText(synced.message, PLAN_ERROR_MAX_LENGTH),
+    };
+  }
+  return {
+    accepted: true,
+    runId,
+    reused: true,
+    reason:
+      `${base}新しいrunは作らずロードマップを読み直させました。` +
+      '足した子Issueは差分としてOrchestratorへ届きます。このターンは終えてください',
+  };
+}
+
+/** 番号があればそれ、無ければroadmapラベルのopenなIssueが1本のときだけそれを選ぶ。QuickPickは出さない。 */
+async function resolveRoadmapIssueForChat(
+  deps: RoadmapRunStartDeps,
+  folder: string,
+  issueNumber: number | undefined,
+): Promise<PickedRoadmap | { reason: string }> {
+  const { roadmapIssueLabel } = readWorkflowsConfig();
+  const issues = await createCliIssueListPort(
+    deps.git,
+    deps.cli,
+    issueNumber === undefined ? { label: roadmapIssueLabel } : undefined,
+  ).listIssues(folder);
+  if (issueNumber !== undefined) {
+    const found = (issues ?? []).find((issue) => issue.number === issueNumber);
+    return { issueNumber, title: found?.title };
+  }
+  if (issues === undefined) {
+    return { reason: 'Issueの一覧を取得できませんでした。roadmapIssueNumberを指定してください' };
+  }
+  const wantedLabel = roadmapIssueLabel.toLowerCase();
+  const candidates = issues.filter((issue) =>
+    (issue.labels ?? []).some((label) => label.toLowerCase() === wantedLabel),
+  );
+  const [only] = candidates;
+  if (candidates.length === 1 && only !== undefined) {
+    return { issueNumber: only.number, title: only.title };
+  }
+  if (candidates.length === 0) {
+    return {
+      reason: `「${roadmapIssueLabel}」ラベルの付いたopenのIssueが見つかりません。roadmapIssueNumberを指定してください`,
+    };
+  }
+  const list = candidates
+    .slice(0, CANDIDATES_SHOWN)
+    .map((c) => `#${String(c.number)} ${sanitizeInlineText(c.title, ISSUE_TITLE_MAX_LENGTH)}`)
+    .join(' / ');
+  return {
+    reason: `ロードマップIssueの候補が${String(candidates.length)}本あります。roadmapIssueNumberを指定してください（${list}）`,
+  };
 }
 
 async function openExistingRun(

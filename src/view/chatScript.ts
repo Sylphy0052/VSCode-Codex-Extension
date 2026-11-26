@@ -149,8 +149,8 @@ export function chatScript(
     // Claude CodeのAskUserQuestion（issue #685）。承認カード解決後、会話ログに
     // 質問と回答を1項目として残すための種類
     askUserQuestion: '質問',
-    // Skillツール実行時にCLIが注入するSKILL.md全文（issue #691）。通常のuserMessageとは
-    // 分け、他のツール出力と同じ既定折りたたみにする
+    // Skill起動時にCLIが注入するSKILL.md全文（issue #691）。会話には描画しない（HIDDEN_KINDS）が、
+    // transcriptMarkdown.tsのKIND_TITLEと語彙を揃えるため残す
     skillContext: 'Skill',
   };
 
@@ -205,8 +205,10 @@ export function chatScript(
     'collabAgentToolCall',
     'autoApprovalReview',
     'fileRead',
-    'skillContext',
   ]);
+
+  /** 会話に描画しない種類（issue #1968）。 */
+  const HIDDEN_KINDS = new Set(['skillContext']);
 
   /** 閉じたコマンド実行カードの見出しに出す、コマンド先頭の文字数。 */
   const COMMAND_PREVIEW_LENGTH = 48;
@@ -284,7 +286,6 @@ export function chatScript(
     subAgentActivity: 'tool',
     collabAgentToolCall: 'tool',
     autoApprovalReview: 'tool',
-    skillContext: 'tool',
   };
 
   /**
@@ -520,6 +521,28 @@ export function chatScript(
     }
     wrap.appendChild(body);
 
+    // 応答の「推奨: model=... / effort=...」行から出す切り替えボタン（Issue #2056）。
+    // 押したときだけ拡張機能側へ要求を送る。応答が出ただけでは何も変えない
+    const recommend = document.createElement('div');
+    recommend.className = 'recommend';
+    recommend.hidden = true;
+    const recommendButton = document.createElement('button');
+    recommendButton.className = 'secondary';
+    recommendButton.addEventListener('click', () => {
+      if (!node.recommendTarget) return;
+      recommendButton.disabled = true;
+      const label = recommendButton.textContent;
+      vscode.postMessage({ type: 'applyProfileRecommendation', itemId: node.recommendTarget });
+      recommendButton.textContent = '切り替えを依頼しました';
+      // 応答の途中で断られた場合に押し直せるよう、少し後に戻す（切り替えは何度送っても同じ結果）
+      setTimeout(() => {
+        recommendButton.disabled = false;
+        recommendButton.textContent = label;
+      }, 3000);
+    });
+    recommend.appendChild(recommendButton);
+    wrap.appendChild(recommend);
+
     // 指示の書き直し（issue #1073）。本文と同じ場所に出し、編集中は本文を隠す。
     // userMessage以外では常に隠れたまま
     const editBox = document.createElement('div');
@@ -591,6 +614,12 @@ export function chatScript(
     diffs.hidden = true;
     wrap.appendChild(diffs);
 
+    // ask-chatgptの質問ファイルを作ったときだけ出す、ChatGPTで議論するボタン（Issue #2057）
+    const askBox = document.createElement('div');
+    askBox.className = 'ask-chatgpt';
+    askBox.hidden = true;
+    wrap.appendChild(askBox);
+
     const node = {
       wrap,
       label,
@@ -604,6 +633,8 @@ export function chatScript(
       imageKey: '',
       diffs,
       diffKey: '',
+      askBox,
+      askKey: '',
       copy,
       openOutput,
       // 退避したツール出力を開く対象（issue #1325）。退避していない項目では undefined
@@ -619,6 +650,10 @@ export function chatScript(
       editTarget: undefined,
       editFromStart: false,
       editing: false,
+      recommend,
+      recommendButton,
+      recommendTarget: undefined,
+      recommendKey: '',
       fork,
       forkTarget: undefined,
       rewind,
@@ -1135,6 +1170,41 @@ export function chatScript(
   }
 
   /**
+   * 作業フォルダ直下のdocs/chatgpt/ask-<slug>.mdか（Issue #2057）。ボタンを出すかの
+   * 簡易判定で、パスの確認・本文の読み込み・字数の判定はホスト側が行う。
+   */
+  function isAskQuestionPath(p) {
+    if (!p || containsParentSegment(p)) return false;
+    const pattern = /^docs[/]chatgpt[/]ask-[A-Za-z0-9][A-Za-z0-9-]*\\.md$/;
+    return workspaceRoots.some((root) => {
+      const norm = root.replace(/[\\/]+$/, '');
+      return p.indexOf(norm + '/') === 0 && pattern.test(p.slice(norm.length + 1));
+    });
+  }
+
+  /** 質問ファイルをWriteで作った項目の下に、議論を始めるボタンを出す。押すまで送らない。 */
+  function renderAskChatGptButton(node, item) {
+    const created = item.kind === 'fileChange'
+      ? (item.diffs || []).find((d) => d.kind === 'add' && isAskQuestionPath(d.path))
+      : undefined;
+    const key = created ? item.id : '';
+    if (node.askKey === key) return;
+    node.askKey = key;
+    node.askBox.replaceChildren();
+    node.askBox.hidden = !created;
+    if (!created) return;
+    const button = document.createElement('button');
+    button.className = 'secondary';
+    button.type = 'button';
+    button.textContent = 'この質問をChatGPTで議論する';
+    button.title = '質問ファイルの本文を議題にします。会話URLと送信上限を確認するまで送信しません';
+    button.addEventListener('click', () =>
+      vscode.postMessage({ type: 'askChatGptDiscuss', itemId: item.id }),
+    );
+    node.askBox.appendChild(button);
+  }
+
+  /**
    * 差分の見出し行に足す操作ボタン（issue #291）。「エディタで開く」「差分を開く」
    * 「この変更を戻す」を、種類とパスから出し分ける。実際の復元可否（ハンクの解析等）は
    * ここでは見ない（Webview側は文字列のパース器を持たないため）。ホスト側が
@@ -1379,6 +1449,7 @@ export function chatScript(
       // 適用済みの実変更なので操作ボタンを出す（issue #291）
       renderDiffs(node.diffs, diffs, item.id, true);
     }
+    renderAskChatGptButton(node, item);
 
     // 分岐は「この指示の手前まで」。押した指示からやり直せるようにする
     node.forkTarget = forkTarget;
@@ -1401,6 +1472,23 @@ export function chatScript(
     // どの発言でも常に持っている値なので、直前の発言の有無を待つ必要が無い
     node.rewindTarget = item.kind === 'userMessage' ? item.id : undefined;
     node.rewind.hidden = !(SHOW_REWIND && item.kind === 'userMessage');
+
+    // 推奨行のボタン（Issue #2056）。確定した応答（profileRecommendationを持つ項目）にだけ出す。
+    const rec = item.kind === 'agentMessage' ? item.profileRecommendation : undefined;
+    if (rec) {
+      const key = rec.model + '/' + rec.effort;
+      if (node.recommendKey !== key) {
+        node.recommendKey = key;
+        node.recommendButton.disabled = false;
+        node.recommendButton.textContent = 'model=' + rec.model + ' / effort=' + rec.effort + ' に切り替える';
+      }
+      node.recommendTarget = item.id;
+      node.recommend.hidden = false;
+    } else {
+      node.recommendTarget = undefined;
+      node.recommendKey = '';
+      node.recommend.hidden = true;
+    }
 
     // 停止は実行中のセカンドオピニオンにだけ出す（Issue #940）。項目のidがそのまま
     // 実行の識別子になる。終わった実行の項目に押せるボタンを残さない
@@ -1445,6 +1533,9 @@ export function chatScript(
     let previousTurnId;
 
     for (const item of items) {
+      // Skill起動時にCLIが注入するSKILL.md全文は会話に出さない（issue #1968）。
+      // 起動したことはSkillツールのカードや /名前 の発言で判る。項目自体はhandoffの検出が使うため残す
+      if (HIDDEN_KINDS.has(item.kind)) continue;
       seen.add(item.id);
       let node = nodes.get(item.id);
       if (!node) {
@@ -2350,10 +2441,12 @@ export function chatScript(
     }
   }
 
-  function renderQueue(queued) {
+  function renderQueue(queued, held) {
     const box = el('queue');
     const list = el('queueList');
-    if (!queued || queued.length === 0) {
+    queued = queued || [];
+    held = held || [];
+    if (queued.length === 0 && held.length === 0) {
       box.hidden = true;
       list.replaceChildren();
       return;
@@ -2361,8 +2454,27 @@ export function chatScript(
 
     box.hidden = false;
     // 応答中に送った指示は既定で待ち行列に積む。今すぐ送るには「今すぐ送る」ボタンを使う
-    el('queueLabel').textContent = '順番待ちです（' + queued.length + '件）';
+    const bits = [];
+    if (queued.length > 0) bits.push('順番待ちです（' + queued.length + '件）');
+    // 今すぐ送った指示は、CLIが取り込むまで消さずに出す（Issue #2022）
+    if (held.length > 0) bits.push('取り込み待ち（' + held.length + '件）');
+    el('queueLabel').textContent = bits.join(' / ');
+    el('flushQueue').hidden = queued.length === 0;
     list.replaceChildren();
+    held.forEach((message) => {
+      const li = document.createElement('li');
+      li.className = 'held';
+      const label = document.createElement('span');
+      const count = (message.attachments || []).length;
+      const text = message.text + (count > 0 ? '（画像' + count + '枚）' : '');
+      label.textContent = text;
+      label.title = text;
+      li.appendChild(label);
+      const note = document.createElement('small');
+      note.textContent = '送信済み・ツールの実行後に届きます';
+      li.appendChild(note);
+      list.appendChild(li);
+    });
     queued.forEach((message, index) => {
       const li = document.createElement('li');
       const label = document.createElement('span');
@@ -2498,9 +2610,10 @@ export function chatScript(
     renderTodos(state.todos);
     renderBackgroundTerminals(state.backgroundTerminals);
     queuedMessages = state.queued || [];
-    renderQueue(queuedMessages);
+    renderQueue(queuedMessages, state.held);
     renderLimitAutoResumeStatus(state.limitAutoResumeStatus);
     renderAutoReplyActivity(state.autoReplyActivity);
+    renderAutoHandoffWait(state.autoHandoffBackgroundWait);
     renderProcessSuspension(state.processSuspension);
     // 外周の枠色で状態を示す。赤=応答中、黄=応答終了後もバックグラウンド実行中、青=待機中
     document.body.classList.toggle('busy', !!state.busy);
@@ -2711,6 +2824,14 @@ export function chatScript(
     node.textContent = text === '' ? '' : '自動返信: ' + text;
   }
 
+  // 自動引き継ぎがバックグラウンド処理の終了だけを待っている間の1行（Issue #2004）。
+  // 文言はHTML側に持つ。自動引き継ぎがOFFのときはホスト側が立てない
+  function renderAutoHandoffWait(waiting) {
+    const node = el('autoHandoffWait');
+    if (!node) return;
+    node.hidden = waiting !== true;
+  }
+
   // 使っていないタブのCLIを終了している間の1行（Issue #1808）。Claude Codeのタブだけが送る
   const PROCESS_SUSPENSION_LABELS = {
     stopping: '使っていないためCLIを終了しています',
@@ -2780,6 +2901,21 @@ export function chatScript(
     const usageText = formatUsage(state.usage);
     if (usageText !== '') bits.push(usageText);
     if (bits.length > 0) status.appendChild(document.createTextNode(bits.join(' ・ ')));
+
+    // CLIが通知した、実際に使っているmodel/effort（Issue #2016）。選択欄は設定値なので、
+    // 実測値はここに並べる。設定値と違えば警告色にする
+    const observed = settings.observed;
+    if (observed && (observed.model || observed.effort)) {
+      if (status.childNodes.length > 0) status.appendChild(document.createTextNode(' ・ '));
+      const observedSpan = document.createElement('span');
+      if (observed.mismatch) observedSpan.className = 'warn';
+      observedSpan.textContent =
+        '実測 ' +
+        [observed.model, observed.effort].filter(Boolean).join(' / ') +
+        (observed.mismatch ? '（設定と違います）' : '');
+      observedSpan.title = 'CLIが通知した、実際に使っているmodel/effort';
+      status.appendChild(observedSpan);
+    }
 
     const context = formatContext(state.context);
     if (context) {
@@ -3343,7 +3479,7 @@ export function chatScript(
   }
 
   /**
-   * 行頭の !/# を送信前に案内する（issue #5/#6、Claude Code画面のみ）。
+   * 行頭の ! を送信前に案内する（issue #5、Claude Code画面のみ）。
    *
    * 判定の規則はホスト側の routeInputMode（src/provider/inputModes.ts）と同じ。
    * テンプレートリテラルの中からは関数を呼べないため書き直している。両方を揃えること。
@@ -3356,8 +3492,6 @@ export function chatScript(
     if (line.indexOf('\\n') === -1) {
       if (line.slice(0, 1) === '!' && line.slice(1).trim() !== '') {
         text = 'シェルコマンドとしてターミナルへ入力します: ' + line.slice(1).trim();
-      } else if (line.slice(0, 1) === '#' && line.slice(1).trim() !== '') {
-        text = 'メモリへ追記します: ' + line.slice(1).trim();
       }
     }
     box.hidden = text === '';
@@ -3589,8 +3723,8 @@ export function chatScript(
   el('workflowView').addEventListener('click', () =>
     vscode.postMessage({ type: 'workflowView' }),
   );
-  el('sessionKanban').addEventListener('click', () =>
-    vscode.postMessage({ type: 'sessionKanban' }),
+  el('missionControl').addEventListener('click', () =>
+    vscode.postMessage({ type: 'missionControl' }),
   );
   el('forgeHub').addEventListener('click', () =>
     vscode.postMessage({ type: 'forgeHub' }),
@@ -3607,6 +3741,7 @@ export function chatScript(
   el('secondOpinion').addEventListener('click', () =>
     vscode.postMessage({ type: 'secondOpinion' }),
   );
+  el('reconsider').addEventListener('click', () => vscode.postMessage({ type: 'reconsider' }));
   el('webGptDiscussion').addEventListener('click', () =>
     vscode.postMessage({ type: 'webGptDiscussion' }),
   );
@@ -4266,6 +4401,10 @@ export function chatScript(
       const secondOpinionButton = el('secondOpinion');
       secondOpinionButton.disabled = data.running;
       secondOpinionButton.setAttribute('aria-disabled', String(data.running));
+      // 再考も同じ実行枠（SecondOpinionRegistry）を使うので、同じ間は押せなくする
+      const reconsiderButton = el('reconsider');
+      reconsiderButton.disabled = data.running;
+      reconsiderButton.setAttribute('aria-disabled', String(data.running));
     }
     if (data.type === 'secondOpinionHandoff') {
       // 承認待ちの下書きの有無が変わった（Issue #929）

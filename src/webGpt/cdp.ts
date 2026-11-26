@@ -35,7 +35,9 @@ export class CdpBrowser {
   /** `endpoint`（`http://127.0.0.1:9222`形式）のブラウザへつなぐ。 */
   static async connect(rawEndpoint: string): Promise<CdpBrowser> {
     if (typeof WebSocket !== 'function') {
-      throw new Error('このVS CodeのNode.jsはWebSocketに対応していません。VS Codeを更新してください');
+      throw new Error(
+        'このVS CodeのNode.jsはWebSocketに対応していません。VS Codeを更新してください',
+      );
     }
     const endpoint = parseCdpEndpoint(rawEndpoint);
     const response = await fetch(`${endpoint}/json/version`, {
@@ -180,7 +182,9 @@ export async function evaluateInPage(
   );
   const exceptionDetails = response['exceptionDetails'];
   if (exceptionDetails !== undefined) {
-    throw new Error(`ChatGPTの画面でスクリプトが失敗しました: ${exceptionSummary(exceptionDetails)}`);
+    throw new Error(
+      `ChatGPTの画面でスクリプトが失敗しました: ${exceptionSummary(exceptionDetails)}`,
+    );
   }
   const result = response['result'];
   return typeof result === 'object' && result !== null && 'value' in result

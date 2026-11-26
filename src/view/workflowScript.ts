@@ -38,6 +38,7 @@ export function workflowScript(): string {
     workflow: 'ワークフロー',
     taskRun: 'タスクrun',
     roadmapRun: 'ロードマップrun',
+    chat: '通常チャット',
   };
 
   // 交差の待機の理由（Issue #1469）。ファイルは先頭2件まで出し、残りは件数だけにする

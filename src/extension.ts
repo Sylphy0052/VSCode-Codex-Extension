@@ -6,6 +6,7 @@ import { ActivityLogger, nodeClock, resolveBufferDir } from './activity/activity
 import type { RecordRequest as ActivityRequest } from './activity/activityLogger';
 import { nodeActivityAppender } from './activity/nodeAppender';
 import { AccountAutoSwitcher } from './claude/accountAutoSwitch';
+import { effectivePct } from './claude/accountPolicy';
 import { ClaudeAccountStore } from './claude/accountStore';
 import { StandbyUsageProbe } from './claude/standbyUsageProbe';
 import { ClaudeAgentProbe } from './claude/agentProbe';
@@ -19,7 +20,7 @@ import { ClaudeModelProbe } from './claude/modelProbe';
 import { ClaudePluginActions } from './claude/pluginsActions';
 import { ClaudePluginsProbe } from './claude/pluginsProbe';
 import { ClaudeProvider } from './claude/provider';
-import { ClaudeSessionNameStore } from './claude/sessionNames';
+import { ClaudeSessionNameStore, claudeSessionNamesFilePath } from './claude/sessionNames';
 import { ClaudeSessionStore } from './claude/sessionStore';
 import { ClaudeSessionIndex } from './claude/sessionIndex';
 import { claudeSessionIndexFilePath } from './claude/sessionIndexFile';
@@ -153,6 +154,7 @@ import {
   type WorkflowDefinition,
 } from './orchestrator/workflow';
 import type { Provider } from './orchestrator/workflow';
+import { workflowRunLimits } from './orchestrator/retrospectiveMetrics/workflowRunMetrics';
 import {
   formatResolutionFailureMessage,
   resolveSpawnPath,
@@ -170,10 +172,10 @@ import {
   type SessionPreset,
 } from './sessionPresets';
 import { nodeCommandRunner as nodeAccountCommandRunner } from './process/commandRunner';
-import { nodeFileSystem, nodeMemoryFileSystem } from './session/nodeFileSystem';
+import { nodeFileSystem } from './session/nodeFileSystem';
 import { nodeFileScan } from './session/nodeFileScan';
 import { purgeStaleOutputOffload } from './session/nodeOutputOffload';
-import { SessionModelSettingsStore } from './sessionModelSettings';
+import { SessionModelSettingsStore, sessionModelSettingsFilePath } from './sessionModelSettings';
 import { FileMentionCatalog } from './provider/fileMentions';
 import { InMemoryMetaCache } from './session/ports';
 import { pruneMetaCacheOnStartup } from './session/pruneOnStartup';
@@ -215,7 +217,7 @@ import {
   type ReviewFailureReason,
 } from './view/localReview';
 import { ClaudeChatViewManager } from './view/claudeChatView';
-import { ControlPanelViewProvider } from './view/controlPanelView';
+import { type ClaudeAccountDeps, ControlPanelViewProvider } from './view/controlPanelView';
 import {
   configureExtensionSkillRoots,
   notifyExtensionSkillRootsChanged,
@@ -228,9 +230,78 @@ import { ProgressViewManager } from './view/progressView';
 import { formatRelativeTime } from './view/relativeTime';
 import type { SessionControlAction, SessionControlResult } from './view/chatManagerBase';
 import { ApprovalDisclosureLog } from './view/approvalDisclosure';
-import { buildSessionKanban, type ManagedSessionInput } from './view/sessionKanbanModel';
-import { SessionKanbanViewManager, type SessionKanbanTarget } from './view/sessionKanbanView';
+import {
+  toReplyPayload,
+  toSessionControlAction,
+  type SessionControlTarget,
+} from './view/sessionControlMessage';
+import {
+  fromRemoteReply,
+  remoteReplyTimeoutMs,
+  routeSessionControl,
+  toRemoteControlInput,
+} from './view/sessionControlRouting';
+import {
+  ActivitySince,
+  buildMissionControlSnapshot,
+  createRepoResolver,
+  lastOutputLine,
+  LastOutputTracker,
+  outputFingerprint,
+} from './view/missionControlModel';
+import {
+  createMissionControlLauncher,
+  readMissionControlReplyWaitMs,
+  readMissionControlStallMs,
+} from './view/missionControlLauncher';
+import {
+  MISSION_CONTROL_CLOSE_COMMAND,
+  MISSION_CONTROL_OPEN_COMMAND,
+  MissionControlViewManager,
+} from './view/missionControlView';
+import { withSafeGitConfig } from './view/missionControlGit';
+import { ReviewTracker } from './view/missionControlReview';
+import {
+  RUNNING_TURNS_KEY,
+  RunningTurnJournal,
+  type RunningTurnSession,
+} from './view/missionControlResume';
+import { createMissionControlHost, isRunningTurn, resumeKey } from './view/missionControlHost';
+import {
+  buildAllPeriodHistory,
+  isLifecycleOp,
+  LIFECYCLE_UNSUPPORTED_MESSAGE,
+  mergeArchivedSessions,
+  openHistoryTarget,
+  resolveHistoryOpen,
+  runLifecycle,
+  supportsArchive,
+  toHandoffListing,
+  transcriptPathsToCheck,
+  type McOffListSession,
+} from './view/missionControlSessions';
+import { HANDOFF_LEDGER_INDEX_FILE, HandoffLedger } from './view/handoffLedger';
+import { readStateDbThreads } from './codex/stateDbThreads';
+import {
+  MC_HISTORY_LIST_MIN,
+  missingFiles,
+  SESSION_CATALOG_FILE,
+  SessionCatalog,
+} from './view/sessionCatalog';
+import type { McLifecycleOp, McProvider } from './webview/missionControl/protocol';
+import type { EffectiveLaunchSettings } from './view/missionControlLaunchOptions';
 import { setupTaskRun } from './view/taskRunSetup';
+import type { TaskRunPendingPort } from './view/taskRunPending';
+import type { McRunsPort } from './view/missionControlRuns';
+import {
+  ALREADY_ANSWERED_MESSAGE,
+  AnsweredPendingIds,
+  buildChatPendingItems,
+  chatPendingId,
+  PendingFirstSeen,
+  type PendingItem,
+} from './view/pendingItem';
+import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from './orchestrator/roadmapQuestionMcp';
 import {
   generateWindowId,
   sessionHubRoot,
@@ -238,10 +309,8 @@ import {
   SessionHubRequestPort,
   SessionHubRequestWatcher,
   SessionHubWriter,
-  isSharedApprovalDecision,
-  isSharedHandoffDecision,
-  type SessionHubReplyPayload,
-  type SessionHubRequest,
+  LONG_REPLY_TIMEOUT_MS,
+  collectSkillUses,
   type SharedSession,
 } from './view/sessionHub';
 import { ForgeHubViewManager } from './view/forgeHubView';
@@ -251,6 +320,19 @@ import { SessionTreeProvider } from './view/sessionTreeProvider';
 import { FavoritesTreeProvider } from './view/favoritesTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
+import { buildMcUsage } from './view/missionControlUsage';
+import { normalizeRetentionDays, readWorkHistory, WorkHistoryStore } from './view/workHistory';
+import { loadUsageHistory } from './view/usageHistory';
+import { aggregateWorkUnits } from './view/workUnits';
+import { buildWorkCalendar } from './view/workCalendar';
+import { TodoStore } from './view/missionControlTodos';
+import { openSessionWithDraft } from './view/missionControlLaunch';
+import {
+  setWorkHistoryHandoffSink,
+  WORK_HISTORY_OBSERVE_INTERVAL_MS,
+  WorkHistoryRecorder,
+} from './view/workHistoryRecorder';
+import { createMcSettingsPort } from './view/missionControlSettings';
 import { buildWorkflowMenuEntries } from './view/workflowMenu';
 import {
   WorkflowViewManager,
@@ -268,6 +350,30 @@ import { AgentReportedRecorder } from './verification/agentReported';
 import { VerificationStore } from './verification/store';
 
 const META_CACHE_KEY = 'codex.metaCache.v1';
+
+/** Mission Controlから選んだセッションを変える操作（Issue #2160）。受け付けたら1行残す。 */
+const SESSION_OP_KINDS: ReadonlySet<SessionControlAction['kind']> = new Set([
+  'rename',
+  'fork',
+  'pin',
+  'unpin',
+  'clear',
+  'handoff',
+  'rewind',
+]);
+
+/** 受信側で`controlSessionAsync`を待つ操作（Issue #2158、#2159、#2160）。 */
+const ASYNC_CONTROL_KINDS: ReadonlySet<SessionControlAction['kind']> = new Set([
+  'fileCandidates',
+  'commandCandidates',
+  'changeSetting',
+  'rename',
+  'fork',
+  'clear',
+  'handoff',
+  'rewindPreview',
+  'rewind',
+]);
 
 /**
  * `test/integration/**` だけが使う内部参照。エンドユーザー向けの公開APIではない
@@ -449,9 +555,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const claudeHome = resolveClaudeHome(readClaudeConfig().configDir, nodeLocatorDeps);
   const claudeDirs = claudePaths(claudeHome);
   log.info(`CLAUDE_CONFIG_DIR=${claudeHome}`);
-  // 人が付け直したセッション名（issue #199）。globalStateはワークスペースをまたいで
-  // 有効なため、セッションidがワークスペースをまたいでも一意であることと合わせられる
-  const claudeSessionNames = new ClaudeSessionNameStore(context.globalState);
+  // 人が付け直したセッション名（issue #199）。セッションidはワークスペースをまたいでも
+  // 一意なため、ワークスペース別にしない。globalStateは全ウィンドウへ配信されるので、
+  // 保存先は`globalStorageUri`配下のファイル（Issue #2006）
+  const claudeSessionNames = new ClaudeSessionNameStore(
+    claudeSessionNamesFilePath(context.globalStorageUri.fsPath),
+    context.globalState,
+    (error) => log.warn(`セッション名の移行に失敗しました（次回起動で再試行）: ${String(error)}`),
+  );
   const claudeStore = new ClaudeSessionStore(
     nodeFileSystem,
     claudeDirs,
@@ -502,7 +613,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const claudeAgents = new ClaudeAgentProbe(claudePath, log);
   const claudeMcp = new ClaudeMcpProbe(claudePath, log);
   const claudeHooks = new ClaudeHooksProbe(claudePath, log);
-  const claudeSkills = new ClaudeSkillsProbe(claudePath, log);
+  const claudeSkills = new ClaudeSkillsProbe(claudePath, log, claudeHome);
   const claudeAuth = new ClaudeAuthProbe(claudePath, log);
   // ログイン/ログアウトの実行はCLIサブコマンドへ委譲する（issue #29、accountActions.ts参照）
   const codexAccountActions = new CodexAccountActions(nodeAccountCommandRunner, codexPath);
@@ -590,12 +701,16 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 表示してセクションを展開する経路（`revealSection`）を使うため、`chat`より先に
   // 構築しておく（以前はセッション一覧まわりの構築の後段でまとめて作っていた）
   // 複数アカウントの切り替え（Issue #1921）。保存先は検証スクリプトと共通の `<claudeHome>/accounts/`
-  const claudeAccounts = {
+  const claudeAccounts: ClaudeAccountDeps = {
     store: new ClaudeAccountStore(
       claudeHome,
       createProfileIdentifier((message) => log.warn(message)),
       resolveClaudeGlobalConfig(claudeHome, nodeLocatorDeps),
     ),
+    // 手動の切り替えでも、自動の切り替えと同じく前後の両アカウントを取り直す（Issue #1955）。
+    // 切り替えの操作は`accountAutoSwitcher`の構築後にしか来ない
+    beforeSwitch: async () => accountAutoSwitcher.measureBeforeSwitch(),
+    onSwitched: async () => accountAutoSwitcher.measureAfterSwitch(),
   };
   const panel = new ControlPanelViewProvider(
     settings,
@@ -607,7 +722,11 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(ControlPanelViewProvider.viewType, panel),
   );
-  const sessionModelSettings = new SessionModelSettingsStore(context.globalState);
+  const sessionModelSettings = new SessionModelSettingsStore(
+    sessionModelSettingsFilePath(context.globalStorageUri.fsPath),
+    context.globalState,
+    (error) => log.warn(`モデル設定の移行に失敗しました（次回起動で再試行）: ${String(error)}`),
+  );
   // お気に入り（Issue #1366）。履歴ツリー・お気に入りツリー・チャット画面の3箇所から
   // 参照するため、それらより前に生成する
   const pinnedSessions = new PinnedSessionStore(context.globalState);
@@ -673,7 +792,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }))
     .then((result) => {
       if (!result.ok) {
-        log.warn(`待機中のアカウントの計測に使った一時ディレクトリを消せませんでした: ${result.reason}`);
+        log.warn(
+          `待機中のアカウントの計測に使った一時ディレクトリを消せませんでした: ${result.reason}`,
+        );
       } else if (result.warning !== undefined) {
         log.warn(result.warning);
       }
@@ -683,6 +804,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const accountAutoSwitcher = new AccountAutoSwitcher({
     probeStandby: (id, nowMs) => standbyUsage.probeAccount(id, nowMs),
     pollStandby: (nowMs) => standbyUsage.probeOne(nowMs),
+    probeLive: (): Promise<void> => claudeChat.refreshUsageNow(),
+    onUsageChanged: (): Promise<void> => panel.refreshClaudeAccounts(),
     store: claudeAccounts.store,
     config: readClaudeAutoSwitchConfig,
     notify: (message) => void vscode.window.showInformationMessage(message),
@@ -703,9 +826,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     (activity) => recordActivity({ ...activity, source: 'claude-code' }),
     (usage) => usageBar.updateClaude(usage),
     isTaskManagedThread,
-    // メモリ追記（issue #6/#144）専用の読み取り口と、前回選んだ追記先の記憶先
-    nodeMemoryFileSystem,
-    context.workspaceState,
     // Claude Code画面の統合テスト（Issue #186）。セッションを作るたびに読み直すため、
     // `activate()` が終わった後からでも差し替えられる。
     () => claudeSpawnOverride.spawn,
@@ -715,6 +835,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     pinnedSessions,
     { marks: manuallyNamedSessions },
     accountAutoSwitcher,
+    // 5時間枠と週次の使用率とリセット時刻（Issue #2174）。ステータスバーの表示には使わない
+    (probed) => usageBar.updateClaudeSlots(probed),
   );
   context.subscriptions.push(claudeChat);
 
@@ -949,13 +1071,21 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
 
   // このウィンドウ（拡張ホストの起動）の識別子。セッション統括（下の`sessionHubRootDir`）で使うため先に作る
   const windowId = generateWindowId();
+  // task runの質問をsession-hubへ公開する口（Issue #2135）。実体は`setupTaskRun`が入れる
+  const taskRunPendingHolder: { current?: TaskRunPendingPort | undefined } = {};
+  // Mission ControlのRunsタブ（Issue #2150）の口。実体は`setupTaskRun`が入れる
+  const missionControlRunsHolder: { current?: McRunsPort | undefined } = {};
 
   // オーケストレータモード（Issue #1505）
   context.subscriptions.push(
     ...setupTaskRun({
       store: taskRunStore,
       windowId,
+      pendingPort: taskRunPendingHolder,
+      missionControlRuns: missionControlRunsHolder,
       globalStorageDir: context.globalStorageUri.fsPath,
+      extensionVersion:
+        (context.extension.packageJSON as { version?: string }).version ?? 'unknown',
       hosts: {
         codex: overridableHost('codex', chat),
         claude: overridableHost('claude', claudeChat),
@@ -984,6 +1114,28 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       settings,
       log,
       runNotes,
+      chatConversationHosts: [chat, claudeChat],
+      extensionRepositoryUrl: (context.extension.packageJSON as { repository?: { url?: string } })
+        .repository?.url,
+      // 自律改善の予算（Issue #2084）。Claudeは稼働中のアカウントの週次の記録から見積もる。
+      // Codexの週次は取る口がここに無いため分からない扱い（止めない）
+      weeklyUsagePct: async (engine) => {
+        if (engine !== 'claude') {
+          return undefined;
+        }
+        const snapshot = await claudeAccounts.store.list();
+        const weekly = snapshot.ok
+          ? snapshot.accounts.find((a) => a.current)?.usage?.weekly
+          : undefined;
+        return weekly === undefined ? undefined : effectivePct(weekly, Date.now());
+      },
+      // ワークフローのrunの振り返り（Issue #2122）
+      workflowRuns: {
+        store: workflowStore,
+        providers: (runId) =>
+          workflowRunner.getSnapshot(runId)?.tasks.map((task) => task.provider) ?? [],
+        limits: () => workflowRunLimits(readWorkflowsConfig().maxAutoResumeAttempts),
+      },
     }),
   );
 
@@ -1395,24 +1547,77 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const sessionHubRootDir = sessionHubRoot(context.globalStorageUri.fsPath);
   // 共有ファイルへ出す項目はここで明示的に選ぶ。`...session`のままだと
   // `ManagedChatSession`へ項目が増えるたびに、意図しない値が共有ファイルへ流れ出す
-  const toSharedSessions = (provider: 'codex' | 'claude'): SharedSession[] =>
-    (provider === 'codex' ? chat : claudeChat).managedSessions().map((session) => ({
-      threadId: session.threadId,
-      title: session.title,
-      cwd: session.cwd,
-      activity: session.activity,
-      loop: session.loop,
-      provider,
-    }));
-  const currentWindowSessions = (): SharedSession[] => [
-    ...toSharedSessions('codex'),
-    ...toSharedSessions('claude'),
-  ];
+  // 待ち項目（Issue #2135）を最初に見た時刻。状態側に発生時刻が無いため、ここで覚える
+  const pendingFirstSeen = new PendingFirstSeen();
+  // 出力が最後に動いた時刻（Issue #2137の5、停滞の判定）。状態が変わるたびにここが呼ばれる
+  const lastOutputTracker = new LastOutputTracker();
+  const toSharedSessions = (provider: 'codex' | 'claude'): SharedSession[] => {
+    const manager = provider === 'codex' ? chat : claudeChat;
+    return manager.managedSessions().map((session) => {
+      const state = manager.getChatState(session.threadId);
+      return {
+        threadId: session.threadId,
+        title: session.title,
+        cwd: session.cwd,
+        activity: session.activity,
+        loop: session.loop,
+        provider,
+        lastOutput: state === undefined ? undefined : lastOutputLine(state.items),
+        lastOutputAt:
+          state === undefined
+            ? undefined
+            : lastOutputTracker.observe(
+                `${provider}:${session.threadId}`,
+                outputFingerprint(state.items),
+              ),
+        // カード表示（Issue #2151）。取れないものは載せない（0や-を出さない）
+        model: state?.observedModel?.model,
+        tokens: state?.sessionTokens,
+        costUsd: state?.sessionCost?.totalCostUsd,
+        // 返事待ちの判定と未読（Issue #2171）。立っていなければ載せない
+        taskManaged: session.taskManaged === true ? true : undefined,
+        handoffKept: session.handoffKept !== undefined ? true : undefined,
+        unread: session.replyUnread === true ? true : undefined,
+        // セッションの目的の1文要約（Issue #2172）。まだ無ければ載せない
+        purpose: session.purpose,
+        branch: session.branch,
+        // 起動したskill（Issue #2173）。Codexは起動を見分けるイベントが無いので集まらない
+        skills: state === undefined ? undefined : collectSkillUses(state.items),
+        pending:
+          state === undefined
+            ? []
+            : buildChatPendingItems(
+                state,
+                {
+                  windowId,
+                  threadId: session.threadId,
+                  provider,
+                  cwd: session.cwd,
+                  handoffPending: session.activity === 'handoffPending',
+                },
+                pendingFirstSeen,
+              ),
+      };
+    });
+  };
+  const currentWindowSessions = (): SharedSession[] => {
+    const sessions = [...toSharedSessions('codex'), ...toSharedSessions('claude')];
+    lastOutputTracker.retain(
+      new Set(sessions.map((session) => `${session.provider}:${session.threadId}`)),
+    );
+    pendingFirstSeen.retain(
+      new Set(sessions.flatMap((session) => (session.pending ?? []).map((item) => item.id))),
+    );
+    return sessions;
+  };
+  const currentWindowPending = (): PendingItem[] =>
+    taskRunPendingHolder.current?.list(windowId) ?? [];
   const sessionHubWriter = new SessionHubWriter(
     sessionHubRootDir,
     windowId,
     currentWindowSessions,
     log,
+    currentWindowPending,
   );
   sessionHubWriter.start();
   const sessionHubReader = new SessionHubReader(sessionHubRootDir, windowId, log);
@@ -1423,19 +1628,128 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   // 中身を渡した相手と要求を覚えておき、取り寄せていない要求への決定を受信側でも弾く
   // （Issue #1259）。画面側だけの約束にすると、統括ページを経由しない経路で素通りする
   const approvalDisclosure = new ApprovalDisclosureLog();
-  const controlSession = (
+  // archive・delete（Codex CLIのサブコマンド）。セッション一覧の右クリックとMission Control
+  // （Issue #2149）が同じものを使う。別ウィンドウからの要求を受ける前に作っておく
+  const actions = new SessionActions(nodeCommandRunner, codexPath);
+  /**
+   * 会話を閉じる・archive・deleteする（Issue #2149の1）。自ウィンドウのMission Controlからも、
+   * 別ウィンドウから要求ファイルで届いた分からも、ここを通す。確認は要求元が済ませている。
+   *
+   * archive・deleteはCodexだけ（Claude Codeにはarchiveの仕組みが無い）。開いている会話は
+   * 先に閉じる。プロセスが動いたままだとロールアウトへ書き続けるため。
+   */
+  const lifecycleSession = async (
+    provider: 'codex' | 'claude',
+    threadId: string,
+    op: McLifecycleOp,
+    from: string,
+  ): Promise<SessionControlResult> => {
+    const manager = provider === 'claude' ? claudeChat : chat;
+    let result: SessionControlResult;
+    if (op === 'close') {
+      result = await manager.closeSession(threadId);
+    } else if (!supportsArchive(provider)) {
+      result = { ok: false, error: LIFECYCLE_UNSUPPORTED_MESSAGE };
+    } else {
+      const closed = manager.hasOpenSession(threadId)
+        ? await manager.closeSession(threadId)
+        : { ok: true };
+      if (!closed.ok) {
+        result = closed;
+      } else {
+        try {
+          const run = await actions.run(op, threadId);
+          if (run.code === 0) {
+            if (op === 'delete') {
+              await sessionModelSettings.delete('codex', threadId);
+            }
+            result = { ok: true };
+          } else {
+            result = { ok: false, error: `${op}に失敗しました: ${run.stderr.trim()}` };
+          }
+        } catch (e: unknown) {
+          // `buildActionArgs`がidの形を確かめて投げる
+          result = { ok: false, error: `${op}に失敗しました: ${String(e)}` };
+        }
+      }
+    }
+    // 閉じる・archive・deleteは成否によらず1行残す。どのウィンドウから止めたかを後から追う
+    log.info(
+      `セッション統括: ${op}を受け付けました（要求元 ${from}、${provider}/${threadId}、` +
+        `結果 ${result.ok ? '実行' : (result.error ?? '失敗')}）`,
+    );
+    return result;
+  };
+  // 回答済みの待ち項目（Issue #2135）。同じ項目に2箇所から答えても二重に送らない
+  const answeredPending = new AnsweredPendingIds();
+  /**
+   * 履歴のピン留め / 解除（Issue #2160）。印は全ウィンドウ共通の`globalState`にあり会話に
+   * 属さないため、会話が開いているかを問わずこのウィンドウで済ませる。
+   */
+  const setSessionPinned = async (
+    provider: 'codex' | 'claude',
+    threadId: string,
+    pinned: boolean,
+  ): Promise<SessionControlResult> => {
+    const session = { provider, id: threadId };
+    await (pinned ? tree.pin(session) : tree.unpin(session));
+    return { ok: true };
+  };
+  const controlSession = async (
     provider: 'codex' | 'claude',
     threadId: string,
     action: SessionControlAction,
     /** 要求元のwindowId。自ウィンドウのカードからの操作なら自分自身のid */
     from: string,
-  ): SessionControlResult => {
+  ): Promise<SessionControlResult> => {
     const target = { from, provider, threadId };
-    const result =
-      action.kind === 'approvalDecision' &&
-      !approvalDisclosure.consume(target, action.approvalRequestId)
-        ? { ok: false, error: '承認の内容を表示してから操作してください' }
-        : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+    const pendingId =
+      action.kind === 'answerQuestion'
+        ? chatPendingId(provider, threadId, 'askUserQuestion', action.pendingRequestId)
+        : action.kind === 'answerPrompt'
+          ? chatPendingId(provider, threadId, 'codexPrompt', action.pendingRequestId)
+          : undefined;
+    const result: SessionControlResult =
+      pendingId !== undefined && answeredPending.has(pendingId)
+        ? { ok: false, error: ALREADY_ANSWERED_MESSAGE }
+        : (action.kind === 'approvalDecision' &&
+              !approvalDisclosure.consume(target, action.approvalRequestId)) ||
+            ((action.kind === 'answerQuestion' || action.kind === 'answerPrompt') &&
+              !approvalDisclosure.consume(target, action.pendingRequestId))
+          ? { ok: false, error: '承認の内容を表示してから操作してください' }
+          : action.kind === 'pin' || action.kind === 'unpin'
+            ? await setSessionPinned(provider, threadId, action.kind === 'pin')
+            : // 候補の取り寄せ・設定の変更（Issue #2159）・セッション操作（Issue #2160）だけ待つ。
+              // 回答は待ちを挟まず、二重送信の判定（answeredPending）から記録までを同期で済ませる
+              ASYNC_CONTROL_KINDS.has(action.kind)
+              ? await (provider === 'claude' ? claudeChat : chat).controlSessionAsync(
+                  threadId,
+                  action,
+                )
+              : (provider === 'claude' ? claudeChat : chat).controlSession(threadId, action);
+    // Claudeの名前は拡張機能側の保存が正。履歴の一覧へすぐ出す（`claude.renameChat`と同じ）
+    if (action.kind === 'rename' && provider === 'claude' && result.ok) {
+      tree.refresh();
+    }
+    // 会話を変える操作（Issue #2160）は1行残す。どのウィンドウから変えたかを後から追えるように
+    if (SESSION_OP_KINDS.has(action.kind)) {
+      log.info(
+        `セッション統括: ${action.kind}を受け付けました` +
+          `（要求元 ${from}、${provider}/${threadId}、` +
+          `結果 ${result.ok ? '実行' : (result.error ?? '失敗')}）`,
+      );
+    }
+    if (pendingId !== undefined && result.ok) {
+      answeredPending.add(pendingId);
+    }
+    if (pendingId !== undefined) {
+      // 回答の中身は残さない（伏せ字の欄・会話本文に準じる内容を含みうる）
+      log.info(
+        `セッション統括: 質問への回答を受け付けました` +
+          `（要求元 ${from}、${provider}/${threadId}、項目 ${pendingId}、` +
+          `結果 ${result.ok ? '送信' : (result.error ?? '失敗')}）`,
+      );
+    }
     if (action.kind === 'approvalDetail' && result.approvals !== undefined) {
       approvalDisclosure.record(
         target,
@@ -1462,16 +1776,76 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     }
     return result;
   };
+  /**
+   * task runの質問への回答（Issue #2135）。自ウィンドウが公開している項目だけを受け付け、
+   * 既存の回答経路（`TaskRunController.answerQuestion`）へ渡す。
+   */
+  const answerTaskRunPending = async (
+    pendingId: string,
+    text: string | undefined,
+    from: string,
+  ): Promise<SessionControlResult> => {
+    const port = taskRunPendingHolder.current;
+    const item = port?.list(windowId).find((candidate) => candidate.id === pendingId);
+    const { runId, taskId, questionId } = item?.payload ?? {};
+    let result: SessionControlResult;
+    if (answeredPending.has(pendingId)) {
+      result = { ok: false, error: ALREADY_ANSWERED_MESSAGE };
+    } else if (
+      port === undefined ||
+      runId === undefined ||
+      taskId === undefined ||
+      questionId === undefined
+    ) {
+      result = { ok: false, error: ALREADY_ANSWERED_MESSAGE };
+    } else {
+      const answer = parseUserAnswer(text);
+      if (answer === undefined) {
+        result = {
+          ok: false,
+          error: `回答は1〜${String(MAX_USER_ANSWER_LENGTH)}文字で入力してください`,
+        };
+      } else {
+        const outcome = await port.answer(runId, taskId, questionId, answer);
+        result = outcome.ok ? { ok: true } : { ok: false, error: outcome.message };
+      }
+    }
+    if (result.ok) {
+      answeredPending.add(pendingId);
+    }
+    log.info(
+      `セッション統括: task runの質問への回答を受け付けました` +
+        `（要求元 ${from}、項目 ${pendingId}、結果 ${result.ok ? '送信' : (result.error ?? '失敗')}）`,
+    );
+    return result;
+  };
   const sessionHubRequestWatcher = new SessionHubRequestWatcher(
     sessionHubRootDir,
     windowId,
-    (request) => {
+    async (request) => {
+      if (request.kind === 'answerTaskRunQuestion') {
+        const answered = await answerTaskRunPending(
+          request.pendingId ?? '',
+          request.text,
+          request.from,
+        );
+        return { ok: answered.ok, error: answered.error };
+      }
+      if (isLifecycleOp(request.kind)) {
+        const done = await lifecycleSession(
+          request.provider,
+          request.threadId,
+          request.kind,
+          request.from,
+        );
+        return { ok: done.ok, error: done.error };
+      }
       const action = toSessionControlAction(request);
       if (action === undefined) {
         // 版が違うウィンドウから知らない操作が届いた。黙って捨てると相手が待つ
         return { ok: false, error: `この版のウィンドウは${request.kind}を扱えません` };
       }
-      const result = controlSession(request.provider, request.threadId, action, request.from);
+      const result = await controlSession(request.provider, request.threadId, action, request.from);
       if (!result.ok) {
         log.info(`セッション統括: 要求を実行できませんでした（${result.error ?? '理由は不明'}）`);
       }
@@ -1484,44 +1858,48 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     log,
   );
   sessionHubRequestWatcher.start();
+  /** 閉じる・archive・deleteを宛先のウィンドウで行う（Issue #2149の1）。 */
+  const lifecycleSessionAnywhere = async (
+    target: SessionControlTarget,
+    op: McLifecycleOp,
+  ): Promise<SessionControlResult> => {
+    if (target.windowId === windowId) {
+      return lifecycleSession(target.provider, target.threadId, op, windowId);
+    }
+    const reply = await sessionHubRequestPort.request(
+      target.windowId,
+      { kind: op, provider: target.provider, threadId: target.threadId },
+      // archive・deleteは相手のウィンドウでCLIを起動するため、既定の5秒では足りない
+      LONG_REPLY_TIMEOUT_MS,
+    );
+    return { ok: reply.ok, error: reply.error };
+  };
   /**
    * 宛先のウィンドウを問わず、セッション1件へ操作を1つ届ける（Issue #1258、#1274）。
    *
    * 自ウィンドウなら`controlSession`を直接呼び、別ウィンドウなら要求ファイル経由で流す。
-   * 統括ページ（`SessionKanbanViewManager`）と、エージェント向けのMCPの口
+   * Mission Control（`MissionControlViewManager`）と、エージェント向けのMCPの口
    * （`SessionBridgePort`。Issue #1274）が同じこの関数を通る——宛先解決を1箇所へ
    * 集めるため、入口ごとに分岐を持たせない。
    */
   const controlSessionAnywhere = async (
-    target: SessionKanbanTarget,
+    target: SessionControlTarget,
     action: SessionControlAction,
   ): Promise<SessionControlResult> => {
-    if (target.windowId === windowId) {
+    // 振り分けと要求の組み立ては`sessionControlRouting.ts`に置き、unitテストで確かめる
+    const route = routeSessionControl(target, action, windowId);
+    if (route === 'taskRunQuestion' && action.kind === 'answerTaskRunQuestion') {
+      return answerTaskRunPending(action.pendingId, action.text, windowId);
+    }
+    if (route === 'local') {
       return controlSession(target.provider, target.threadId, action, windowId);
     }
-    const reply = await sessionHubRequestPort.request(target.windowId, {
-      kind: action.kind,
-      provider: target.provider,
-      threadId: target.threadId,
-      text: action.kind === 'send' || action.kind === 'sideQuestion' ? action.text : undefined,
-      sideQuestionId: action.kind === 'sideQuestionResult' ? action.sideQuestionId : undefined,
-      approvalRequestId: action.kind === 'approvalDecision' ? action.approvalRequestId : undefined,
-      decision: action.kind === 'approvalDecision' ? action.decision : undefined,
-      limit: action.kind === 'recentTurns' ? action.limit : undefined,
-      handoffRequestId: action.kind === 'handoffDecision' ? action.handoffRequestId : undefined,
-      handoffDecision: action.kind === 'handoffDecision' ? action.decision : undefined,
-      handoffModel: action.kind === 'handoffDecision' ? action.model : undefined,
-      handoffEffort: action.kind === 'handoffDecision' ? action.effort : undefined,
-    });
-    return {
-      ok: reply.ok,
-      error: reply.error,
-      approvals: reply.payload?.approvals,
-      turns: reply.payload?.turns,
-      capturedAt: reply.payload?.capturedAt,
-      handoff: reply.payload?.handoff,
-      sideQuestion: reply.payload?.sideQuestion,
-    };
+    const reply = await sessionHubRequestPort.request(
+      target.windowId,
+      toRemoteControlInput(target, action),
+      remoteReplyTimeoutMs(action.kind),
+    );
+    return fromRemoteReply(reply);
   };
   // エージェント向けの口（design.md §16.21「宛先解決の統合」、Issue #1274）。
   // `WorkflowRunner`はこれより前に作られるため、`messaging.sessionBridge`は毎回
@@ -1564,6 +1942,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       windowId,
       sessionBridge: () => sessionBridgeHolder.current,
       logPort: { error: (message) => log.error(message) },
+      toolUsageMetrics: { enabled: readToolUsageMetricsEnabled, log: (line) => log.info(line) },
       configDir: path.join(context.globalStorageUri.fsPath, 'session-messaging-mcp'),
     })
       .then((host) => {
@@ -1590,7 +1969,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   const askImageGenerationConsent = async (prompt: string): Promise<boolean> => {
     const once = '今回だけ許可';
     const forWindow = 'このウィンドウ中は許可';
-    const shown = prompt.length > 200 ? `${prompt.slice(0, 200)}…` : prompt;
+    // 指示文は外部由来。改行で本文を偽装されないよう1行にする
+    const shown = sanitizeInlineText(prompt, 200);
     const choice = await vscode.window.showWarningMessage(
       `エージェントがChatGPT（Web）で画像を生成しようとしています。ログイン中のChromeを操作し、生成枠を使います。\n指示: ${shown}`,
       { modal: true },
@@ -1629,6 +2009,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         return (await imageGenerationConsent) ? undefined : '利用者が画像生成を許可しませんでした';
       },
       logWarn: (message) => log.warn(message),
+      logInfo: (message) => log.info(message),
     });
     imageGenerationHost
       .then((host) => {
@@ -1660,23 +2041,408 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     },
   });
   ensureImageGenerationHost();
-  const sessionKanban = new SessionKanbanViewManager(
-    () => {
-      const roots = vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? [];
-      const selfSessions: ManagedSessionInput[] = currentWindowSessions().map((session) => ({
-        ...session,
-        windowId,
-      }));
-      const otherSessions: ManagedSessionInput[] = sessionHubReader
-        .getOthers()
-        .flatMap((window) =>
-          window.sessions.map((session) => ({ ...session, windowId: window.windowId })),
-        );
-      return buildSessionKanban([...selfSessions, ...otherSessions], roots, windowId);
-    },
-    controlSessionAnywhere,
+  // Mission Control（Issue #2136）。全ウィンドウのセッションと待ち項目
+  // から1画面を作り、操作も同じ`controlSessionAnywhere`を通す
+  const missionControlRepoResolver = createRepoResolver();
+  const missionControlActivitySince = new ActivitySince();
+  // レビュー待ち（Issue #2138の1）。gitは裏で1件ずつ走らせ、結果が変わったら画面を更新する
+  const missionControlReview = new ReviewTracker(withSafeGitConfig(nodeGitCommandRunner), () =>
+    missionControl.refresh(),
+  );
+  // Reloadで切れた会話（Issue #2138の3）。前回の起動で実行中だった分を読み出して「再開待ち」にする
+  const runningTurnJournal = new RunningTurnJournal({
+    get: () => context.workspaceState.get(RUNNING_TURNS_KEY),
+    update: (value) => context.workspaceState.update(RUNNING_TURNS_KEY, value),
+  });
+  const missionControlResumable = new Map(
+    runningTurnJournal.takePrevious().map((entry) => [resumeKey(entry), entry] as const),
+  );
+  /** このウィンドウの会話（再開待ち・Reloadの確認に使う軽い一覧）。 */
+  const currentWindowManagedSessions = (): RunningTurnSession[] => [
+    ...chat.managedSessions().map((session) => ({ ...session, provider: 'codex' as const })),
+    ...claudeChat.managedSessions().map((session) => ({ ...session, provider: 'claude' as const })),
+  ];
+  const missionControlHost = createMissionControlHost({
+    review: missionControlReview,
+    git: withSafeGitConfig(nodeGitCommandRunner),
+    windowId,
+    resumable: missionControlResumable,
+    forgetResumable: (entry) => runningTurnJournal.forget(entry),
+    openThread: (provider, threadId, title, cwd) =>
+      (provider === 'codex' ? chat : claudeChat).openThread(threadId, title, cwd),
+    runningTurnCount: () =>
+      currentWindowManagedSessions().filter((session) => isRunningTurn(session.activity)).length,
+    showMissionControl: () => missionControl.show(),
+    log,
+  });
+  context.subscriptions.push(
+    ...missionControlHost.disposables,
+    { dispose: () => missionControlReview.dispose() },
+    { dispose: () => runningTurnJournal.dispose() },
+  );
+  /** Mission Controlへ最後に渡した履歴（Issue #2149の3）。開き直す要求の突き合わせに使う。 */
+  let missionControlHistory: SessionSummary[] = [];
+  /** 一覧に無い（目録・handoffだけで知っている）履歴（Issue #2178）。 */
+  let missionControlOffList: McOffListSession[] = [];
+  /** 直前の履歴で、件数の上限により載せなかった古いセッションの数（Issue #2178）。 */
+  let missionControlHistoryOmitted = 0;
+  const missionControlStateDir = path.join(context.globalStorageUri.fsPath, 'mission-control');
+  const handoffLedger = new HandoffLedger(
+    path.join(context.globalStorageUri.fsPath, 'handoff'),
+    path.join(missionControlStateDir, HANDOFF_LEDGER_INDEX_FILE),
     log,
   );
+  const sessionCatalog = new SessionCatalog(
+    path.join(missionControlStateDir, SESSION_CATALOG_FILE),
+    log,
+  );
+  // 全期間の履歴は件数が多く、ライブの一覧の解決結果（上限256件）を押し出さないよう別に持つ
+  const missionControlHistoryRepoResolver = createRepoResolver(undefined, 5_000);
+  // 利用枠はステータスバーとMission Control（Issue #2162）が同じ値を読む。MCのタブはReload後に
+  // 早く復元されうるので、MCより先に作っておく
+  const usageBar = new UsageStatusBar();
+  context.subscriptions.push(usageBar);
+  // 作業履歴（Issue #2175）。自ウィンドウのセッションのイベントと、利用枠の値を取得のたびに残す
+  const workHistory = new WorkHistoryRecorder({
+    store: new WorkHistoryStore(context.globalStorageUri.fsPath, (message) => log.warn(message)),
+    windowId,
+    retentionDays: () =>
+      normalizeRetentionDays(
+        vscode.workspace
+          .getConfiguration('agent')
+          .get<unknown>('missionControl.historyRetentionDays'),
+      ),
+  });
+  void workHistory.pruneIfDue(true);
+  stopWorkHistoryOnDeactivate = () => workHistory.stop();
+  setWorkHistoryHandoffSink((provider, parentThreadId, childThreadId) => {
+    workHistory.recordHandoff(provider, parentThreadId, childThreadId);
+  });
+  const workHistoryTimer = setInterval(() => {
+    workHistory.observeSessions(currentWindowSessions());
+  }, WORK_HISTORY_OBSERVE_INTERVAL_MS);
+  context.subscriptions.push(
+    usageBar.onDidChange(() => {
+      workHistory.observeUsage(buildMcUsage(usageBar.current(), Date.now()));
+    }),
+    // 保持日数を縮めたら、6時間ごとの削除を待たずに消す
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('agent.missionControl.historyRetentionDays')) {
+        void workHistory.pruneIfDue(true);
+      }
+    }),
+    {
+      dispose: () => {
+        clearInterval(workHistoryTimer);
+        setWorkHistoryHandoffSink(undefined);
+        workHistory.stop();
+      },
+    },
+  );
+  /** Mission Controlからの新規起動で会話を開く（Issue #2137。`prompt`が空なら開くだけ）。 */
+  const openMissionControlChat = (
+    provider: McProvider,
+    cwd: string,
+    prompt: string,
+    launchSettings: EffectiveLaunchSettings | undefined,
+  ): Promise<string | undefined> => {
+    // 起動オプション（Issue #2149の2）は`agent.openPresetChat`と同じく`taskConfig`で渡す
+    if (provider === 'codex') {
+      const config: CodexConfig | undefined =
+        launchSettings === undefined
+          ? undefined
+          : {
+              ...readConfig().codex,
+              model: launchSettings.model,
+              reasoningEffort: launchSettings.effort,
+              approvalMode: launchSettings.approvalMode,
+              sandbox: launchSettings.sandbox || readConfig().codex.sandbox,
+            };
+      return prompt.trim() === ''
+        ? chat.openNew(cwd, config)
+        : chat.openNewWithPrompt(cwd, prompt, undefined, config);
+    }
+    const config: ClaudeConfig | undefined =
+      launchSettings === undefined
+        ? undefined
+        : {
+            ...readClaudeConfig().claude,
+            model: launchSettings.model,
+            effort: launchSettings.effort,
+            permissionMode: launchSettings.approvalMode,
+          };
+    return prompt.trim() === ''
+      ? claudeChat.openNew(cwd, config)
+      : claudeChat.openNewWithPrompt(cwd, prompt, config);
+  };
+  const missionControl: MissionControlViewManager = new MissionControlViewManager(
+    () => {
+      const sessions = [
+        ...currentWindowSessions().map((session) => ({ ...session, windowId })),
+        ...sessionHubReader
+          .getOthers()
+          .flatMap((window) =>
+            window.sessions.map((session) => ({ ...session, windowId: window.windowId })),
+          ),
+      ];
+      const snapshot = buildMissionControlSnapshot({
+        sessions,
+        reviews: missionControlReview.observe(
+          sessions.map((session) => ({
+            key: formatSessionTarget(session),
+            cwd: session.cwd,
+            activity: session.activity,
+          })),
+        ),
+        resumable: [...missionControlResumable.values()],
+        windowPending: [
+          ...currentWindowPending(),
+          ...sessionHubReader.getOthers().flatMap((window) => window.pending ?? []),
+        ],
+        currentWindowId: windowId,
+        resolveRepo: missionControlRepoResolver,
+        activitySince: missionControlActivitySince,
+        now: Date.now(),
+        stallMs: readMissionControlStallMs(),
+        replyWaitMs: readMissionControlReplyWaitMs(),
+        // ピン留めの印は全ウィンドウ共通（Issue #2160）。他ウィンドウのセッションもここで引く
+        isPinned: (provider, threadId) =>
+          pinnedSessions.isPinned(pinKeyFor({ provider, id: threadId })),
+      });
+      const runsPort = missionControlRunsHolder.current;
+      const withUsage = { ...snapshot, usage: buildMcUsage(usageBar.current(), snapshot.now) };
+      return runsPort === undefined
+        ? withUsage
+        : { ...withUsage, runs: runsPort.snapshot(workspaceFolderPaths()) };
+    },
+    controlSessionAnywhere,
+    context.extensionUri,
+    log,
+    createMissionControlLauncher({
+      resolveRepo: missionControlRepoResolver,
+      globalState: context.globalState,
+      sessionCwds: () => [
+        ...currentWindowSessions().map((session) => session.cwd),
+        ...sessionHubReader
+          .getOthers()
+          .flatMap((window) => window.sessions.map((session) => session.cwd)),
+      ],
+      historyCwds: async () =>
+        (await store.list({ scope: 'all', workspaceFolders: [], maxEntries: 200 })).sessions.map(
+          (session) => session.cwd,
+        ),
+      // Todoからの起動（Issue #2180）は送らずに入力欄へ入れる。先に会話を開いてから入れる
+      open: (provider, cwd, prompt, launchSettings, draft) =>
+        openSessionWithDraft(
+          {
+            open: openMissionControlChat,
+            insertDraft: (p, id, text) =>
+              (p === 'codex' ? chat : claudeChat).insertComposerDraft(id, text),
+            warn: (message) => log.warn(message),
+          },
+          provider,
+          cwd,
+          prompt,
+          launchSettings,
+          draft,
+        ),
+      catalog: async () => {
+        const codexConfig = readConfig().codex;
+        const claudeConfig = readClaudeConfig().claude;
+        const { presets } = readSessionPresetsConfig();
+        return {
+          models: {
+            codex: await settings.modelCandidates('codex'),
+            claude: await settings.modelCandidates('claude'),
+          },
+          presets,
+          baseline: readSafetyBaseline(),
+          current: {
+            codex: {
+              model: codexConfig.model,
+              effort: codexConfig.reasoningEffort,
+              approval: codexConfig.approvalMode,
+            },
+            claude: {
+              model: claudeConfig.model,
+              effort: claudeConfig.effort,
+              approval: claudeConfig.permissionMode,
+            },
+          },
+        };
+      },
+      log,
+    }),
+    missionControlHost.port,
+    {
+      lifecycle: (op, targets) => {
+        const snapshot = missionControl.lastSnapshot();
+        return runLifecycle(op, targets, {
+          describe: (target) => {
+            const session = snapshot?.sessions.find(
+              (s) =>
+                s.windowId === target.windowId &&
+                s.provider === target.provider &&
+                s.threadId === target.threadId,
+            );
+            return session === undefined
+              ? undefined
+              : {
+                  title: session.title,
+                  provider: session.provider,
+                  running: session.activity !== 'idle',
+                };
+          },
+          confirm: async (confirmation) =>
+            (await vscode.window.showWarningMessage(
+              confirmation.message,
+              { modal: true },
+              confirmation.button,
+            )) === confirmation.button,
+          dispatch: (target, lifecycleOp) => lifecycleSessionAnywhere(target, lifecycleOp),
+        });
+      },
+      history: async () => {
+        const options = {
+          scope: 'all' as const,
+          workspaceFolders: workspaceFolderPaths(),
+          maxEntries: readConfig().historyMaxEntries,
+        };
+        // `thread/list`由来の一覧はarchive済みを含まないため、ファイルから拾って重ねる
+        // 全期間を探すため（Issue #2178）、Claude Codeは索引から多めに読む（読むだけで軽い）。
+        // ここで読んだ分は目録へ書き留めるので、transcriptが消えた後も引ける。Codexの
+        // `thread/list`はrolloutが残るスレッドしか返さないので、状態DBのthreadsから読んで
+        // 目録へだけ入れる（一覧には混ぜない。rolloutの有無は目録の側でstatして確かめる）
+        const [listed, archived, claudeMore, codexStateDb] = await Promise.all([
+          providers.listSessions(options, log),
+          store.listArchived(options).catch((e: unknown) => {
+            log.warn(`Mission Control: archive済みのセッションを読めませんでした: ${String(e)}`);
+            return [];
+          }),
+          claudeStore
+            .list({ ...options, maxEntries: MC_HISTORY_LIST_MIN })
+            .then((r) => r.sessions)
+            .catch(() => []),
+          readStateDbThreads(paths.home, log),
+        ]);
+        const sessions = mergeArchivedSessions(listed, [...archived, ...claudeMore]);
+        missionControlHistory = sessions;
+        // 全期間（Issue #2178）: 一覧で見かけたセッションを目録へ書き留め、目録とhandoffに
+        // 残ったセッション（transcriptが消えたものを含む）を重ねる
+        const [catalog, handoffs] = await Promise.all([
+          // 一覧の値を後に置き、同じセッションでは一覧の値を残す
+          sessionCatalog.merge([...codexStateDb, ...sessions]).catch((e: unknown) => {
+            log.warn(`Mission Control: セッション目録を読めませんでした: ${String(e)}`);
+            return [];
+          }),
+          handoffLedger
+            .refresh()
+            .then(() => handoffLedger.list())
+            .catch((e: unknown) => {
+              log.warn(`Mission Control: handoffを読めませんでした: ${String(e)}`);
+              return [];
+            }),
+        ]);
+        const missing = await missingFiles(transcriptPathsToCheck(sessions, catalog, handoffs));
+        const built = buildAllPeriodHistory({
+          listed: sessions,
+          catalog,
+          handoffs,
+          missing,
+          resolveRepo: missionControlHistoryRepoResolver,
+        });
+        missionControlOffList = built.offList;
+        missionControlHistoryOmitted = built.omitted;
+        if (built.omitted > 0) {
+          log.info(
+            `Mission Control: 履歴は新しい${String(built.items.length)}件だけ渡しました（古い${String(built.omitted)}件は載せていません）`,
+          );
+        }
+        return built.items;
+      },
+      historyOmitted: () => missionControlHistoryOmitted,
+      workUnits: async (days) => {
+        // 作業履歴は全ウィンドウが同じ保存領域へ書くので、ここで読めば全ウィンドウ分になる
+        const since = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : undefined;
+        // 費用・トークンはセッションの累計値なので、期間より前の記録も読んで差し引きに使う
+        // （期間の境界をまたぐセッションの、期間前の分を数えないため）
+        const records = await readWorkHistory(context.globalStorageUri.fsPath);
+        return aggregateWorkUnits(records, { since });
+      },
+      todos: new TodoStore(context.globalState),
+      workCalendar: async (year, month) => {
+        // 費用・トークンの差し引きのため、その月より前の記録も読む（workUnitsと同じ）
+        const records = await readWorkHistory(context.globalStorageUri.fsPath, {
+          until: new Date(year, month, 1).getTime(),
+        });
+        return buildWorkCalendar(records, year, month);
+      },
+      historyOpen: async (provider, threadId) => {
+        // webviewから届いたidは、直前に渡した履歴に載っていたものだけを開く
+        const target = resolveHistoryOpen(
+          missionControlHistory,
+          missionControlOffList,
+          provider,
+          threadId,
+        );
+        return openHistoryTarget(target, {
+          unarchive: (id) => actions.run('unarchive', id),
+          unarchived: (session) => {
+            log.info(`Mission Control: 履歴から再開するためarchiveを解除しました（${session.id}）`);
+            missionControlHistory = missionControlHistory.map((s) =>
+              s === session ? { ...s, archived: false } : s,
+            );
+            missionControlOffList = missionControlOffList.map((s) =>
+              s.provider === session.provider && s.threadId === session.id
+                ? { ...s, archived: false }
+                : s,
+            );
+          },
+          open: (session) => openSession(chat, claudeChat, log, session),
+        });
+      },
+      handoffLedger: async (query) =>
+        toHandoffListing(await handoffLedger.search(query), missionControlHistoryRepoResolver),
+      handoffOpen: async (name) => {
+        // webviewから届いた名前は、台帳に載っているファイルだけを開く（パスを組ませない）
+        const file = handoffLedger.pathOf(name);
+        if (file === undefined) {
+          return 'handoffが見つかりません。台帳を開き直してください';
+        }
+        try {
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+          await vscode.window.showTextDocument(doc, { preview: true });
+          return undefined;
+        } catch (e: unknown) {
+          return `handoffを開けませんでした: ${String(e)}`;
+        }
+      },
+    },
+    () => missionControlRunsHolder.current,
+    createMcSettingsPort(context.globalState),
+    // 利用枠の推移（Issue #2176）。作業履歴（Issue #2175）から読む
+    () => loadUsageHistory(context.globalStorageUri.fsPath, Date.now()),
+  );
+  // 利用枠と、MCから変えられる設定（Issue #2162）が変わったら画面へ反映する。設定はMCの外
+  // （設定エディタ・別ウィンドウ）で変わることもある
+  context.subscriptions.push(
+    usageBar.onDidChange(() => missionControl.refresh()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (
+        event.affectsConfiguration('agent.missionControl') ||
+        event.affectsConfiguration('agent.notifications')
+      ) {
+        missionControl.refresh();
+      }
+    }),
+  );
+  // runの変化（Issue #2150）はセッションの状態変化とは別に届くため、ここでRunsタブへ反映する
+  const missionControlRunsSubscription = missionControlRunsHolder.current?.onDidChange(() =>
+    missionControl.refresh(),
+  );
+  if (missionControlRunsSubscription !== undefined) {
+    context.subscriptions.push(missionControlRunsSubscription);
+  }
   const forgeHub = new ForgeHubViewManager(
     new ForgeHubService({
       git: nodeGitCommandRunner,
@@ -1699,26 +2465,60 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     (provider, cwd) =>
       provider === 'claude' ? claudeSkills.read(cwd) : appServer.listSkills([cwd]),
   );
-  const onSessionKanbanRelevantChange = (): void => {
-    sessionKanban.refresh();
+  const onSessionHubRelevantChange = (): void => {
+    // 実行中のターンを書き残し、走り出した会話は再開待ちから外す（Issue #2138の3）
+    const managed = currentWindowManagedSessions();
+    runningTurnJournal.observe(managed);
+    workHistory.observeSessions(currentWindowSessions());
+    for (const session of managed) {
+      if (isRunningTurn(session.activity)) {
+        missionControlResumable.delete(resumeKey(session));
+      }
+    }
+    missionControl.refresh();
     // heartbeat（15秒）を待たず、状態が変わった時点で他ウィンドウへも反映させる
     // （実際の書き込みはWriter側でまとめる）
     sessionHubWriter.requestWrite();
   };
   context.subscriptions.push(
-    sessionKanban,
     forgeHub,
     sessionHubReader,
     sessionHubRequestWatcher,
     { dispose: () => void sessionHubWriter.dispose() },
-    chat.onDidChangeState(onSessionKanbanRelevantChange),
-    claudeChat.onDidChangeState(onSessionKanbanRelevantChange),
-    chat.onDidChangePanels(onSessionKanbanRelevantChange),
-    claudeChat.onDidChangePanels(onSessionKanbanRelevantChange),
-    sessionHubReader.onDidChange(() => sessionKanban.refresh()),
+    chat.onDidChangeState(onSessionHubRelevantChange),
+    claudeChat.onDidChangeState(onSessionHubRelevantChange),
+    chat.onDidChangePanels(onSessionHubRelevantChange),
+    claudeChat.onDidChangePanels(onSessionHubRelevantChange),
+    sessionHubReader.onDidChange(() => {
+      missionControl.refresh();
+    }),
+    missionControl,
+    vscode.commands.registerCommand(MISSION_CONTROL_OPEN_COMMAND, () => missionControl.show()),
+    vscode.commands.registerCommand(MISSION_CONTROL_CLOSE_COMMAND, () => missionControl.close()),
+    // Reload後にタブを復元する（Issue #2136）
+    vscode.window.registerWebviewPanelSerializer(MissionControlViewManager.viewType, {
+      deserializeWebviewPanel: (panel: vscode.WebviewPanel) => {
+        missionControl.restore(panel);
+        return Promise.resolve();
+      },
+    }),
   );
-
-  const actions = new SessionActions(nodeCommandRunner, codexPath);
+  // task runの質問が出た・答えられた（Issue #2135）。会話の状態変化とは別に届くため、ここで
+  // 統括ページと共有ファイルへ反映する。runの変化は頻繁なので、待ち項目のidが変わったときだけ
+  let lastTaskRunPendingIds = '';
+  const taskRunPendingSubscription = taskRunPendingHolder.current?.onDidChange(() => {
+    const ids = currentWindowPending()
+      .map((item) => item.id)
+      .join('\n');
+    if (ids === lastTaskRunPendingIds) {
+      return;
+    }
+    lastTaskRunPendingIds = ids;
+    onSessionHubRelevantChange();
+  });
+  if (taskRunPendingSubscription !== undefined) {
+    context.subscriptions.push(taskRunPendingSubscription);
+  }
 
   // ピン留め＝お気に入り（issue #293、Issue #1366）。セッションidはワークスペースを
   // またいでも一意なため、`ClaudeSessionNameStore`と同じくglobalStateへ持たせる
@@ -1861,8 +2661,6 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   };
 
   const usageReader = new UsageReader(nodeFileSystem, paths);
-  const usageBar = new UsageStatusBar();
-  context.subscriptions.push(usageBar);
 
   const readUsage = async (): Promise<void> => {
     // app-serverに聞ければ現在値が返る。繋がっていないときだけロールアウトを読む
@@ -2147,7 +2945,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     ),
     vscode.commands.registerCommand('agent.workflows.stop', () => stopWorkflow(workflowRunner)),
     vscode.commands.registerCommand('agent.workflows.view', () => workflowView.show()),
-    vscode.commands.registerCommand('agent.sessionKanban', () => sessionKanban.show()),
+    // 旧セッション統括ページ（Issue #2138で廃止）のコマンドは、Mission Controlを開く別名として残す
+    vscode.commands.registerCommand('agent.sessionKanban', () => missionControl.show()),
     vscode.commands.registerCommand('agent.forgeHub', (providerHint?: unknown) =>
       forgeHub.show(providerHint === 'claude' ? 'claude' : 'codex'),
     ),
@@ -4610,8 +5409,15 @@ function debounce(fn: () => void, delayMs: number): () => void {
 }
 
 export function deactivate(): void {
-  // subscriptions で破棄されるため個別の後始末は不要。
+  // subscriptions で破棄されるため個別の後始末は不要。ただし作業履歴（Issue #2175）は、
+  // チャットの管理が破棄されてセッションが一覧から消える（`closed`として記録される）より前に
+  // 止めて`shutdown`を書く。VS Codeは`deactivate`をsubscriptionsの破棄より先に呼ぶ
+  stopWorkHistoryOnDeactivate?.();
+  stopWorkHistoryOnDeactivate = undefined;
 }
+
+/** `deactivate`で作業履歴の記録係を止める口（Issue #2175）。`activate`が設定する。 */
+let stopWorkHistoryOnDeactivate: (() => void) | undefined;
 
 /**
  * CLIの実行ファイルを解決するクロージャを作る（issue #305）。
@@ -4829,91 +5635,4 @@ function toSessionSummary(
     activity: session.activity,
     sameWindow: ownerWindowId === selfWindowId,
   };
-}
-
-function toReplyPayload(result: SessionControlResult): SessionHubReplyPayload | undefined {
-  if (result.approvals !== undefined) {
-    return { approvals: result.approvals };
-  }
-  if (result.turns !== undefined) {
-    return { turns: result.turns, capturedAt: result.capturedAt };
-  }
-  if (result.handoff !== undefined) {
-    return { handoff: result.handoff };
-  }
-  if (result.sideQuestion !== undefined) {
-    return { sideQuestion: result.sideQuestion };
-  }
-  return undefined;
-}
-
-/**
- * 要求ファイルの`kind`を、チャット画面への操作へ変える（Issue #1258、#1259）。
- *
- * `kind`を`string`として扱うのは、共有ディレクトリへ書き込むのが版の違う別プロセス
- * だから（`SessionHubRequestWatcher`は未知の`kind`もそのまま渡す）。知らない操作は
- * `undefined`を返し、呼び出し側が「扱えない」と応答して、送った側をタイムアウトまで
- * 待たせない。`decision`も同じ理由で、ここでホワイトリスト検証してから通す。
- */
-function toSessionControlAction(
-  request: Pick<
-    SessionHubRequest,
-    | 'kind'
-    | 'text'
-    | 'approvalRequestId'
-    | 'decision'
-    | 'limit'
-    | 'sideQuestionId'
-    | 'handoffRequestId'
-    | 'handoffDecision'
-    | 'handoffModel'
-    | 'handoffEffort'
-  >,
-): SessionControlAction | undefined {
-  const { text, approvalRequestId, decision, limit, sideQuestionId } = request;
-  switch (request.kind as string) {
-    case 'open':
-      return { kind: 'open' };
-    case 'interrupt':
-      return { kind: 'interrupt' };
-    case 'pauseLoop':
-      return { kind: 'pauseLoop' };
-    case 'resumeLoop':
-      return { kind: 'resumeLoop' };
-    case 'send':
-      return text === undefined ? undefined : { kind: 'send', text };
-    case 'approvalDetail':
-      return { kind: 'approvalDetail' };
-    case 'recentTurns':
-      // 件数は受信側（`controlSession`）が範囲へ丸める。ここでは形だけ確かめる
-      return { kind: 'recentTurns', limit: typeof limit === 'number' ? limit : 1 };
-    case 'sideQuestion':
-      // 質問文の空・長さは受信側（`controlSession`）が確かめる
-      return text === undefined ? undefined : { kind: 'sideQuestion', text };
-    case 'sideQuestionResult':
-      return sideQuestionId === undefined
-        ? undefined
-        : { kind: 'sideQuestionResult', sideQuestionId };
-    case 'approvalDecision':
-      return approvalRequestId === undefined || !isSharedApprovalDecision(decision)
-        ? undefined
-        : { kind: 'approvalDecision', approvalRequestId, decision };
-    case 'handoffDetail':
-      return { kind: 'handoffDetail' };
-    case 'handoffDecision':
-      // model / effortは受信側（`PendingHandoffChoice`）が候補と突き合わせて弾く。
-      // ここは`decision`だけをホワイトリストで確かめる
-      return request.handoffRequestId === undefined ||
-        !isSharedHandoffDecision(request.handoffDecision)
-        ? undefined
-        : {
-            kind: 'handoffDecision',
-            handoffRequestId: request.handoffRequestId,
-            decision: request.handoffDecision,
-            model: request.handoffModel,
-            effort: request.handoffEffort,
-          };
-    default:
-      return undefined;
-  }
 }

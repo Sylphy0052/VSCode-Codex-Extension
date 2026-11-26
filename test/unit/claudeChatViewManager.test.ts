@@ -8,17 +8,14 @@ import { ClaudeStreamSession, type ClaudeStreamOptions } from '../../src/claude/
 import type { SideQuestionHistoryEntry } from '../../src/claude/control';
 import { MAX_SIDE_QUESTION_HISTORY } from '../../src/claude/sideQuestion';
 import type { Logger } from '../../src/log';
-import type { FileSystemPort, MemoryFileSystemPort } from '../../src/session/ports';
+import type { FileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
 import { MESSAGING_MCP_SERVER_NAME } from '../../src/orchestrator/messaging';
 import type { TaskHandoffRequest, TaskSessionConfig } from '../../src/orchestrator/taskSession';
 import { buildControlResponse } from '../../src/claude/control';
 import { SessionModelSettingsStore } from '../../src/sessionModelSettings';
 import type { McpServerView } from '../../src/provider/mcpServers';
-import {
-  MEMORY_LAST_SELECTED_PATH_KEY,
-  type MemoryModeMemento,
-} from '../../src/provider/inputModes';
+import type { MementoLike } from '../../src/util/memento';
 import { STATE_POST_INTERVAL_MS, type ChatActivity } from '../../src/view/chatShared';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import {
@@ -108,17 +105,8 @@ function fakeStore(overrides?: Partial<ClaudeSessionStore>): ClaudeSessionStore 
 
 const EMPTY_TASK_CONFIG: TaskSessionConfig = { model: '', effort: '', approvalMode: '' };
 
-/** メモリ追記（issue #144）専用の読み取り口のフェイク。既定は「無い・シンボリックリンクでない」。 */
-function fakeMemoryFileSystem(overrides?: Partial<MemoryFileSystemPort>): MemoryFileSystemPort {
-  return {
-    readStrict: async () => undefined,
-    resolveSymlinkTarget: async () => ({ kind: 'not-symlink' }),
-    ...overrides,
-  };
-}
-
 /** `vscode.Memento` 互換のフェイク。実体はMapだけの単純な実装で足りる。 */
-function fakeMemento(): MemoryModeMemento {
+function fakeMemento(): MementoLike {
   const store = new Map<string, unknown>();
   return {
     get: <T>(key: string, defaultValue: T): T =>
@@ -132,8 +120,6 @@ function fakeMemento(): MemoryModeMemento {
 
 function createManager(options?: {
   isTaskManagedThread?: (sessionId: string) => boolean;
-  memoryFs?: MemoryFileSystemPort;
-  memoryMemento?: MemoryModeMemento;
   store?: ClaudeSessionStore;
   onActivity?: (activity: ChatActivity) => void;
   sessionSettings?: SessionModelSettingsStore;
@@ -157,8 +143,6 @@ function createManager(options?: {
     options?.onActivity ?? (() => undefined),
     () => undefined,
     options?.isTaskManagedThread ?? (() => false),
-    options?.memoryFs ?? fakeMemoryFileSystem(),
-    options?.memoryMemento ?? fakeMemento(),
     undefined,
     options?.sessionSettings,
     options?.globalStorageDir ?? mkdtempSync(join(tmpdir(), 'claude-handoff-')),
@@ -448,7 +432,7 @@ describe('ClaudeChatViewManager', () => {
     it('変更を他セッションへ波及させず、同じsessionIdを開き直すと復元する', async () => {
       __mock.setConfig('claude', { model: 'global-model', effort: 'low' });
       const { calls, sessions } = stubStartCapturing();
-      const sessionSettings = new SessionModelSettingsStore(fakeMemento());
+      const sessionSettings = new SessionModelSettingsStore();
       const { manager } = createManager({ sessionSettings });
 
       const firstId = await manager.openNew('/workspace/root');
@@ -570,7 +554,7 @@ describe('ClaudeChatViewManager', () => {
         'workflowMenu',
         'teamWorkflow',
         'workflowView',
-        'sessionKanban',
+        'missionControl',
         'openProgress',
       ]) {
         expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
@@ -1312,6 +1296,32 @@ describe('エディタの選択範囲の送り先（getActiveComposerTarget、is
     expect(manager.getActiveComposerTarget()).toBeUndefined();
   });
 
+  it('insertComposerDraft（Issue #2180）はwebviewのreadyを待ってから入力欄へ入れる', async () => {
+    stubStartCapturing();
+    const { manager } = createManager();
+    const id = await manager.openNew('/workspace/root');
+    expect(id).toBeDefined();
+    const panel = __mock.lastCreatedPanel();
+    const inserted = (): unknown[] =>
+      (panel?.webview.sent ?? []).filter(
+        (m) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { type?: unknown }).type === 'insertComposerText',
+      );
+
+    expect(manager.insertComposerDraft(id as string, '/gitlab-develop 作業')).toBe(true);
+    // 読み込み前に送ると消えるので、まだ送らない
+    expect(inserted()).toEqual([]);
+    panel?.webview.simulateMessage({ type: 'ready' });
+    expect(inserted()).toEqual([{ type: 'insertComposerText', text: '/gitlab-develop 作業' }]);
+    // 読み込み済みならすぐ送り、二度目のreadyで繰り返さない
+    expect(manager.insertComposerDraft(id as string, '次')).toBe(true);
+    panel?.webview.simulateMessage({ type: 'ready' });
+    expect(inserted()).toHaveLength(2);
+    expect(manager.insertComposerDraft('missing', 'x')).toBe(false);
+  });
+
   it('選択中の画面の入力欄へテキストを挿し込み、そのタブを表に出す', async () => {
     stubStartCapturing();
     const { manager } = createManager();
@@ -1426,281 +1436,6 @@ describe('deriveTitle（Issue #599、pinnedNameを最優先にする）', () => 
       items: [{ kind: 'userMessage', id: '1', text: '設計を見直したい' } as never],
     });
     expect(deriveTitle(state, undefined)).toBe('Claude Code: 設計を見直したい');
-  });
-});
-
-/**
- * 行頭 `#` のメモリ追記（issue #6、issue #144で安全性を強化）。
- *
- * `handleMessage` の `send` 分岐からの一連の流れ（QuickPick→確認→書き込み→会話への通知）を、
- * `ClaudeChatViewManager` に注入したフェイクの `MemoryFileSystemPort` / `MemoryModeMemento` を
- * 通して検証する。
- */
-describe('ClaudeChatViewManagerのメモリ追記（issue #6/#144）', () => {
-  beforeEach(() => {
-    __mock.reset();
-    __mock.setWorkspaceFolder('/workspace/root');
-    vi.restoreAllMocks();
-    // 状態送信の間引き（issue #356）を確定的に進めるため
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  async function openPanel(manager: ClaudeChatViewManager): Promise<FakeWebviewPanel | undefined> {
-    await manager.openNew('/workspace/root');
-    return __mock.lastCreatedPanel();
-  }
-
-  async function send(panel: FakeWebviewPanel | undefined, text: string): Promise<void> {
-    panel?.webview.simulateMessage({ type: 'send', text });
-    await flush();
-  }
-
-  /** 開いてすぐ送る（候補・確認ダイアログの設定を先に済ませたテストで使う）。 */
-  async function openAndSend(
-    manager: ClaudeChatViewManager,
-    text: string,
-  ): Promise<FakeWebviewPanel | undefined> {
-    const panel = await openPanel(manager);
-    await send(panel, text);
-    return panel;
-  }
-
-  it('候補を選び確認すると内容が追記され、前回選択が記憶され、会話に1行残る', async () => {
-    stubStart();
-    const memento = fakeMemento();
-    const { manager } = createManager({ memoryFs: fakeMemoryFileSystem(), memoryMemento: memento });
-    const panel = await openPanel(manager);
-    __mock.showQuickPickAnswer = (items) => items[0];
-
-    await send(panel, '#常にpnpmを使う');
-
-    // 確認ダイアログ（`confirmMemoryAppend`）が実際に呼ばれたことを見る。ここを見ていないと、
-    // 呼び出しが丸ごと消える回帰（確認なしで書き込む）をこのテストが検出できない（レビュー指摘）。
-    expect(__mock.messages.warnings).toEqual([
-      '次の内容を追記します:\n\n常にpnpmを使う\n\n追記先: /workspace/root/CLAUDE.md',
-    ]);
-    expect(__mock.writtenFiles).toEqual([
-      { path: '/workspace/root/CLAUDE.md', content: '- 常にpnpmを使う\n' },
-    ]);
-    expect(memento.get<string | undefined>(MEMORY_LAST_SELECTED_PATH_KEY, undefined)).toBe(
-      '/workspace/root/CLAUDE.md',
-    );
-    const lastMessages = stateMessagesOf(panel);
-    const lastItems = lastMessages[lastMessages.length - 1]?.state.items ?? [];
-    expect(
-      lastItems.some((i) => i.detail === 'メモリへ追記しました: /workspace/root/CLAUDE.md'),
-    ).toBe(true);
-  });
-
-  it('追記先がシンボリックリンクなら、確認と会話の記録の両方に実体パスが出る', async () => {
-    stubStart();
-    const memoryFs = fakeMemoryFileSystem({
-      resolveSymlinkTarget: async (p) =>
-        p === '/workspace/root/CLAUDE.md'
-          ? { kind: 'resolved', target: '/home/user/dotfiles/CLAUDE.md' }
-          : { kind: 'not-symlink' },
-    });
-    const { manager } = createManager({ memoryFs });
-    const panel = await openPanel(manager);
-    __mock.showQuickPickAnswer = (items) => items[0];
-
-    await send(panel, '#note');
-
-    expect(__mock.messages.warnings.at(-1)).toContain('リンク先: /home/user/dotfiles/CLAUDE.md');
-    const lastMessages = stateMessagesOf(panel);
-    const lastItems = lastMessages[lastMessages.length - 1]?.state.items ?? [];
-    expect(
-      lastItems.some((i) => i.detail?.includes('リンク先: /home/user/dotfiles/CLAUDE.md')),
-    ).toBe(true);
-  });
-
-  it('追記先が壊れたシンボリックリンク（実体パスを特定できない）なら、確認と会話の記録の両方に警告が出る（issue #144レビューのCRITICAL指摘の再発防止。書き込み自体は中止しない）', async () => {
-    stubStart();
-    const memoryFs = fakeMemoryFileSystem({
-      resolveSymlinkTarget: async (p) =>
-        p === '/workspace/root/CLAUDE.md' ? { kind: 'unresolved' } : { kind: 'not-symlink' },
-    });
-    const { manager } = createManager({ memoryFs });
-    const panel = await openPanel(manager);
-    __mock.showQuickPickAnswer = (items) => items[0];
-
-    await send(panel, '#note');
-
-    expect(__mock.messages.warnings.at(-1)).toContain('実体のパスを特定できません');
-    expect(__mock.writtenFiles).toEqual([
-      { path: '/workspace/root/CLAUDE.md', content: '- note\n' },
-    ]);
-    const lastMessages = stateMessagesOf(panel);
-    const lastItems = lastMessages[lastMessages.length - 1]?.state.items ?? [];
-    expect(lastItems.some((i) => i.detail?.includes('実体のパスを特定できません'))).toBe(true);
-  });
-
-  it('確認時と書き込み直前でシンボリックリンクの解決結果が食い違えば、書き込まずエラーを出す（TOCTOU対策）', async () => {
-    stubStart();
-    let calls = 0;
-    const memoryFs = fakeMemoryFileSystem({
-      resolveSymlinkTarget: async (p) => {
-        if (p !== '/workspace/root/CLAUDE.md') {
-          return { kind: 'not-symlink' };
-        }
-        calls += 1;
-        // 1回目（確認ダイアログ用）は無害な実体、2回目（書き込み直前の再検証）では
-        // 攻撃者がリンク先を差し替えた想定で別の実体を返す。
-        return calls === 1
-          ? { kind: 'resolved', target: '/home/user/dotfiles/CLAUDE.md' }
-          : { kind: 'resolved', target: '/etc/attacker-controlled' };
-      },
-    });
-    const { manager } = createManager({ memoryFs });
-    __mock.showQuickPickAnswer = (items) => items[0];
-
-    await openAndSend(manager, '#note');
-
-    expect(calls).toBe(2);
-    expect(__mock.writtenFiles).toEqual([]);
-    expect(__mock.messages.errors.some((m) => m.includes('確認時から変わった'))).toBe(true);
-  });
-
-  it('前回選んだ追記先がQuickPickの候補の先頭に来る', async () => {
-    stubStart();
-    const memento = fakeMemento();
-    await memento.update(MEMORY_LAST_SELECTED_PATH_KEY, '/fake/claude-home/CLAUDE.md');
-    const { manager } = createManager({ memoryMemento: memento });
-    let seenItems: Array<{ candidate: { path: string } }> | undefined;
-    __mock.showQuickPickAnswer = (items) => {
-      seenItems = items as unknown as Array<{ candidate: { path: string } }>;
-      return undefined; // 並び順の確認だけが目的なのでキャンセルする
-    };
-
-    await openAndSend(manager, '#note');
-
-    expect(seenItems?.[0]?.candidate.path).toBe('/fake/claude-home/CLAUDE.md');
-  });
-
-  it('読み取りがENOENT以外の理由で失敗したら、書き込まずエラーを出す（既存ファイルの上書き破壊を防ぐ）', async () => {
-    stubStart();
-    const memoryFs = fakeMemoryFileSystem({
-      readStrict: async () => {
-        throw new Error('EACCES: permission denied');
-      },
-    });
-    const { manager } = createManager({ memoryFs });
-    __mock.showQuickPickAnswer = (items) => items[0];
-
-    await openAndSend(manager, '#note');
-
-    expect(__mock.writtenFiles).toEqual([]);
-    expect(__mock.messages.errors.some((m) => m.includes('EACCES'))).toBe(true);
-  });
-
-  it('書き込みが失敗したらエラーを出す', async () => {
-    stubStart();
-    const { manager } = createManager();
-    __mock.showQuickPickAnswer = (items) => items[0];
-    __mock.writeFileError = new Error('ENOSPC: no space left');
-
-    await openAndSend(manager, '#note');
-
-    expect(__mock.writtenFiles).toEqual([]);
-    expect(__mock.messages.errors.some((m) => m.includes('ENOSPC'))).toBe(true);
-  });
-
-  it('QuickPickをキャンセルしたら何も起きない', async () => {
-    stubStart();
-    const { manager } = createManager();
-    __mock.showQuickPickAnswer = () => undefined;
-
-    await openAndSend(manager, '#note');
-
-    expect(__mock.writtenFiles).toEqual([]);
-    expect(__mock.messages.warnings).toEqual([]);
-    expect(__mock.messages.errors).toEqual([]);
-  });
-
-  it('確認ダイアログをキャンセルしたら何も起きない', async () => {
-    stubStart();
-    const { manager } = createManager();
-    __mock.showQuickPickAnswer = (items) => items[0];
-    __mock.showWarningMessageAnswer = undefined;
-
-    await openAndSend(manager, '#note');
-
-    expect(__mock.writtenFiles).toEqual([]);
-  });
-
-  /**
-   * `resolveMemoryCandidates` の統合テスト（issue #144レビュー指摘）。
-   *
-   * 上のテスト群は `workspaceFolder` と `entry.cwd` が常に一致する構成しか通していない。
-   * design.mdが明示的に想定している「entry.cwdがworkspaceFoldersに含まれない」経路と、
-   * 受入基準にあるマルチルート・フォルダ未オープンの経路を、QuickPickへ渡る候補そのもので確かめる。
-   */
-  describe('resolveMemoryCandidates（issue #144の統合テスト）', () => {
-    async function captureCandidates(
-      manager: ClaudeChatViewManager,
-      openCwd: string | undefined,
-    ): Promise<Array<{ label: string; path: string }>> {
-      let seenItems:
-        Array<{ candidate: { label: string; path: string; exists: boolean } }> | undefined;
-      __mock.showQuickPickAnswer = (items) => {
-        seenItems = items as unknown as Array<{
-          candidate: { label: string; path: string; exists: boolean };
-        }>;
-        return undefined; // 候補の中身だけが目的なのでキャンセルする
-      };
-      await manager.openNew(openCwd);
-      await send(__mock.lastCreatedPanel(), '#note');
-      // `exists`（既存/新規作成）はここでは見ない。ラベル・パスの並びだけが検証対象のため
-      return (seenItems ?? []).map((i) => ({ label: i.candidate.label, path: i.candidate.path }));
-    }
-
-    it('entry.cwdがworkspaceFoldersに含まれない場合、その分の候補も追加される（worktreeタスク）', async () => {
-      stubStart();
-      const { manager } = createManager();
-
-      const candidates = await captureCandidates(manager, '/workspace/worktree-1');
-
-      const paths = candidates.map((c) => c.path);
-      expect(paths).toContain('/workspace/root/CLAUDE.md');
-      expect(paths).toContain('/workspace/worktree-1/CLAUDE.md');
-    });
-
-    it('workspaceFoldersが複数なら、フォルダごとに候補が出る（マルチルート）', async () => {
-      stubStart();
-      __mock.setWorkspaceFolders([
-        { fsPath: '/workspace/a', name: 'a' },
-        { fsPath: '/workspace/b', name: 'b' },
-      ]);
-      const { manager } = createManager();
-
-      const candidates = await captureCandidates(manager, '/workspace/a');
-
-      expect(candidates).toEqual(
-        expect.arrayContaining([
-          { label: 'プロジェクト（a）', path: '/workspace/a/CLAUDE.md' },
-          { label: 'プロジェクト（b）', path: '/workspace/b/CLAUDE.md' },
-          { label: 'ユーザー', path: '/fake/claude-home/CLAUDE.md' },
-        ]),
-      );
-      expect(candidates).toHaveLength(3);
-    });
-
-    it('workspaceFoldersがundefined（フォルダ未オープン）でも、フォールバックの1件だけで候補が出る', async () => {
-      stubStart();
-      __mock.clearWorkspaceFolder();
-      const { manager } = createManager();
-
-      const candidates = await captureCandidates(manager, '/standalone/dir');
-
-      expect(candidates).toEqual([
-        { label: 'プロジェクト（dir）', path: '/standalone/dir/CLAUDE.md' },
-        { label: 'ユーザー', path: '/fake/claude-home/CLAUDE.md' },
-      ]);
-    });
   });
 });
 
@@ -2208,15 +1943,15 @@ describe('ワークフローの導線（issue #250）', () => {
     expect(__mock.executedCommands).toContain('agent.workflows.view');
   });
 
-  it('三点メニューのセッションカンバンからagent.sessionKanbanを実行する', async () => {
+  it('三点メニューのMission Controlからagent.missionControl.openを実行する', async () => {
     stubStart();
     const { manager } = createManager();
     await manager.openNew();
 
-    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'sessionKanban' });
+    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'missionControl' });
     await flush();
 
-    expect(__mock.executedCommands).toContain('agent.sessionKanban');
+    expect(__mock.executedCommands).toContain('agent.missionControl.open');
   });
 
   it('セッションが起動していなくてもエラーにしない（会話と独立した操作のため）', async () => {
@@ -2878,14 +2613,26 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
     expect(sessions).toHaveLength(1);
   });
 
-  it('onAssistantSuggestion=false なら決定論検知でも発火しない', async () => {
+  it('onHandoffPrompt=false なら決定論検知でも発火しない', async () => {
+    __mock.setConfig('agent', {
+      'autoHandoff.router': false,
+      'autoHandoff.onHandoffPrompt': false,
+    });
+    const sessions = await finishTurnWith(HANDOFF_PROMPT);
+    await flush();
+    expect(sessions).toHaveLength(1);
+  });
+
+  // 地の文の提案だけを止めても、handoffプロンプトの検知は止まらない（Issue #2066）
+  it('onAssistantSuggestion=false でも、handoffプロンプトが出れば新しいセッションを開く', async () => {
     __mock.setConfig('agent', {
       'autoHandoff.router': false,
       'autoHandoff.onAssistantSuggestion': false,
     });
     const sessions = await finishTurnWith(HANDOFF_PROMPT);
-    await flush();
-    expect(sessions).toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(sessions).toHaveLength(2);
+    });
   });
 
   it('自動引き継ぎ自体がOFFなら発火しない', async () => {
@@ -3485,6 +3232,141 @@ describe('ローカルレビューの指摘の送信（Issue #1376）', () => {
   it('存在しない会話へはsessionUnavailableを返す', () => {
     const { manager } = createManager();
     expect(manager.sendReviewFeedback('missing', 'レビュー指摘です')).toBe('sessionUnavailable');
+    manager.dispose();
+  });
+});
+
+describe('Mission Controlで選んだセッションへの操作（Issue #2160）', () => {
+  beforeEach(() => {
+    __mock.reset();
+    __mock.setWorkspaceFolder('/workspace/root');
+    vi.restoreAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** 会話を2つ開く。後に開いたBが最後にアクティブなチャットになる。 */
+  const openTwo = async (store = fakeStore()) => {
+    const { calls, sessions } = stubStartCapturing();
+    const { manager } = createManager({ store });
+    const a = (await manager.openNew('/workspace/a'))!;
+    const panelA = __mock.lastCreatedPanel();
+    sessions.at(-1)!.receive(initLine(a));
+    sessions.at(-1)!.receive(userTextLine('u-1', '最初の発言'));
+    sessions.at(-1)!.receive(resultLine());
+    const b = (await manager.openNew('/workspace/b'))!;
+    const panelB = __mock.lastCreatedPanel();
+    sessions.at(-1)!.receive(initLine(b));
+    await flush();
+    return { manager, store, calls, sessions, panelA, panelB, a, b };
+  };
+
+  it('名前の変更とクリアは、最後にアクティブなチャットではなく指定したセッションに効く', async () => {
+    const { manager, store, calls, panelA, panelB, a, b } = await openTwo();
+
+    const renamed = await manager.controlSessionAsync(a, { kind: 'rename', name: 'A名' });
+    expect(renamed).toEqual({ ok: true });
+    expect(store.getName(a)).toBe('A名');
+    expect(store.getName(b)).toBeUndefined();
+
+    const cleared = await manager.controlSessionAsync(a, { kind: 'clear' });
+    expect(cleared).toEqual({ ok: true });
+    expect(panelA?.disposed).toBe(true);
+    expect(panelB?.disposed).toBe(false);
+    expect(calls.at(-1)?.cwd).toBe('/workspace/a');
+    // 消した会話のidへの操作は断る（キューが進んで別の会話へ効かない）
+    const again = await manager.controlSessionAsync(a, { kind: 'clear' });
+    expect(again.ok).toBe(false);
+    manager.dispose();
+  });
+
+  it('コマンドパレットの名前の変更・クリアは従来どおり最後にアクティブなチャットに効く', async () => {
+    const { manager, store, panelA, panelB, a, b } = await openTwo();
+    __mock.showInputBoxAnswer = 'B名';
+    await manager.renameActive();
+    expect(store.getName(b)).toBe('B名');
+    expect(store.getName(a)).toBeUndefined();
+    await manager.clearActive();
+    expect(panelB?.disposed).toBe(true);
+    expect(panelA?.disposed).toBe(false);
+    manager.dispose();
+  });
+
+  it('巻き戻しは確かめた発言とファイルが今と合うときだけ適用する', async () => {
+    const files = { current: ['a.txt'] };
+    const preview = vi
+      .spyOn(ClaudeStreamSession.prototype, 'previewRewindFiles')
+      .mockImplementation(() =>
+        Promise.resolve({
+          ok: true,
+          filesChanged: [...files.current],
+          insertions: 1,
+          deletions: 0,
+          error: undefined,
+        }),
+      );
+    const apply = vi.spyOn(ClaudeStreamSession.prototype, 'applyRewindFiles').mockResolvedValue({
+      ok: true,
+      filesChanged: [],
+      insertions: 0,
+      deletions: 0,
+      error: undefined,
+    });
+    const { manager, a } = await openTwo();
+
+    // 確かめずに押した・会話に無いidは断る
+    expect(
+      (await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' })).error,
+    ).toContain('確かめて');
+    expect(
+      (await manager.controlSessionAsync(a, { kind: 'rewindPreview', messageId: 'nope' })).ok,
+    ).toBe(false);
+    expect(preview).not.toHaveBeenCalled();
+
+    // 確かめた後に会話が進んで戻るファイルが増えたら、戻さずに断る
+    expect(
+      await manager.controlSessionAsync(a, { kind: 'rewindPreview', messageId: 'u-1' }),
+    ).toEqual({ ok: true, rewindFiles: ['a.txt'] });
+    files.current = ['a.txt', 'b.txt'];
+    const stale = await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' });
+    expect(stale.ok).toBe(false);
+    expect(stale.error).toContain('変わりました');
+    expect(apply).not.toHaveBeenCalled();
+
+    // 確かめ直せば適用する。適用は同じ発言のidで、指定したセッションに
+    await manager.controlSessionAsync(a, { kind: 'rewindPreview', messageId: 'u-1' });
+    const done = await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' });
+    expect(done).toEqual({ ok: true });
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenCalledWith('u-1');
+    // 適用した確認は使い切り。もう一度押しても戻さない
+    expect((await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' })).ok).toBe(
+      false,
+    );
+    expect(apply).toHaveBeenCalledTimes(1);
+    manager.dispose();
+  });
+
+  it('巻き戻しは応答中の会話には適用しない', async () => {
+    vi.spyOn(ClaudeStreamSession.prototype, 'previewRewindFiles').mockResolvedValue({
+      ok: true,
+      filesChanged: ['a.txt'],
+      insertions: 1,
+      deletions: 0,
+      error: undefined,
+    });
+    const apply = vi.spyOn(ClaudeStreamSession.prototype, 'applyRewindFiles');
+    const { manager, sessions, a } = await openTwo();
+    await manager.controlSessionAsync(a, { kind: 'rewindPreview', messageId: 'u-1' });
+    // 確かめた後に次のターンが始まった
+    sessions[0]!.receive(initLine(a));
+    const result = await manager.controlSessionAsync(a, { kind: 'rewind', messageId: 'u-1' });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('実行中');
+    expect(apply).not.toHaveBeenCalled();
     manager.dispose();
   });
 });

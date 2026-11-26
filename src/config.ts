@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { DEFAULT_SWITCH_THRESHOLD_PCT } from './claude/accountPolicy';
 import { normalizeIdleShutdownMinutes } from './claude/idleShutdown';
+import { isUnsafeExtraExcludedCommand, normalizeExtraExcludedCommands } from './claude/sandbox';
 import type { ClaudeConfig } from './claude/types';
 import type { CodexConfig } from './codex/types';
 import { hasGitSegment } from './orchestrator/escalation';
@@ -19,6 +20,14 @@ import { DEFAULT_TASK_APPROVAL_TIMEOUT_SEC } from './orchestrator/runnerApproval
 import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner';
 import { DEFAULT_CONTEXT_LOW_PERCENT } from './orchestrator/contextLow';
 import { DEFAULT_OVERLAP_CHECK_INTERVAL_SEC } from './orchestrator/taskOverlap';
+import {
+  DEFAULT_END_REVIEW_MAX_REOPENS,
+  DEFAULT_END_REVIEW_REPLAN_WINDOW_SECONDS,
+  MAX_END_REVIEW_MAX_REOPENS,
+  MAX_END_REVIEW_REPLAN_WINDOW_SECONDS,
+  MIN_END_REVIEW_REPLAN_WINDOW_SECONDS,
+  type TaskRunEndReviewConfig,
+} from './orchestrator/taskRunEndReview';
 import {
   DEFAULT_SPLIT_SUGGEST_FILE_COUNT,
   DEFAULT_SPLIT_SUGGEST_LINE_COUNT,
@@ -74,6 +83,7 @@ import { DEFAULT_ADVISOR_IDLE_TIMEOUT_MS } from './secondOpinion/advisorSession'
 import { DEFAULT_TURN_SUMMARY_INSTRUCTION, type TurnSummaryConfig } from './view/turnSummary';
 import { DEFAULT_PROS_CONS_INSTRUCTION, type ProsConsConfig } from './view/prosCons';
 import type { EndSummarySettings } from './view/endSummary';
+import type { SessionPurposeSettings } from './view/sessionPurpose';
 import {
   DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
   DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
@@ -542,6 +552,20 @@ export function readChatEndSummaryConfig(): EndSummarySettings {
   };
 }
 
+/**
+ * セッションの目的の1文要約（`agent.missionControl.sessionPurpose.enabled`、Issue #2172）。
+ * 既定は有効（`package.json`の既定値`true`をVS Codeが返す）。値が読めないとき（`true`以外）は
+ * 追加のCLIを起動しない側へ倒す。起動するCLI・model・effortは要約エージェントの設定に従う。
+ */
+export function readSessionPurposeConfig(): SessionPurposeSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  const { provider, model, effort } = readChatEndSummaryConfig();
+  return {
+    enabled: c.get<boolean>('missionControl.sessionPurpose.enabled') === true,
+    runner: { provider, model, effort },
+  };
+}
+
 /** 要約エージェントを使うかを、ユーザー設定へ保存する。 */
 export async function setChatEndSummaryEnabled(enabled: boolean): Promise<void> {
   await vscode.workspace
@@ -638,6 +662,29 @@ export function readIdleShutdownMinutes(): number {
   );
 }
 
+/**
+ * sandbox付きの工程セッションで、sandboxの外（承認フロー）へ回すコマンドを足す
+ * （`agent.claude.sandbox.extraExcludedCommands`、既定`[]`。Issue #2133）。
+ * 壊れた要素（文字列でない・空・改行入り）・固定の一覧との重複・sandboxを実質無効にする
+ * 危険なパターン（`*`・`bash *`など）は捨てる。危険なパターンは`unsafe`に入れて返し、
+ * 呼び出し側が警告に残す。
+ */
+export function readClaudeSandboxExtraExcludedCommands(): {
+  commands: string[];
+  unsafe: string[];
+} {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<unknown>('claude.sandbox.extraExcludedCommands');
+  const unsafe = Array.isArray(raw)
+    ? raw.filter(
+        (item): item is string =>
+          typeof item === 'string' && item.trim() !== '' && isUnsafeExtraExcludedCommand(item),
+      )
+    : [];
+  return { commands: normalizeExtraExcludedCommands(raw), unsafe };
+}
+
 /** @see DEFAULT_AUTO_HANDOFF_THRESHOLD_PERCENT */
 export function readAutoHandoffThresholdPercent(): number {
   const raw = vscode.workspace
@@ -670,6 +717,68 @@ export function readTaskRunMaxParallelPerFolder(): number {
     return DEFAULT_TASK_RUN_MAX_PARALLEL_PER_FOLDER;
   }
   return Math.floor(raw);
+}
+
+/** @see readTaskRunOptimizeLimits */
+export const DEFAULT_TASK_RUN_OPTIMIZE_MAX_TRIALS = 50;
+/** @see readTaskRunOptimizeLimits */
+export const DEFAULT_TASK_RUN_OPTIMIZE_MAX_MINUTES = 24 * 60;
+const MAX_TASK_RUN_OPTIMIZE_MAX_TRIALS = 1000;
+const MAX_TASK_RUN_OPTIMIZE_MAX_MINUTES = 7 * 24 * 60;
+
+function positiveIntOr(raw: unknown, max: number, fallback: number): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 && raw <= max
+    ? Math.floor(raw)
+    : fallback;
+}
+
+/**
+ * 最適化のループ（Issue #2111）の上限の上限。計画の最適化の仕様の予算はこれを超えられない。
+ * 壊れた値（数値でない・範囲外）は既定へ丸める。
+ */
+export function readTaskRunOptimizeLimits(): { maxTrials: number; maxMinutes: number } {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    maxTrials: positiveIntOr(
+      c.get<unknown>('taskRun.optimize.maxTrials'),
+      MAX_TASK_RUN_OPTIMIZE_MAX_TRIALS,
+      DEFAULT_TASK_RUN_OPTIMIZE_MAX_TRIALS,
+    ),
+    maxMinutes: positiveIntOr(
+      c.get<unknown>('taskRun.optimize.maxMinutes'),
+      MAX_TASK_RUN_OPTIMIZE_MAX_MINUTES,
+      DEFAULT_TASK_RUN_OPTIMIZE_MAX_MINUTES,
+    ),
+  };
+}
+
+/** 最適化の反証役（Issue #2108）のエンジンの設定値。`optimizeRefute.ts`の`RefuterEngineSetting`と同じ。 */
+export type TaskRunOptimizeRefuterEngine = 'opposite' | 'same' | 'claude' | 'codex';
+
+const REFUTER_ENGINES: readonly TaskRunOptimizeRefuterEngine[] = [
+  'opposite',
+  'same',
+  'claude',
+  'codex',
+];
+
+/**
+ * 最適化の反証役（Issue #2108）の設定。エンジンの既定は`opposite`（試行と別のエンジン）。
+ * モデルは空ならエンジンごとの既定（Claudeは`sonnet`、CodexはCLIの既定）。
+ */
+export function readTaskRunOptimizeRefuter(): {
+  engine: TaskRunOptimizeRefuterEngine;
+  model: string;
+} {
+  const c = vscode.workspace.getConfiguration('agent');
+  const engine = c.get<unknown>('taskRun.optimize.refuterEngine');
+  const model = c.get<unknown>('taskRun.optimize.refuterModel');
+  return {
+    engine: REFUTER_ENGINES.includes(engine as TaskRunOptimizeRefuterEngine)
+      ? (engine as TaskRunOptimizeRefuterEngine)
+      : 'opposite',
+    model: typeof model === 'string' && /^[A-Za-z0-9._:-]{0,100}$/.test(model) ? model : '',
+  };
 }
 
 /** オーケストレータモードの資源の閾値（Issue #1629・#1807）。判定は`resourceMonitor.ts`。 */
@@ -788,6 +897,57 @@ export function readTaskRunPlanAutoApproveEnabled(
   );
 }
 
+/**
+ * オーケストレータモードで、計画を承認する主体（Issue #2073）。`human`（既定）は人がKanbanで承認し、
+ * `orchestrator`は`approve_plan`が自己確認・セカンドオピニオン・Reflexの3段を通した計画を
+ * Orchestratorが承認する。未知の値は`human`にフォールバックする（人の承認を省く方向へ倒さない）。
+ */
+export function readTaskRunPlanApprovalMode(): 'human' | 'orchestrator' {
+  const raw = vscode.workspace.getConfiguration('agent').get<string>('taskRun.planApproval.mode');
+  return raw === 'orchestrator' ? 'orchestrator' : 'human';
+}
+
+/**
+ * オーケストレータモードで、判断待ちになった工程をOrchestratorの`start_stage`を待たずに
+ * 推奨値のModel/Effortで始めるか（Issue #2031）。既定は無効。推奨値を得られない工程と、
+ * やり直しの工程（前に実行したことがある工程）は従来どおりOrchestratorが決める。
+ */
+export function readTaskRunAutoStartStagesEnabled(): boolean {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<boolean>('taskRun.autoStartStages.enabled');
+  return typeof raw === 'boolean' ? raw : false;
+}
+
+/**
+ * 終了レビュー（Issue #2194）の設定。全タスクが終わってrunが終わったときに集計とgoalをOrchestratorへ送り、
+ * 送ってから`replanWindowSeconds`秒の間だけ終わったrunへの`propose_plan`を受け付ける。範囲外の値は
+ * 既定値に戻す。
+ */
+export function readTaskRunEndReviewConfig(): TaskRunEndReviewConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  const enabled = c.get<boolean>('taskRun.endReview.enabled');
+  const windowSeconds = c.get<number>('taskRun.endReview.replanWindowSeconds');
+  const maxReopens = c.get<number>('taskRun.endReview.maxReopens');
+  return {
+    enabled: typeof enabled === 'boolean' ? enabled : true,
+    replanWindowSeconds:
+      typeof windowSeconds === 'number' &&
+      Number.isFinite(windowSeconds) &&
+      windowSeconds >= MIN_END_REVIEW_REPLAN_WINDOW_SECONDS &&
+      windowSeconds <= MAX_END_REVIEW_REPLAN_WINDOW_SECONDS
+        ? Math.floor(windowSeconds)
+        : DEFAULT_END_REVIEW_REPLAN_WINDOW_SECONDS,
+    maxReopens:
+      typeof maxReopens === 'number' &&
+      Number.isInteger(maxReopens) &&
+      maxReopens >= 0 &&
+      maxReopens <= MAX_END_REVIEW_MAX_REOPENS
+        ? maxReopens
+        : DEFAULT_END_REVIEW_MAX_REOPENS,
+  };
+}
+
 /** @see readAutoHandoffSoftThresholdPercent */
 export const DEFAULT_AUTO_HANDOFF_SOFT_THRESHOLD_PERCENT = 40;
 
@@ -871,6 +1031,19 @@ export function readAutoHandoffOnAssistantSuggestion(): boolean {
 }
 
 /**
+ * 安全な区切りで、handoffプロンプトが出力されたときに引き継ぐか（Issue #2066）。
+ *
+ * 既定はON。書式から決定論的に検知する経路（Issue #1150）だけを制御し、地の文の提案
+ * （`readAutoHandoffOnAssistantSuggestion`）とは独立に効く。
+ */
+export function readAutoHandoffOnHandoffPrompt(): boolean {
+  const raw = vscode.workspace
+    .getConfiguration('agent')
+    .get<boolean>('autoHandoff.onHandoffPrompt');
+  return typeof raw === 'boolean' ? raw : true;
+}
+
+/**
  * 作業の節目（Issue起票後・PR/MR作成後・マージ後）で引き継ぐか（Issue #1351）。
  *
  * 既定はON。直前のターンで成功したコマンドから決定論的に判定し、残量にもmodel/effortの
@@ -879,6 +1052,17 @@ export function readAutoHandoffOnAssistantSuggestion(): boolean {
 export function readAutoHandoffOnMilestone(): boolean {
   const raw = vscode.workspace.getConfiguration('agent').get<boolean>('autoHandoff.onMilestone');
   return typeof raw === 'boolean' ? raw : true;
+}
+
+/**
+ * 区切りの契機（アシスタントの提案・作業の節目）で新セッションを開くか（Issue #1947）。
+ *
+ * 既定は `start`（区切りでも自動で開く、Issue #1950）。`offer` では残量が
+ * `softThresholdPercent` を上回るうちは提案だけで止める。
+ */
+export function readAutoHandoffBoundaryAction(): 'offer' | 'start' {
+  const raw = vscode.workspace.getConfiguration('agent').get<string>('autoHandoff.boundaryAction');
+  return raw === 'offer' ? 'offer' : 'start';
 }
 
 /**
@@ -1779,6 +1963,59 @@ export function readPromptMetricsEnabled(): boolean {
       .getConfiguration('agent')
       .get<boolean>('orchestrator.promptMetrics.enabled') === true
   );
+}
+
+/**
+ * 通常チャットの会話の区切りと選別（Issue #2123）。値の検証は`retrospectiveMetrics/chat.ts`の
+ * `normalizeChatRetrospectiveSettings`が行うため、ここでは型を問わず生の値を返す。
+ */
+export function readChatRetrospectiveSettingsRaw(): { minTurns: unknown; idleMinutes: unknown } {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    minTurns: c.get<unknown>('orchestrator.selfImprove.chatMinTurns'),
+    idleMinutes: c.get<unknown>('orchestrator.selfImprove.chatIdleMinutes'),
+  };
+}
+
+/**
+ * 自律改善の予算（Issue #2084）。値の検証は`selfImproveBudget.ts`の`normalizeConfig`が行うため、
+ * ここでは型を問わず生の値を返す。
+ */
+export function readSelfImproveBudgetRaw(): {
+  maxPerWeek: unknown;
+  weeklyUsageThresholdPct: unknown;
+} {
+  const c = vscode.workspace.getConfiguration('agent');
+  return {
+    maxPerWeek: c.get<unknown>('orchestrator.selfImprove.maxPerWeek'),
+    weeklyUsageThresholdPct: c.get<unknown>('orchestrator.selfImprove.weeklyUsageThresholdPct'),
+  };
+}
+
+/**
+ * 自律改善の振り返りの対象にするrun種別（Issue #2120）。値の検証は`runSummary.ts`の
+ * `normalizeRetrospectiveSources`が行うため、ここでは型を問わず生の値を返す。
+ */
+export function readSelfImproveSourcesRaw(): unknown {
+  return vscode.workspace
+    .getConfiguration('agent')
+    .get<unknown>('orchestrator.selfImprove.sources');
+}
+
+/**
+ * plugin向けの改善の起票先（Issue #2089）。`repo`が空なら起票しない。`syncedCommitFile`は
+ * `~/.claude`へ同期済みのpluginのcommitを書いたファイル（空なら同期の状態は「確かめられない」）。
+ */
+export function readPluginRoadmapSettings(): { repo: string; syncedCommitFile: string } {
+  const c = vscode.workspace.getConfiguration('agent');
+  const str = (key: string): string => {
+    const v = c.get<unknown>(key);
+    return typeof v === 'string' ? v.trim() : '';
+  };
+  return {
+    repo: str('orchestrator.selfImprove.pluginRepo'),
+    syncedCommitFile: str('orchestrator.selfImprove.pluginSyncedCommitFile'),
+  };
 }
 
 /**

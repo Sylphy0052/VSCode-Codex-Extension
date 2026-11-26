@@ -2,6 +2,7 @@ import type { SafeBoundaryGateInput } from './handoff';
 import type { HandoffTrigger } from './handoff';
 import type { SafeBoundaryProbe } from './handoffModelChoice';
 import type { TaskAssessment } from './handoffRouter';
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
 
 /**
  * 自動引き継ぎの判定過程を `Agent Sessions` の Output チャネルへ出す（Issue #1097）。
@@ -19,6 +20,12 @@ import type { TaskAssessment } from './handoffRouter';
  */
 
 const PREFIX = 'autoHandoff:';
+
+/**
+ * 1行の上限。分類器の根拠（`suggestReason` 等）はLLMの出力で、改行を含むと偽のログ行を
+ * 作れるため、出す前に制御文字を空白へ畳み、長すぎる行は切る。
+ */
+const MAX_TRACE_LINE_LENGTH = 2000;
 
 /** 判定の各段で出す1行を受け取る先。実体は各viewの `Logger`。 */
 export interface HandoffTraceSink {
@@ -39,7 +46,7 @@ export class HandoffTrace {
   constructor(private readonly sink: HandoffTraceSink) {}
 
   info(message: string): void {
-    const line = `${PREFIX} ${message}`;
+    const line = sanitizeInlineText(`${PREFIX} ${message}`, MAX_TRACE_LINE_LENGTH);
     if (line === this.last) {
       return;
     }
@@ -49,7 +56,7 @@ export class HandoffTrace {
 
   /** 警告は抑制しない。分類器の失敗は毎回の事実として残す。 */
   warn(message: string): void {
-    const line = `${PREFIX} ${message}`;
+    const line = sanitizeInlineText(`${PREFIX} ${message}`, MAX_TRACE_LINE_LENGTH);
     this.last = line;
     this.sink.warn(line);
   }

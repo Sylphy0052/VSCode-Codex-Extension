@@ -122,6 +122,11 @@ export interface ChatItem {
    */
   searchResults?: WebSearchResult[] | undefined;
   /**
+   * 応答に「推奨: model=... / effort=...」の行があったときの値（Issue #2056）。Claude Codeの
+   * 確定した`agentMessage`だけが持つ。ストリーム中の途中の本文には付けない。
+   */
+  profileRecommendation?: { model: string; effort: string } | undefined;
+  /**
    * 思考の全文（reasoningのみ）。
    *
    * `text` は要約として使う。CodexのReasoningThreadItemは要約(`summary`)と全文(`content`)を
@@ -158,6 +163,12 @@ export interface ChatItem {
    * で拒否されることを実測で確認した（design.md §14.23）。表示にのみ使う。
    */
   processId?: string | undefined;
+  /**
+   * skillを起動した時刻（ms、Issue #2173）。Claude Codeの`skillContext`のうち、起動そのものに
+   * 当たる項目だけが持つ。圧縮後にCLIが付け直すSkill注入（transcriptの`invoked_skills`）には
+   * 付けない（同じ起動を二重に数えないため）。Mission Controlのskill履歴だけが使う。
+   */
+  skillLaunchedAt?: number | undefined;
 }
 
 /**
@@ -390,10 +401,23 @@ export const NO_BACKGROUND_TERMINALS: BackgroundTerminalItem[] = [];
 
 /** 待ち行列の1件。応答中に送られた指示を、添えた画像ごと保つ。 */
 export interface QueuedMessage {
+  /** 取り消しの照合に使う安定したid（作成時に振る。位置や本文では見分けられないため）。 */
+  id?: string;
   text: string;
   attachments: Attachment[];
   /** 送るときに読み込ませるskill（issue #1451）。 */
   skill?: CodexSkillInput;
+}
+
+/**
+ * 応答中に送ったが、まだCLIが取り込んでいない指示（Issue #2022）。
+ *
+ * Claude Codeは応答中に書き込んだ発言を、実行中のツール呼び出しが終わってから走っている
+ * ターンへ取り込む。取り込んだ時点で`--replay-user-messages`のエコーが、送ったときに付けた
+ * `uuid`のまま返る（実測: CLI 2.1.296）。それまで画面から消えないよう、ここに残す。
+ */
+export interface HeldMessage extends QueuedMessage {
+  uuid: string;
 }
 
 export interface PendingApproval {
@@ -662,6 +686,27 @@ export type TurnFailureKind = 'usageLimit' | 'other';
 /** 使っていないタブのCLIを終了した状態（Issue #1808）。`ChatState.processSuspension`を参照。 */
 export type ProcessSuspension = 'stopping' | 'suspended' | 'resuming' | 'resumeFailed';
 
+/**
+ * CLIが実際に使ったmodel/effortの出所（Issue #2016）。
+ *
+ * - `systemInit`: Claude Codeの`system/init`。CLIが解決したmodel（API呼出の前）
+ * - `messageStart`: Claude Codeの`message_start`。APIが応答したmodel（出力の前）
+ * - `threadStart`: Codexの`thread/start`の応答（最初の`turn/start`の前）
+ * - `rerouted`: Codexの`model/rerouted`。サーバ側の振替
+ * - `transcript` / `rollout`: CLIの会話ログ。effortはここにしか残らない
+ */
+export type ObservedModelSource =
+  'systemInit' | 'messageStart' | 'threadStart' | 'rerouted' | 'transcript' | 'rollout';
+
+/** CLIが実際に使ったmodel/effort（Issue #2016）。取れなかった項目は`undefined`。 */
+export interface ObservedModel {
+  model?: string | undefined;
+  effort?: string | undefined;
+  source: ObservedModelSource;
+  /** `model/rerouted`の振替元と理由。振替でないときは`undefined`。 */
+  rerouted?: { fromModel: string; reason: string } | undefined;
+}
+
 export interface ChatState {
   threadId: string | undefined;
   /**
@@ -716,6 +761,12 @@ export interface ChatState {
    * CLIは応答中の指示を受け取れないため、捨てずにここへ積む。
    */
   queued: QueuedMessage[];
+  /**
+   * 応答中に送り、CLIの取り込みを待っている指示（Issue #2022。Claude Codeのみ）。
+   *
+   * 残っている間は走っているターンが続くため、`result`が来ても応答中のままにする。
+   */
+  held: HeldMessage[];
   items: ChatItem[];
   approvals: PendingApproval[];
   /** ユーザーへの問い合わせ（ツールの質問・MCPサーバのフォーム）。 */
@@ -772,6 +823,13 @@ export interface ChatState {
    */
   permissionMode?: string | undefined;
   /**
+   * CLIが通知した、実際に使っているmodel/effort（Issue #2016）。
+   *
+   * 画面の設定値（`modelSettings`）はCLIへ渡した値で、CLIが実際に使った値とは限らない。
+   * 引き継ぎ先の検証と、入力欄の下の表示に使う。通知が無ければ`undefined`のまま。
+   */
+  observedModel?: ObservedModel | undefined;
+  /**
    * 自動引き継ぎ（Issue #1079）がこのセッションで有効か。
    *
    * 初期値はユーザー設定（`agent.autoHandoff.enabled`、既定ON）から入り、そこから先は
@@ -812,6 +870,14 @@ export interface ChatState {
    * `undefined`へ戻す。拡張機能側だけで完結する一時的な表示で、CLIへは何も送らない。
    */
   autoReplyActivity?: string | undefined;
+  /**
+   * 自動引き継ぎが、バックグラウンド処理の終了だけを待っている間は`true`（Issue #2004）。
+   *
+   * バックグラウンド実行中は引き継がない（Issue #1307 / #1315）ため、区切りで終わっても
+   * 処理が終わるまで始まらない。止まっている理由が他に無いときだけ入れ、入力欄の近くへ
+   * 1行出す。拡張機能側だけで完結する一時的な表示で、CLIへは何も送らない。
+   */
+  autoHandoffBackgroundWait?: boolean | undefined;
   /**
    * 使っていないタブのCLIを終了した状態（Claude Codeのみ、Issue #1808）。
    *
@@ -924,6 +990,7 @@ export const initialChatState: ChatState = {
   streamingMessageId: undefined,
   completedBlockOffset: undefined,
   queued: [],
+  held: [],
   items: [],
   approvals: [],
   prompts: [],
@@ -1658,6 +1725,23 @@ export function applyEvent(
       };
     }
 
+    // サーバ側でmodelを振り替えた（Issue #2016）。effortは通知に無いので前の値を残す
+    case 'model/rerouted': {
+      const toModel = str(params['toModel']);
+      if (toModel === '') {
+        return state;
+      }
+      return {
+        ...state,
+        observedModel: {
+          model: toModel,
+          effort: state.observedModel?.effort,
+          source: 'rerouted',
+          rerouted: { fromModel: str(params['fromModel']), reason: str(params['reason']) },
+        },
+      };
+    }
+
     case 'turn/completed': {
       const summary = summarizeTurn(state.items, state.turnId);
       // 失敗はこの通知が`turn.status`で運ぶ（issue #1199）。`turn/failed`という通知は
@@ -1998,6 +2082,9 @@ export function routeSend(state: ChatState): SendRoute {
   return state.turnId === undefined ? 'queue' : 'steer';
 }
 
+/** 待ち行列の項目へ振るidの連番。 */
+let queuedSeq = 0;
+
 /**
  * 応答中の指示を待ち行列の末尾へ積む。
  *
@@ -2012,8 +2099,10 @@ export function enqueue(
   if (text.trim() === '' && attachments.length === 0) {
     return state;
   }
+  queuedSeq += 1;
+  const id = `q${String(queuedSeq)}-${Date.now().toString(36)}`;
   const message: QueuedMessage =
-    skill === undefined ? { text, attachments } : { text, attachments, skill };
+    skill === undefined ? { id, text, attachments } : { id, text, attachments, skill };
   return { ...state, queued: [...state.queued, message] };
 }
 
@@ -2051,6 +2140,14 @@ export function restoreQueued(state: ChatState, index: number, message: QueuedMe
       ...state.queued.slice(insertionIndex),
     ],
   };
+}
+
+/** CLIが取り込んだ（エコーが返った）指示を取り込み待ちから外す（Issue #2022）。 */
+export function releaseHeld(state: ChatState, uuid: string): ChatState {
+  if (!state.held.some((m) => m.uuid === uuid)) {
+    return state;
+  }
+  return { ...state, held: state.held.filter((m) => m.uuid !== uuid) };
 }
 
 /** 末尾の指示を取り出す。空なら取り出さない。入力欄への書き戻し（Esc）に使う。 */

@@ -185,7 +185,7 @@
 - [x] F07.02:Codexの擬似/compact・/init・/btwとClaudeの擬似/btw。
 - [x] F07.03:カスタムコマンドの候補挿入・CLIへの本文送信。
 - [x] F07.04:Claudeの!によるターミナル入力。
-- [x] F07.05:Claudeの#によるメモリ追記と複数ルートの追記先選択。
+- [ ] F07.05:Claudeの#によるメモリ追記と複数ルートの追記先選択（#2007で削除。CLI本体も2.0.70で廃止）。
 
 レビュー結果:[F07レビュー](reviews/f07-slash-commands-special-input.md)。8件の指摘は未修正・実行による再現未確認。カスタムプロンプトの本文展開は拡張機能内にはなく、CLIへ文字列を送る実装だったため記載を訂正した。
 
@@ -479,11 +479,15 @@
 - [x] F24.02:承認待ち・実行中・待機の3列分類。
 - [x] F24.03:カードから会話を開き状態変化を反映。
 
-レビュー結果:[静的レビュー](reviews/f24-session-kanban.md)。実装修正・実機検証は未実施。
+旧統括ページ（`sessionKanbanView.ts`）はIssue #2138で廃止し、Mission Controlへ統合した。`agent.sessionKanban`はMission Controlを開く別名として残る。5つの状態での絞り込み、レビュー待ち、再開待ち、引き継ぎ確認・脇道の質問もMission Controlで扱う。全操作はキーボードだけで行える（Issue #2152）。キーの割り当ては`src/webview/missionControl/keys.ts`の表1つから判定・ヘルプ（`?`）・コマンドパレット（`:`）を作り、詳細ペインとダイアログのボタンには空いている英字をアクセスキーとして振る。拡張側のkeybindingは開く`Ctrl+K J`・閉じる`Ctrl+K Q`。
 
-主な実装:[src/view/sessionKanbanModel.ts](../src/view/sessionKanbanModel.ts)、[src/view/sessionKanbanView.ts](../src/view/sessionKanbanView.ts)、[src/view/sessionActivity.ts](../src/view/sessionActivity.ts)。
+履歴（`h`）は見出し・最初の依頼文・handoffに残ったユーザー発話で全期間を探せる（Issue #2178）。一覧で見かけたセッションを`<globalStorage>/mission-control/session-catalog.json`へ書き留め、transcriptが消えた後も引けるようにする。Codexの`thread/list`はrolloutが残るスレッドしか返さないため、Codexの状態DB（`~/.codex/state_<N>.sqlite`の`threads`）も読み取り専用で読んで目録へ載せる（`node:sqlite`が無い環境や表の形が違うときは読まない）。handoff台帳（`l`）は`<globalStorage>/handoff/`の本文を日付・セッション・契機（手動 / 自動）で絞り、本文の部分一致で探す。先頭の項目は`handoff-ledger-index.json`に索引として残し、本文は検索のたびに候補を新しい順に読んで一致が100件に達したら止める。
 
-既存テスト:[sessionKanbanModel](../test/unit/sessionKanbanModel.test.ts)、[sessionKanbanView](../test/unit/sessionKanbanView.test.ts)。
+レビュー結果:[静的レビュー](reviews/f24-session-kanban.md)（廃止前の旧統括ページが対象）。
+
+主な実装:[src/view/missionControlView.ts](../src/view/missionControlView.ts)、[src/view/missionControlModel.ts](../src/view/missionControlModel.ts)、[src/view/missionControlReview.ts](../src/view/missionControlReview.ts)、[src/view/missionControlResume.ts](../src/view/missionControlResume.ts)、[src/view/missionControlNotifier.ts](../src/view/missionControlNotifier.ts)、[src/view/sessionControlMessage.ts](../src/view/sessionControlMessage.ts)、[src/webview/missionControl/app.tsx](../src/webview/missionControl/app.tsx)、[src/view/sessionActivity.ts](../src/view/sessionActivity.ts)。
+
+既存テスト:[missionControlLogic](../test/unit/missionControlLogic.test.ts)、[missionControlView](../test/unit/missionControlView.test.ts)、[sessionControlMessage](../test/unit/sessionControlMessage.test.ts)。
 
 レビュー観点:履歴全件との対象差、cwd不明・複数ルート・worktree配下、タイトル順、消えた会話。
 

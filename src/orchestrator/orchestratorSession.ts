@@ -43,6 +43,21 @@ const ORCHESTRATOR_APPROVAL_MODE: Record<Provider, string> = {
 export const MAX_ORCHESTRATOR_EVENTS_PER_RUN = 500;
 
 /**
+ * オーケストレータモード（Issue #1505）で1タスクあたりに見込むイベント通知の数。5工程それぞれの
+ * 判断待ちと完了で約10件、関門・質問・失敗の分を足して15件とする。
+ */
+export const ORCHESTRATOR_EVENTS_PER_TASK = 15;
+
+/**
+ * オーケストレータモードのrunのイベント通知の上限。計画のタスク数に上限が無いため、固定の
+ * `MAX_ORCHESTRATOR_EVENTS_PER_RUN`だけでは約40タスクを超えたあたりで失敗やrun終了の通知が
+ * 届かなくなる。タスク数に比例させ、`MAX_ORCHESTRATOR_EVENTS_PER_RUN`を下限とする。
+ */
+export function orchestratorEventsCap(taskCount: number): number {
+  return Math.max(MAX_ORCHESTRATOR_EVENTS_PER_RUN, taskCount * ORCHESTRATOR_EVENTS_PER_TASK);
+}
+
+/**
  * `ask_user`（design.md §16.33、Issue #583）が1つのrunで呼べる回数の既定値。
  *
  * ロードマップの方針1「確認は最低限」を仕組みで担保する唯一の機械的な手段

@@ -8,6 +8,7 @@
  * `readChatProsConsConfig`が行う。
  */
 
+import { appendChatPromotedGuidance } from '../chat/chatPrompts';
 import { appendTurnSummaryInstruction, type TurnSummaryConfig } from './turnSummary';
 
 /**
@@ -22,16 +23,20 @@ export const DEFAULT_PROS_CONS_INSTRUCTION =
 export type ProsConsConfig = TurnSummaryConfig;
 
 /**
- * 手動で送る発言の末尾へ、メリデメ説明とターン要約の指示を連結する。
+ * 手動で送る発言の末尾へ、昇格した教訓の定型文・メリデメ説明・ターン要約の指示を連結する。
  *
- * 順番は 本文 → メリデメの指示 → ターン要約の指示。要約の指示を最後に置き、応答の
- * 末尾が要約になるようにする。連結しない条件（無効・指示文が空・本文が空）はどちらも
- * `appendTurnSummaryInstruction`と同じなので、同じ関数を2回通す。
+ * 順番は 本文 → 昇格した教訓（`chatPrompts.ts`、Issue #2121） → メリデメの指示 → ターン要約の
+ * 指示。要約の指示を最後に置き、応答の末尾が要約になるようにする。連結しない条件（無効・
+ * 指示文が空・本文が空）はメリデメ・要約とも`appendTurnSummaryInstruction`と同じなので、
+ * 同じ関数を2回通す。昇格した教訓が無いうちは、送る文字列は切り出し前と変わらない。
  */
 export function appendManualSendInstructions(
   text: string,
   prosCons: ProsConsConfig,
   turnSummary: TurnSummaryConfig,
 ): string {
-  return appendTurnSummaryInstruction(appendTurnSummaryInstruction(text, prosCons), turnSummary);
+  return appendTurnSummaryInstruction(
+    appendTurnSummaryInstruction(appendChatPromotedGuidance(text), prosCons),
+    turnSummary,
+  );
 }

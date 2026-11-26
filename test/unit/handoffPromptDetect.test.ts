@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { transcriptItems } from '../../src/claude/transcript';
 import {
   HANDOFF_PROMPT_DETECTED_REASON,
   containsHandoffPrompt,
@@ -207,6 +208,34 @@ describe('invokedHandoffSkill（Issue #1748）', () => {
         item('agentMessage', 'x'),
       ]),
     ).toBe(true);
+  });
+
+  it('同名のカスタムコマンド `/handoff` の本文もhandoff起動として数える（issue #1971）', () => {
+    // `.claude/commands/handoff.md` の展開もskillと同じく `/名前` の直後の注入で届き、
+    // 履歴の読み直しでは `skillContext`（名前は `/名前` 側）になる。skillとは区別しない
+    const { items } = transcriptItems([
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u1',
+        message: {
+          content:
+            '<command-message>handoff</command-message>\n<command-name>/handoff</command-name>',
+        },
+      }),
+      JSON.stringify({
+        type: 'user',
+        uuid: 'u2',
+        isMeta: true,
+        message: { content: [{ type: 'text', text: '引き継ぎの手順を書く。\n' }] },
+      }),
+    ]);
+    expect(items.map((i) => [i.kind, i.detail])).toEqual([
+      ['userMessage', ''],
+      ['skillContext', 'handoff'],
+    ]);
+    expect(invokedHandoffSkill(items)).toBe(true);
+    // `/handoff` の発言が無くても、本文だけで真になる
+    expect(invokedHandoffSkill(items.slice(1))).toBe(true);
   });
 
   it('前のターンで呼んだだけなら偽', () => {

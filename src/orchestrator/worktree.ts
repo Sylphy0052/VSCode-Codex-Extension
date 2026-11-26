@@ -51,6 +51,13 @@ export interface GitCommandOptions {
    * （gitのhookから拡張機能を起動した場合などに実際に起こる）。
    */
   env?: Readonly<Record<string, string | undefined>>;
+  /**
+   * このコマンドだけのタイムアウト（ミリ秒）。省略時は {@link GIT_TIMEOUT_MS}。
+   *
+   * `git worktree add` のように作業ツリー全体をcheckoutするコマンドは、大きなrepoで
+   * 30秒を超える（実測74秒、`checkout.workers=16` でも31.7秒）ため、呼出側で延ばす。
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -83,6 +90,12 @@ function mergeGitEnv(overrides: Readonly<Record<string, string | undefined>>): N
 const GIT_TIMEOUT_MS = 30_000;
 
 /**
+ * `git worktree add` のタイムアウト。checkoutの時間はrepoの大きさと同時に作る件数で延びる
+ * （1件で74秒の実測。3件同時なら更に延びる）ため、余裕を持たせて5分にする。
+ */
+const WORKTREE_ADD_TIMEOUT_MS = 5 * 60_000;
+
+/**
  * `execFile` の既定 `maxBuffer` は1MBで、超えるとバッファ超過エラーが `gitError` として
  * 返るだけになる（実害は薄いが原因が分かりにくい）。`git status --porcelain` 等の出力が
  * 大きくなる場合に備え、明示的に広げておく（セキュリティ監査指摘・info）。
@@ -103,7 +116,7 @@ export const nodeGitCommandRunner: GitCommandRunner = {
         [...args],
         {
           cwd,
-          timeout: GIT_TIMEOUT_MS,
+          timeout: options?.timeoutMs ?? GIT_TIMEOUT_MS,
           maxBuffer: GIT_MAX_BUFFER_BYTES,
           ...(options?.env === undefined ? {} : { env: mergeGitEnv(options.env) }),
         },
@@ -365,6 +378,18 @@ export function isWorkflowBranchName(branch: string): boolean {
   return WF_BRANCH_PATTERN.test(branch) || CONVENTIONAL_BRANCH_PATTERN.test(branch);
 }
 
+/**
+ * Mission Controlの手動セッション用worktreeのブランチ名（Issue #2138）。`mc/<taskId>`の形で、
+ * オーケストレータの`wf/`とは別の名前空間に置く。不要になったら`git branch --list 'mc/*'`で
+ * まとめて見つけられる。
+ */
+export function sessionBranchName(taskId: string, retry?: number): string {
+  return `mc/${withRetrySuffix(taskId, retry)}`;
+}
+
+/** `sessionBranchName()`の生成形。先頭が英数字であることを崩さない（`WF_BRANCH_PATTERN`と同じ理由）。 */
+export const SESSION_BRANCH_PATTERN = /^mc\/[A-Za-z0-9_][A-Za-z0-9_-]{0,60}$/u;
+
 /** ワークスペースがgitの作業ツリーかどうか（ベアリポジトリを除く）。 */
 export async function isGitWorkingTree(repoRoot: string, git: GitCommandRunner): Promise<boolean> {
   const result = await git.run(['rev-parse', '--is-inside-work-tree'], repoRoot);
@@ -562,6 +587,29 @@ export interface CreateWorktreeRequest {
    * 省略時は`branchName`自身の既定どおり `wf/<runId>/<taskId>` になる（後方互換）。
    */
   branchNaming?: BranchNamingOptions;
+  /**
+   * 作成先。省略時は`'agents'`（`.agents/worktrees/<runId>/<taskId>`）。`'claude'`は
+   * Mission Controlの手動セッション用（Issue #2137）で、`.claude/worktrees/<taskId>`に作る。
+   */
+  location?: WorktreeLocation;
+}
+
+/** worktreeの置き場所の種類（`CreateWorktreeRequest.location`）。 */
+export type WorktreeLocation = 'agents' | 'claude';
+
+/** 手動セッション用のworktreeを置くディレクトリ（Issue #2137）。 */
+export function claudeWorktreesRootDir(repoRoot: string): string {
+  return path.join(repoRoot, '.claude', 'worktrees');
+}
+
+function worktreePathFor(request: CreateWorktreeRequest): string {
+  if (request.location === 'claude') {
+    return path.join(
+      claudeWorktreesRootDir(request.repoRoot),
+      withRetrySuffix(request.taskId, request.retry),
+    );
+  }
+  return worktreePath(request.repoRoot, request.runId, request.taskId, request.retry);
 }
 
 export type CreateWorktreeResult =
@@ -634,20 +682,29 @@ async function createWorktree(
     };
   }
 
-  const branch = branchName(request.runId, request.taskId, request.retry, request.branchNaming);
+  // Mission Controlの手動セッション（`location: 'claude'`）は、オーケストレータの名前空間（`wf/`）
+  // を使わない。`wf/`のままだとオーケストレータの実行のブランチと見分けられない（Issue #2138）
+  const branch =
+    request.location === 'claude'
+      ? sessionBranchName(request.taskId, request.retry)
+      : branchName(request.runId, request.taskId, request.retry, request.branchNaming);
   // `branchName()`が生成した値を無検証で`git worktree add -b <branch>`（`-b`の直後はオプション値
   // として消費されるため現時点で実害は無い）へ渡さず、ここでも`isWorkflowBranchName`で自己検証
   // する（多層防御。レビュー指摘）。`pushBranch`（`forge.ts`）や`mergeTaskBranch`（`integration.ts`）
   // はgitへ渡す直前に同種の再検証を行っており、防御が生成ロジックの正しさだけに依存する
   // 一枚防御になっていた
-  if (!isWorkflowBranchName(branch)) {
+  if (
+    request.location === 'claude'
+      ? !SESSION_BRANCH_PATTERN.test(branch)
+      : !isWorkflowBranchName(branch)
+  ) {
     return {
       ok: false,
       reason: 'invalidIdentifier',
       message: `不正なブランチ名（branchName()の生成形に一致しません）: ${branch}`,
     };
   }
-  const cwd = worktreePath(request.repoRoot, request.runId, request.taskId, request.retry);
+  const cwd = worktreePathFor(request);
 
   // 一次防御: `git worktree add` を呼ぶ前に、作成先までの経路にシンボリックリンクが
   // 含まれていないかを確かめる（レビュー指摘: critical 4）
@@ -671,6 +728,7 @@ async function createWorktree(
   const add = await git.run(
     ['worktree', 'add', '-b', branch, cwd, request.headCommit],
     request.repoRoot,
+    { timeoutMs: WORKTREE_ADD_TIMEOUT_MS },
   );
   if (add.code !== 0) {
     return {

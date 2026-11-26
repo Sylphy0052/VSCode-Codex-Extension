@@ -48,7 +48,9 @@ export function createProfileIdentifier(warn: (message: string) => void): Identi
       }
       return identity;
     } catch (e) {
-      warn(`アカウントのprofileを取得できませんでした: ${e instanceof Error ? e.message : String(e)}`);
+      warn(
+        `アカウントのprofileを取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+      );
       return undefined;
     }
   };
@@ -77,7 +79,9 @@ export function parseProfile(data: unknown): AccountIdentity | undefined {
     organizationUuid,
     email,
     organizationName:
-      typeof organizationName === 'string' && organizationName !== '' ? organizationName : undefined,
+      typeof organizationName === 'string' && organizationName !== ''
+        ? organizationName
+        : undefined,
   };
 }
 

@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.1011.4",
+  "version": "2026.1126.18",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -21,7 +21,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onWebviewPanel:agent.missionControl"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -68,6 +69,11 @@
     "menus": {
       "view/title": [
         {
+          "command": "agent.missionControl.open",
+          "when": "view == agent.attention",
+          "group": "navigation@1"
+        },
+        {
           "command": "agent.webGpt.discuss",
           "when": "view == codex.sessions",
           "group": "navigation@9"
@@ -108,7 +114,7 @@
           "group": "navigation@5.1"
         },
         {
-          "command": "agent.sessionKanban",
+          "command": "agent.missionControl.open",
           "when": "view == codex.sessions",
           "group": "navigation@5.2"
         },
@@ -270,6 +276,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "agent.sessionKanban",
+          "when": "false"
+        },
         {
           "command": "codex.openSession",
           "when": "false"
@@ -529,9 +539,20 @@
       },
       {
         "command": "agent.sessionKanban",
-        "title": "セッション統括を開く",
+        "title": "Mission Controlを開く（旧: セッション統括）",
         "category": "Agent",
         "icon": "$(project)"
+      },
+      {
+        "command": "agent.missionControl.open",
+        "title": "Mission Controlを開く",
+        "category": "Agent",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "agent.missionControl.close",
+        "title": "Mission Controlを閉じる",
+        "category": "Agent"
       },
       {
         "command": "agent.taskRun.start",
@@ -835,7 +856,7 @@
           ],
           "default": "cyber",
           "scope": "window",
-          "markdownDescription": "チャット画面とセッション統括画面の外装（Codex/Claude Code両画面共通）。`cyber`は枠・左のバー・見出し・背景の方眼にネオン色を使う。本文の文字色・行間・1行の長さは外装によらず同じで、`#agent.chat.density#`の設定もそのまま効く。高コントラストテーマでは装飾を自動で無効にする。変更を反映するには該当するタブを開き直す。"
+          "markdownDescription": "チャット画面の外装（Codex/Claude Code両画面共通）。`cyber`は枠・左のバー・見出し・背景の方眼にネオン色を使う。本文の文字色・行間・1行の長さは外装によらず同じで、`#agent.chat.density#`の設定もそのまま効く。高コントラストテーマでは装飾を自動で無効にする。変更を反映するには該当するタブを開き直す。"
         },
         "agent.chat.sendOn": {
           "type": "string",
@@ -869,14 +890,15 @@
               "workflowMenu",
               "teamWorkflow",
               "workflowView",
-              "sessionKanban",
+              "missionControl",
               "forgeHub",
               "orchestratorMode",
               "openProgress",
               "handoffToNewSession",
               "autoHandoffToggle",
               "handoffPresetPicker",
-              "secondOpinion"
+              "secondOpinion",
+              "reconsider"
             ],
             "enumDescriptions": [
               "画像を添付する",
@@ -892,14 +914,15 @@
               "ワークフローの実行・View・生成・停止を選ぶ",
               "チームモードのワークフローを作成する",
               "ワークフローViewを開く",
-              "このワークスペースで開いている会話を状態別に表示する",
+              "Mission Control（全ウィンドウの会話と回答待ちの一覧）を開く",
               "Forge Hubを開く",
               "オーケストレータモードを開始する",
               "このセッションの進捗を別タブで表示する",
               "この会話を新しいセッションへ引き継ぐ",
               "自動引き継ぎ（コンテキスト逼迫時に自動で新セッションへ引き継ぐ）を切り替える",
               "自動引き継ぎ先のmodel/effortのコスト方針（低・中・高）を選ぶ",
-              "独立したCodexセッションへ意見を求める（セカンドオピニオン）"
+              "独立したCodexセッションへ意見を求める（セカンドオピニオン）",
+              "場面の台帳で再考する（別文脈のadvisorが場面を列挙し、未確認の場面を実測させる）"
             ]
           },
           "default": [
@@ -924,7 +947,7 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "引き継ぎ（自動で発火したもの（Issue #1350）と、手動の引き継ぎボタン（Issue #1510）の両方）で、確認ダイアログとセッション統括ページの保留カードを出さず、分類器（またはその既定値）の提案したmodel/effortでそのまま引き継ぐ。この設定が決めるのは新規セッションの初期値だけで、会話ごとの切り替えは入力欄の「…」メニューの「自動引き継ぎの自動承認」で行う（その操作はこの設定を書き換えない）。引き継ぎ先のセッションは引き継ぎ元の値をそのまま継ぐ。既定はON（Issue #1585）。確認を挟みたい場合はOFFにする。Codex/Claude Code両画面共通。"
+          "markdownDescription": "引き継ぎ（自動で発火したもの（Issue #1350）と、手動の引き継ぎボタン（Issue #1510）の両方）で、確認ダイアログとMission ControlのInboxの引き継ぎ確認を出さず、分類器（またはその既定値）の提案したmodel/effortでそのまま引き継ぐ。この設定が決めるのは新規セッションの初期値だけで、会話ごとの切り替えは入力欄の「…」メニューの「自動引き継ぎの自動承認」で行う（その操作はこの設定を書き換えない）。引き継ぎ先のセッションは引き継ぎ元の値をそのまま継ぐ。既定はON（Issue #1585）。確認を挟みたい場合はOFFにする。Codex/Claude Code両画面共通。"
         },
         "agent.claude.idleShutdownMinutes": {
           "type": "number",
@@ -933,6 +956,15 @@
           "maximum": 1440,
           "scope": "window",
           "markdownDescription": "Claude Codeのタブを使わないままこの分数が過ぎたら、そのタブのCLIを終了してメモリを空ける（Issue #1808）。タブには「休止中（次の送信で再開）」と出し、次に送ったときに同じ会話を `--resume` で再開する。応答中・承認待ち・質問待ち・ループ実行中・自動引き継ぎ中・バックグラウンドタスクがあるとき、ワークフローやオーケストレータモードの工程のタブでは終了しない。`0` で無効。Codexのタブには効かない。"
+        },
+        "agent.claude.sandbox.extraExcludedCommands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "markdownDescription": "オーケストレータモード・ロードマップ実行のsandbox付きClaude Codeセッションで、sandboxの外（通常の承認フロー）で走らせるコマンドを足す（Issue #2133）。リポジトリ側の設定からsandboxを緩められないよう machine スコープに固定している。先頭がワイルドカード（`*`）・シェル（`bash`・`sh`など）・ラッパー（`env`・`sudo`・`xargs`など）のパターンは、どんなコマンドでも外へ出せてしまうため無視して警告に残す。`gh *`・`git push *`・`ssh *`・`scp *`・`rsync *`などの固定の一覧に加わり、子セッションへの指示文と、連結などで外へ回らない形を実行前に止める判定にも同じ値が使われる。一致はコマンドの先頭から見るので、スクリプトは絶対パスで書く（例: `python3 /home/<user>/.claude/skills/compute-server/scripts/cs.py *`）。`~/`・連結・リダイレクト・`$(…)`を含む形では一致しない。ここに載せても自動で通るわけではなく、承認の判定（`agent.workflows.allowAutoApprove`）を通る。"
         },
         "agent.autoHandoff.thresholdPercent": {
           "type": "number",
@@ -964,6 +996,36 @@
           "scope": "window",
           "markdownDescription": "引き継ぎ先の作業を分類するヘッドレス実行（`agent.autoHandoff.router`）の待ち時間（ミリ秒。Issue #1097）。時間切れになると分類が得られず、安全な区切りを待つ契機（`softThreshold` / `onProfileChange` / `onAssistantSuggestion`）は発火しない。範囲外の値と数値でない値は既定の120000へ丸める。"
         },
+        "agent.missionControl.stallMinutes": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 1440,
+          "scope": "window",
+          "markdownDescription": "Mission Controlで、実行中なのに出力がこの分数動かないセッションを「停滞」と表示する（Issue #2137）。範囲外の値と数値でない値は既定の5へ丸める。"
+        },
+        "agent.missionControl.replyWaitMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 1440,
+          "scope": "window",
+          "markdownDescription": "Mission Controlで、返事待ち（通常のチャットのターンが終わって人の指示を待っている状態）がこの分数を超えたセッションを色と破線で強調する（Issue #2171）。オーケストレータ配下のセッションと、引き継ぎ後に残った旧タブは返事待ちに数えない。範囲外の値と数値でない値は既定の30へ丸める。"
+        },
+        "agent.missionControl.historyRetentionDays": {
+          "type": "number",
+          "default": 90,
+          "minimum": 1,
+          "maximum": 3650,
+          "scope": "application",
+          "markdownDescription": "作業履歴（セッションの開始・終了・skill起動・引き継ぎ・費用などのイベントと、利用枠の値。Issue #2175）を残す日数。拡張機能の保存領域の `work-history/` に日ごとのファイルで残し、この日数を過ぎた日のファイルを消す。範囲外の値と数値でない値は既定の90へ丸める。"
+        },
+        "agent.missionControl.sessionPurpose.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "利用者の発話（最初の1件と直近の3件）から、セッションの目的を別のAIに1文で要約させ、Mission Controlのカードと詳細ペインに出す（Issue #2172）。呼び出しはターンが終わるたびに最大1回で、発話が前回より増えたときだけ。1つのタブで呼ぶのは10回まで（ウィンドウの再読み込みや会話の開き直しで数え直す。そのあとも発話が増えたターンでしか呼ばない）。起動するCLI・model・effortは `agent.chat.endSummary.provider` / `model` / `effort` に従う（`agent.chat.endSummary.enabled` は見ない）。送る前に資格情報らしい文字列を伏せる。ループ・ワークフロー（オーケストレータ配下）・自動返信の実行中は動かない。OFFにすると追加のCLIを起動しない。"
+        },
         "agent.sessionAutoName.enabled": {
           "type": "boolean",
           "default": true,
@@ -974,13 +1036,33 @@
           "type": "boolean",
           "default": true,
           "scope": "window",
-          "markdownDescription": "安全な区切りで、アシスタント自身が引き継ぎを提案したときに自動引き継ぎする（Issue #1097 / #1150）。コンテキスト残量もmodel/effortの変化も問わない。提案の判定は2経路ある。（1）「別セッションで続きを」「新しいチャットへ引き継ぐ」のような地の文での提案は `agent.autoHandoff.router` の分類器が判定する（正規表現では言い回しのぶれを拾えないため）。（2）handoffプロンプトそのものが出力されたときは、書式が固定されているので拡張機能側が決定論的に検知する。こちらは `agent.autoHandoff.router` が無効・時間切れ・失敗でも発火する。`/loop` 実行中とタスク用セッションではどちらの経路でも発火しない。"
+          "markdownDescription": "安全な区切りで、アシスタント自身が地の文で引き継ぎを提案したときに自動引き継ぎする（Issue #1097）。コンテキスト残量もmodel/effortの変化も問わない。「別セッションで続きを」「新しいチャットへ引き継ぐ」のような提案は `agent.autoHandoff.router` の分類器（またはReflex）が判定する（正規表現では言い回しのぶれを拾えないため）。handoffプロンプトそのものの出力は `agent.autoHandoff.onHandoffPrompt` で制御する（Issue #2066）。`/loop` 実行中とタスク用セッションでは発火しない。"
+        },
+        "agent.autoHandoff.onHandoffPrompt": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "安全な区切りで、handoffプロンプト（`handoff` skillの出力）が出力されたときに自動引き継ぎする（Issue #1150 / #2066）。書式が固定されているので拡張機能側が決定論的に検知し、`agent.autoHandoff.router` が無効・時間切れ・失敗でも発火する。Claude Codeでは同じターンで `handoff` skillを呼んだことも求める。`agent.autoHandoff.onAssistantSuggestion` とは独立に効く。`/loop` 実行中とタスク用セッションでは発火しない。"
         },
         "agent.autoHandoff.onMilestone": {
           "type": "boolean",
           "default": true,
           "scope": "window",
           "markdownDescription": "作業の節目で自動引き継ぎする（Issue #1351 / #1357）。直前のターンで次のコマンド・呼び出しが成功して終わったとき、コンテキスト残量・model/effortの変化・分類器の結果に関係なく引き継ぐ。Issue起票後は `gh issue create` / `glab issue create`、レビュー前は `gh pr create` / `glab mr create`、レビュー後は `gh pr review` / `glab mr approve` か、名前に `review` を含むsubagent・skill（`review-spec` / `gitlab-review` など）と `security-auditor` の呼び出し（Claude Codeのみ）、次のIssueへ進む前は `gh pr merge` / `glab mr merge`。回答待ち・承認待ち・`/loop` 実行中・タスク用セッション・バックグラウンド実行中は発火しない。同じターンに複数の節目があれば、工程の後ろのもの（次のIssueへ進む前 > レビュー後 > レビュー前 > Issue起票後）で1回だけ発火する。"
+        },
+        "agent.autoHandoff.boundaryAction": {
+          "type": "string",
+          "enum": [
+            "offer",
+            "start"
+          ],
+          "enumDescriptions": [
+            "残量が `agent.autoHandoff.softThresholdPercent` を上回るうちは、新しいセッションを開かず引き継ぎを提案するだけで止める",
+            "区切りでも新しいセッションを開いて自動で引き継ぐ"
+          ],
+          "default": "start",
+          "scope": "window",
+          "markdownDescription": "区切りの契機（`agent.autoHandoff.onAssistantSuggestion` のアシスタントの提案と `agent.autoHandoff.onMilestone` の作業の節目）で新しいセッションを開くか（Issue #1947 / #1950）。既定の `start` では区切りでも自動で引き継ぐ。`offer` では、残量が `agent.autoHandoff.softThresholdPercent` 以下のときだけ自動で引き継ぎ、それ以外はチャットに提案を1回出して止める。引き継ぐときは引き継ぎボタンを押す。残量の閾値・自動圧縮・model/effortの変化による引き継ぎはこの設定に関係なく自動で行う。"
         },
         "agent.autoHandoff.closeOldTab": {
           "type": "boolean",
@@ -1640,7 +1722,7 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "markdownDescription": "会話どうしが直接メッセージをやり取りできるようにする。有効にすると、会話を開くたびにメッセージング用のMCPサーバ（`task-messaging`）がその会話にだけ渡り、エージェントは`list_sessions`で他の会話（別のVS Codeウィンドウのものを含む）を一覧し、`send_message` / `ask_session`で話しかけられるようになる。Codexの会話とClaude Codeの会話のどちらからどちらへでも送れる。\n\n宛先は統括ページの各カードに出るセッションIDを使う。サーバは`127.0.0.1`のエフェメラルポートで待ち受け、会話ごとに発行した推測不能なトークン付きURLでしか到達できない。\n\n無効にすると、会話にはMCPサーバが渡らず、その分ツール定義がターンに載らない。ワークフローのタスク間メッセージング（run単位のサーバ）はこの設定とは無関係に動く。"
+          "markdownDescription": "会話どうしが直接メッセージをやり取りできるようにする。有効にすると、会話を開くたびにメッセージング用のMCPサーバ（`task-messaging`）がその会話にだけ渡り、エージェントは`list_sessions`で他の会話（別のVS Codeウィンドウのものを含む）を一覧し、`send_message` / `ask_session`で話しかけられるようになる。Codexの会話とClaude Codeの会話のどちらからどちらへでも送れる。\n\n宛先は`list_sessions`が返すセッションIDを使う。サーバは`127.0.0.1`のエフェメラルポートで待ち受け、会話ごとに発行した推測不能なトークン付きURLでしか到達できない。\n\n無効にすると、会話にはMCPサーバが渡らず、その分ツール定義がターンに載らない。ワークフローのタスク間メッセージング（run単位のサーバ）はこの設定とは無関係に動く。"
         },
         "agent.orchestrator.promptMetrics.enabled": {
           "type": "boolean",
@@ -1653,6 +1735,64 @@
           "default": false,
           "scope": "machine",
           "markdownDescription": "ワークフローのタスク間メッセージングで、MCPツールが実際に何回呼ばれたかを出力パネルへ記録する。run終了時に接続（タスク、およびオーケストレーター）ごとへ1行で、呼び出し回数の合計、呼ばれたツールの種類数、ツール名ごとの回数を出す。\n\n30個近いツールのうち実際に使われているのはどれかを実測し、常時公開するツールを絞るための材料にする計測（Issue #1324）。有効にしてもツールの見え方や呼び出しの結果は変わらない。常用は想定していない。"
+        },
+        "agent.orchestrator.selfImprove.chatIdleMinutes": {
+          "type": "integer",
+          "default": 30,
+          "minimum": 0,
+          "scope": "machine",
+          "markdownDescription": "通常チャットの会話を区切るまでの無入力の時間（分）。最後のターンが終わってからこの時間、次のターンが始まらなければ、そこまでを1つの会話として振り返る。タブを閉じたときも区切る。`0`なら無入力では区切らない。`agent.orchestrator.selfImprove.sources`に`chat`があるときだけ使う（Issue #2123）。"
+        },
+        "agent.orchestrator.selfImprove.chatMinTurns": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 1,
+          "scope": "machine",
+          "markdownDescription": "通常チャットの会話を振り返る対象にするターン数の下限。編集のあったターンが1回以上あり、ターン数がこの値以上の会話だけ、指標と教訓を記録して振り返る。タスク（オーケストレータ）管理下の会話は対象にしない（Issue #2123）。"
+        },
+        "agent.orchestrator.selfImprove.maxPerWeek": {
+          "type": "integer",
+          "default": 3,
+          "minimum": 0,
+          "scope": "machine",
+          "markdownDescription": "自律改善（この拡張自身を直すIssue）を起票する件数の、直近7日あたりの上限（K）。評価中（merge済みで判定が出ていない）の改善があるあいだは、新しい自己改善に着手しない（同時1件）。"
+        },
+        "agent.orchestrator.selfImprove.pluginRepo": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "個人plugin（`~/.claude`へ同期されるrepo）の`owner/name`。空なら、plugin向けの改善を起票しない。設定すると、振り返りで見つかったskill本文の改善を、そのrepoのロードマップIssue（`roadmap`ラベルの1本）の子として自律で起票する。hook・設定・規約・スクリプトの改善は調査Issue（`research`ラベル）へ提案として残すだけで、起票しない（Issue #2089）。"
+        },
+        "agent.orchestrator.selfImprove.pluginSyncedCommitFile": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "`~/.claude`へ同期済みのpluginのcommit（SHA）を書いたファイルのパス。runの記録へ、pluginの最新commitとの一致を残すために読む。空なら同期の状態は「確かめられない」と記録する。"
+        },
+        "agent.orchestrator.selfImprove.sources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "task",
+              "workflow",
+              "chat"
+            ]
+          },
+          "uniqueItems": true,
+          "default": [
+            "task"
+          ],
+          "scope": "machine",
+          "markdownDescription": "自律改善の振り返りの対象にするrunの種別。`task`はtask run、`workflow`はワークフローのrun、`chat`は通常チャットの会話。含まれない種別のrunは振り返らず、その旨を記録に残す。評価は同じ種別のrunだけで比べる（Issue #2120）。`workflow`はrunの終了時に指標を記録し、1つのrunにつき1回だけ振り返る（Issue #2122）。`chat`の終了の検知と指標は後続のIssueで入るため、今は選んでも振り返られない。"
+        },
+        "agent.orchestrator.selfImprove.weeklyUsageThresholdPct": {
+          "type": "number",
+          "default": 80,
+          "minimum": 1,
+          "maximum": 100,
+          "scope": "machine",
+          "markdownDescription": "週次使用率（%）がこの値以上になったら、振り返りと自己改善の起票・着手を止め、その旨を記録に残す。"
         },
         "agent.workflows.dir": {
           "type": "string",
@@ -1734,6 +1874,46 @@
           "scope": "machine-overridable",
           "markdownDescription": "オーケストレータモード（Issue #1562）で、同じフォルダの全runを合わせて同時に動かす工程セッションの上限。runごとの並列上限とは別に掛かり、どちらかに達すると新しい工程を始めずに待たせる。上限を下げても実行中の工程セッションは止めない。範囲外（1未満・64超・非数値）の値は既定値（8）にフォールバックする。"
         },
+        "agent.taskRun.optimize.maxTrials": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 1000,
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレータモードの最適化のループ（Issue #2111）で、1つのタスクが回す試行の回数の上限の上限。計画の最適化の仕様（`budget.maxTrials`）はこの値を超えられない。範囲外（1未満・1000超・非数値）の値は既定値（50）にフォールバックする。"
+        },
+        "agent.taskRun.optimize.maxMinutes": {
+          "type": "number",
+          "default": 1440,
+          "minimum": 1,
+          "maximum": 10080,
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレータモードの最適化のループ（Issue #2111）で、1つのタスクがループを回す時間（分）の上限の上限。計画の最適化の仕様（`budget.maxMinutes`）はこの値を超えられない。Reload・中断をまたいで合計する。範囲外（1未満・10080超・非数値）の値は既定値（1440）にフォールバックする。"
+        },
+        "agent.taskRun.optimize.refuterEngine": {
+          "type": "string",
+          "enum": [
+            "opposite",
+            "same",
+            "claude",
+            "codex"
+          ],
+          "enumDescriptions": [
+            "試行のセッションと別のエンジン（Claudeの試行ならCodex、その逆）",
+            "試行のセッションと同じエンジンの新規セッション",
+            "常にClaude",
+            "常にCodex"
+          ],
+          "default": "opposite",
+          "scope": "machine-overridable",
+          "markdownDescription": "オーケストレータモードの最適化のループ（Issue #2108）で、採用候補を突かせる反証役のエンジン。反証役は試行の会話もツールも持たない新規のheadless CLIで起動する。選んだエンジンのCLIを起動できなければ、試行と同じエンジンの新規セッションで判定し、そうしたことを台帳に残す。"
+        },
+        "agent.taskRun.optimize.refuterModel": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "最適化の反証役（Issue #2108）のモデル。空ならエンジンごとの既定（Claudeは`sonnet`、CodexはCLIの既定）。反証役のエンジンが試行と同じになったとき（`same`や起動失敗の切り替え）もこの値を使う。"
+        },
         "agent.taskRun.resource.intervalSeconds": {
           "type": "number",
           "default": 15,
@@ -1801,6 +1981,48 @@
           "default": false,
           "scope": "window",
           "markdownDescription": "オーケストレータモード（Issue #1505）でOrchestratorが提案した計画を、Reflexが妥当と判定したとき自動で承認する（Issue #1554）。ロードマップ実行（Issue #1465）の計画審査と同じ判定器・閾値を使い、計画そのものの整合だけを見る。判定を得られない（時間切れ・不正な応答）ときや「妥当」と言い切らないときは、これまでどおりユーザーの承認待ちにする。無効にすると判定を試みず、常に承認待ちにする。Reflexモード（`agent.chat.reflex.enabled`）がOFFのときも同様に判定しない（Issue #1713）。既定は無効（Issue #1679。承認前の計画を人が確認するため）。"
+        },
+        "agent.taskRun.planApproval.mode": {
+          "type": "string",
+          "enum": [
+            "human",
+            "orchestrator"
+          ],
+          "enumDescriptions": [
+            "人がKanbanで計画を承認する（既定）。Orchestratorの`approve_plan`はユーザーに頼まれたときだけ使い、Reflexが妥当と言えなければ人に確かめる。",
+            "Orchestratorが計画を承認する。`approve_plan`にselfCheck（自己確認）を必須とし、計画の本文だけを別のCLIへ渡すセカンドオピニオンとReflexを必ず通す。3段とも妥当のときだけ承認し、そうでなければ人へ回さず指摘をOrchestratorへ返す。人は計画を見ないまま工程が進むため、判断の根拠はKanbanの計画承認欄に残る。"
+          ],
+          "default": "human",
+          "scope": "window",
+          "markdownDescription": "オーケストレータモード（Issue #1505）で計画を承認する主体（Issue #2073）。`orchestrator`にするとReflexモード（`agent.chat.reflex.enabled`）が必要で、OFFのときは承認せずKanbanでの人の承認を待つ。`orchestrator`では`agent.taskRun.planAutoApprove.enabled`の自動承認は使わず、承認はすべて`approve_plan`の3段を通す。既定は`human`。"
+        },
+        "agent.taskRun.endReview.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "オーケストレータモード（Issue #1505）で、承認済みの計画の全タスクが終わってrunが終わったとき、review結果の集計とrunの目的（goal）を載せた「終了レビュー」をOrchestratorへ送る（Issue #2194）。goalがありReflexモード（`agent.chat.reflex.enabled`）が有効なら、完了条件を満たしたかをReflexで1回判定して添え、結果を会話に1行残す（判定に失敗したら「判定なし」として送る）。目的が未達なら、送ってから`agent.taskRun.endReview.replanWindowSeconds`秒の間だけ、終わったrunへの`propose_plan`（新しいタスクを1件以上含むもの）を受け付けてrunを再開する。足したタスクは計画の承認の設定どおりに承認待ちになる。runの終了・指標の記録・振り返りは今までどおり走る。無効にすると今までと同じ動き（終了の通知だけを送り、終わったrunの計画は断る）。既定は有効。"
+        },
+        "agent.taskRun.endReview.replanWindowSeconds": {
+          "type": "number",
+          "default": 600,
+          "minimum": 60,
+          "maximum": 86400,
+          "scope": "window",
+          "markdownDescription": "終了レビュー（`agent.taskRun.endReview.enabled`、Issue #2194）を送ってから、終わったrunへの`propose_plan`を受け付ける時間（秒）。過ぎたら今までどおり断り、runは終わったまま。範囲外の値は既定の600秒に戻す。"
+        },
+        "agent.taskRun.endReview.maxReopens": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 10,
+          "scope": "window",
+          "markdownDescription": "終了レビュー（`agent.taskRun.endReview.enabled`、Issue #2194）からの再計画でrunを再開できる回数の上限（run全体の累計）。上限に達したら終了レビューに「再開の上限」と書き、`propose_plan`を受け付けない。0にすると終了レビューは送るが再開は受け付けない。範囲外・整数でない値は既定の2回に戻す。"
+        },
+        "agent.taskRun.autoStartStages.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "window",
+          "markdownDescription": "オーケストレータモード（Issue #1505）で、Model/Effortの判断待ちになった工程を、Orchestratorが設定を決める（`start_stage`）のを待たずに推奨値のまま始める（Issue #2031）。Orchestratorには判断待ちの代わりに自動で始めたことを知らせる。推奨値を得られない工程と、やり直しの工程（関門の決着や差し戻しで未着手へ戻した、前に実行したことがある工程）は対象外で、従来どおりOrchestratorが決める。`agent.autoHandoff.router`がOFFのときの推奨値は、分類器を通さない現在のModel/Effortになる。並列上限・mergeの鍵・依存の待ちは従来どおり効く。既定は無効。"
         },
         "agent.workflows.ciUpdateBranchMaxRetries": {
           "type": "number",
@@ -2102,13 +2324,26 @@
         "key": "ctrl+k a",
         "mac": "cmd+k a",
         "when": "!terminalFocus && !inputFocus"
+      },
+      {
+        "command": "agent.missionControl.open",
+        "key": "ctrl+k j",
+        "mac": "cmd+k j",
+        "when": "!terminalFocus && !inputFocus"
+      },
+      {
+        "command": "agent.missionControl.close",
+        "key": "ctrl+k q",
+        "mac": "cmd+k q",
+        "when": "activeWebviewPanelId == 'agent.missionControl'"
       }
     ]
   },
   "scripts": {
-    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node20 && npm run build:webview",
+    "build:webview": "esbuild src/webview/missionControl/main.tsx --bundle --outfile=dist/missionControl.js --format=iife --platform=browser --target=es2022 --jsx=automatic --jsx-import-source=preact --minify",
     "watch": "npm run build -- --sourcemap --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.webview.json",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -2138,6 +2373,7 @@
     "eslint": "^9.17.0",
     "jsdom": "^30.0.1",
     "mocha": "^11.8.0",
+    "preact": "^11.2.0",
     "prettier": "^3.4.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.2",

@@ -88,6 +88,8 @@ ${completionEvidenceStyles()}
     align-items: flex-start;
   }
   #log { flex: 1; overflow-y: auto; padding: 12px 16px; }
+  /* クリックで受けるfocusは選択を保つためだけのもの。枠は出さない（Issue #2012） */
+  #log:focus { outline: none; }
   #conversationNavigation {
     position: absolute;
     right: 20px;
@@ -645,7 +647,7 @@ ${completionEvidenceStyles()}
     font-family: var(--vscode-editor-font-family);
     font-size: 0.9em;
   }
-  /* 行頭の !/# で何が起きるかを送信前に見せる（issue #5/#6、Claude Code画面のみ） */
+  /* 行頭の ! で何が起きるかを送信前に見せる（issue #5、Claude Code画面のみ） */
   #inputModeHint {
     margin: 0 16px 4px;
     color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground));
@@ -681,8 +683,12 @@ ${completionEvidenceStyles()}
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  /* 今すぐ送り、CLIの取り込みを待っている指示（Issue #2022） */
+  #queue li.held { color: var(--vscode-descriptionForeground); }
+  #queue li.held small { white-space: nowrap; }
   #limitAutoResumeStatus,
   #autoReplyActivity,
+  #autoHandoffWait,
   #processSuspension {
     margin: 0 16px 6px;
     padding: 6px 8px;
@@ -903,6 +909,7 @@ ${completionEvidenceStyles()}
   }
   #loopEvidence { padding: 0 16px 6px; font-size: 0.85em; }
   .diffs { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .ask-chatgpt { margin-top: 6px; }
   .diff {
     border: 1px solid var(--agent-border);
     border-radius: var(--agent-radius-md);

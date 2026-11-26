@@ -141,7 +141,7 @@ import {
   validateExplicitCwds,
 } from './runnerWorkingDirectory';
 import { getRunOutcome, nextTasksToStart, type RunOutcome } from './scheduler';
-import { WorkflowRunStore, type PersistedTaskState } from './runStore';
+import { persistedTaskTimes, WorkflowRunStore, type PersistedTaskState } from './runStore';
 import {
   ORCHESTRATOR_CONNECTION_ID,
   type OrchestratorEvent,
@@ -217,6 +217,11 @@ import {
   type WorkflowIssue,
   type WorkflowTask,
 } from './workflow';
+import {
+  formatIssueDevelopmentSteps,
+  formatTaskExecutionContractReference,
+  formatWorkflowPromotedGuidance,
+} from './workflowPrompts';
 
 /**
  * スケジューラ（#53）が「開始せよ」と言ったタスクについて、セッションを作り、指示を送り、
@@ -273,15 +278,7 @@ export function formatTaskExecutionContract(
   addList('前提', definition.assumptions);
   addList('対象外', definition.nonGoals);
   if (task.issue !== undefined) {
-    contract.push(
-      '### Issueを正本にした開発手順',
-      `- Issue #${task.issue}の本文（受入条件・実装計画）を、このタスクのSpecの正本として扱う。`,
-      '- 実装の完了を宣言する前に、Issueの受入条件と実装計画に照らして成果を確認する。',
-      '- このタスクは実装・検証結果を報告して完了する。runnerが設定済みのPR/MR作成、独立レビュー、修正・再レビュー、マージ、cleanupを後続処理として実行する。',
-      '- runnerの後続処理の対象外となる工程（sharedタスク、またはPR/MR・レビューが無効な設定）は省略せず、このタスクが既存の開発手順に従って実施結果を報告する。',
-      '- Issueの作成・更新とロードマップ改訂は実行タスクでは扱わない。必要な変更はオーケストレーターへ報告し、runnerがcleanup結果をオーケストレーターへ渡す。',
-      '',
-    );
+    contract.push(...formatIssueDevelopmentSteps(task.issue));
   }
   if (task.outcome !== undefined) contract.push('### このタスクの成果', task.outcome, '');
   addList('根拠', task.evidence);
@@ -300,6 +297,7 @@ export function formatTaskExecutionContract(
     }
     contract.push('');
   }
+  contract.push(...formatWorkflowPromotedGuidance());
   return contract.length === 0 ? '' : ['## 実行契約', ...contract].join('\n').trimEnd();
 }
 
@@ -325,21 +323,6 @@ export function composeTaskExecutionContract(
  */
 export function taskExecutionContractDigest(contract: string): string {
   return createHash('sha256').update(contract, 'utf8').digest('hex').slice(0, 12);
-}
-
-/**
- * 継続ターンで全文の代わりに送る、実行契約への参照（Issue #1321）。
- *
- * 見出しを `## 実行契約` にしないのは、契約の全文が何個履歴に積まれているかを数える
- * 計測（`countContractOccurrences`。Issue #1320）へ参照まで混ぜないため。参照は数えたい
- * 対象ではなく、混ぜると削減できたかどうかが読めなくなる。
- */
-export function formatTaskExecutionContractReference(taskId: string, digest: string): string {
-  return [
-    '## 実行契約（参照）',
-    `Contract: ${taskId} / sha256:${digest}`,
-    'このスレッドの最初の指示に全文を載せた実行契約は変わっていない。全体ゴール・受入条件・前提・対象外・成果物・依存タスクから受け取る成果は、その全文のとおりに守って続行する。',
-  ].join('\n');
 }
 
 /**
@@ -6850,6 +6833,12 @@ export class WorkflowRunner {
           const liveTask = live.tasks.get(id);
           const cleanupStatus = liveTask?.cleanupStatus ?? current?.tasks[id]?.cleanupStatus;
           const mergeAttempt = live.mergeAttempts.get(id) ?? current?.tasks[id]?.mergeAttempt;
+          const times = persistedTaskTimes(
+            s.state,
+            liveTask?.startedAt,
+            current?.tasks[id],
+            this.deps.now?.() ?? new Date(),
+          );
           tasks[id] = {
             state: s.state,
             sessionId: s.sessionId,
@@ -6863,6 +6852,7 @@ export class WorkflowRunner {
             retryCount: s.retryCount,
             manualRetryCount: s.manualRetryCount,
             ...(s.reloadResumes === undefined ? {} : { reloadResumes: s.reloadResumes }),
+            ...times,
             failure: s.failure,
             // design.md §16.11「タスクごとの...PR/MRの番号」・Issue #118。branchと同じ理由で
             // liveTaskが無ければ前回persistした値を引き継ぐ

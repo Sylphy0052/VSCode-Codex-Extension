@@ -3,7 +3,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { ChatItem, ChatState } from '../appserver/chatState';
-import { stateHasHandoffAcceptance, stateHasPointerRead } from './handoffAcceptance';
+import {
+  type CreatedReference,
+  stateHasHandoffAcceptance,
+  stateHasPointerRead,
+} from './handoffAcceptance';
 import { type HandoffDigest, readHandoffDigest, renderHandoffDigest } from './handoffDigest';
 
 /**
@@ -487,32 +491,64 @@ export function buildHandoffPrompt(pointerPath: string, replay?: string): string
  * 必要な申し送りはhandoffプロンプトに揃っているので、ポインタファイルを経由させず本文だけを
  * 渡す。ポインタファイルは抽出コマンドでtranscriptを読ませる作りのため、パスを渡すと読みに行く。
  *
- * 系列のreplay（Issue #1896）はhandoffプロンプトの後ろへ置く。受領の判定は初回プロンプトの
- * 先頭だけを読むため、長いreplayを前に置くと申し送りが判定材料から落ちる。
+ * 前置き文・系列のreplay（Issue #1896）・事実節・受領確認の指示は付けない（Issue #1950）。
+ * 開始プロンプトはhandoffプロンプトそのものにする。
  */
-export function buildHandoffPromptFromHandoff(handoffPrompt: string, replay?: string): string {
-  const what =
-    replay === undefined
-      ? '引き継ぎ元が書いた下のhandoffプロンプトの内容だけ'
-      : '引き継ぎ元が書いた下のhandoffプロンプトと、その後ろの引き継ぎ系列のユーザー発話';
-  const head = `${HANDOFF_PROMPT_HEAD}${what}を引き継いで作業を続けて。前セッションの会話・transcriptは読まないこと。\n\n${handoffPrompt}`;
-  return replay === undefined ? head : `${head}\n\n${replay}`;
+export function buildHandoffPromptFromHandoff(handoffPrompt: string): string {
+  return handoffPrompt;
 }
 
 /**
  * 引き継ぎ先への初回プロンプトを選ぶ（Issue #1354）。引き継ぎ元の最終応答にhandoffプロンプトが
- * あればその本文だけを渡し、無ければポインタファイルを指す。
+ * あればその本文だけを渡し、無ければポインタファイルを指す。`isBare`はhandoffプロンプトの本文
+ * だけを渡すとき`true`で、呼び出し側は事実節・受領確認の指示を付けない（Issue #1950）。
+ *
+ * `milestonePrompt`（`buildMilestonePrompt`、Issue #1967）は節目の最小プロンプト。handoff
+ * プロンプトが無いときに使い、これも`isBare`で渡す。引き継ぎ元が書いたhandoffプロンプトの方が
+ * 申し送りを多く持つため、両方あればhandoffプロンプトを採る。
  */
 export function chooseHandoffPrompt(
   pointerPath: string,
   lastAssistantMessage: string | undefined,
   replay?: string,
-): string {
+  milestonePrompt?: string,
+): { text: string; isBare: boolean } {
   const handoffPrompt =
     lastAssistantMessage === undefined ? undefined : extractHandoffPrompt(lastAssistantMessage);
-  return handoffPrompt === undefined
-    ? buildHandoffPrompt(pointerPath, replay)
-    : buildHandoffPromptFromHandoff(handoffPrompt, replay);
+  if (handoffPrompt !== undefined) {
+    return { text: buildHandoffPromptFromHandoff(handoffPrompt), isBare: true };
+  }
+  return milestonePrompt === undefined
+    ? { text: buildHandoffPrompt(pointerPath, replay), isBare: false }
+    : { text: milestonePrompt, isBare: true };
+}
+
+/**
+ * 送る本文が、`chooseHandoffPrompt`の選んだ本文だけの試行か（Issue #1952）。書き出しに失敗して
+ * ポインタ文へ戻した試行は`text`と一致せず`false`になる。Codex側・Claude側で同じ判定を使う。
+ */
+export function isBareHandoffAttempt(
+  chosen: { text: string; isBare: boolean },
+  attemptText: string,
+): boolean {
+  return chosen.isBare && attemptText === chosen.text;
+}
+
+/**
+ * 発話がhandoffプロンプトの本文そのものか（Issue #1950）。本文だけを渡した初回プロンプトを
+ * 引き継ぎ由来と見分けるために使う。`parseHandoffPrompt`と同じ3行（見出し・schema・handoff_id）
+ * を要求する。`parseHandoffPrompt`と同じく見出しの位置は問わない。
+ *
+ * 利用者が手で貼ったhandoffプロンプトも同じ形なので当たる。拡張が送ったものと本文が同じで
+ * 見分ける印が無いため、系列の記録から外れるのは仕様とする（Issue #1952）。
+ */
+export function isHandoffPromptBody(text: string): boolean {
+  const lines = text.split('\n').map((line) => line.replace(/\r$/, ''));
+  return (
+    lines.some((line) => HANDOFF_PROMPT_HEADING.test(line)) &&
+    lines.some((line) => HANDOFF_SCHEMA_LINE.test(line)) &&
+    lines.some((line) => HANDOFF_ID_LINE.test(line))
+  );
 }
 
 /**
@@ -1103,6 +1139,148 @@ export function detectHandoffMilestone(
   return undefined;
 }
 
+/** コマンドの先頭にある `glab`（`COMMAND_HEAD` と同じく、引数中の文言は拾わない）。 */
+const GLAB_COMMAND = new RegExp(String.raw`${COMMAND_HEAD}glab\s`, 'u');
+/**
+ * 引用符の中身を空にする。`--body "…; glab x"` の `;` の後ろをコマンドの先頭と見ないため。
+ * Codexが包む `bash -lc '…'` は外側の引用符を外して中身を残す（中身の引用符は同様に空にする）。
+ */
+function stripQuotedArguments(command: string): string {
+  return command.replace(
+    /(-l?c\s+)?("[^"]*"|'[^']*')/gu,
+    (_whole, wrapper: string | undefined, quoted: string) =>
+      wrapper === undefined ? '""' : `${wrapper}${stripQuotedArguments(quoted.slice(1, -1))}`,
+  );
+}
+/** 値を取らない `gh pr review` のオプション。これ以外のオプションの直後の語は値として読み飛ばす。 */
+const REVIEW_FLAGS_WITHOUT_VALUE = new Set([
+  '--approve',
+  '-a',
+  '--request-changes',
+  '-r',
+  '--comment',
+  '-c',
+]);
+/**
+ * レビューのコマンドで、サブコマンドより後ろの部分。次のコマンドの区切りか引用符までに限る。
+ * 引用符で切ることで、`--body "… --approve …"` の中身と、Codexが包む `bash -lc '…'` の
+ * 閉じ引用符を見ない。
+ */
+const REVIEW_ARGUMENTS = /\b(pr\s+review|mr\s+approve)\b([^;&|'"]*)/u;
+/** 番号の書き方（`123` / `#123` / `!123` / PR・MRのURL）。 */
+const TARGET_NUMBER =
+  /^(?:[#!]?(\d+)|https?:\/\/\S+\/(?:pull|merge_requests)\/(\d+)(?:[/?#]\S*)?)$/u;
+
+/**
+ * 承認したレビューのコマンド（`gh pr review 12 --approve` / `glab mr approve !12`）から対象の
+ * 番号を拾う。承認でないレビュー（`--request-changes` / `--comment`）と、番号の無いコマンドは
+ * `undefined`。200字で切られた末尾の断片（`…` を含む）は見ない。
+ */
+function approvedReviewNumberOf(command: string): string | undefined {
+  const match = REVIEW_ARGUMENTS.exec(command);
+  if (match === null) {
+    return undefined;
+  }
+  const tokens = (match[2] ?? '').trim().split(/\s+/u);
+  const isApproved =
+    match[1]?.startsWith('mr') === true ||
+    tokens.some((token) => token === '--approve' || token === '-a');
+  if (!isApproved) {
+    return undefined;
+  }
+  let previous = '';
+  for (const token of tokens) {
+    if (token.includes('…')) {
+      return undefined;
+    }
+    // `-t 30` のように数値を取るオプションの値は番号ではない
+    const isOptionValue =
+      previous.startsWith('-') &&
+      !previous.includes('=') &&
+      !REVIEW_FLAGS_WITHOUT_VALUE.has(previous);
+    previous = token;
+    if (isOptionValue) {
+      continue;
+    }
+    const number = TARGET_NUMBER.exec(token);
+    if (number !== null) {
+      return number[1] ?? number[2];
+    }
+  }
+  return undefined;
+}
+
+/** 最後に作った参照の番号。 */
+function lastCreatedNumber(
+  references: ReadonlyArray<CreatedReference>,
+  kind: CreatedReference['kind'],
+): string | undefined {
+  return references.filter((reference) => reference.kind === kind).at(-1)?.number;
+}
+
+export interface MilestonePromptInput {
+  trigger: HandoffTrigger;
+  /** 作業ディレクトリ。無ければ `前提:` を書けないので最小プロンプトにしない。 */
+  cwd: string | undefined;
+  /** このセッションで作ったIssue・PR/MR（`extractCreatedReferences`）。 */
+  createdReferences: ReadonlyArray<CreatedReference>;
+  /** 引き継ぎ先のmodel/effortが引き継ぎ元から変わるときだけ渡す。 */
+  profileChange?: { model: string; effort: string };
+}
+
+/**
+ * 作業の節目での引き継ぎに渡す最小の開始プロンプト（Issue #1967）。
+ *
+ * 節目の後は前の会話の文脈が無くても続けられるため、replay・事実節・受領確認の指示を付けず、
+ * `前提:` と `次:` の2行だけにする。model/effortが変わるときだけ3行目に載せる。系列の在処
+ * （`replay.marker`）も付けないため、引き継ぎの系列は節目で切れる。
+ * 契機が節目でないとき、cwdか `次:` に要る番号が取れないときは `undefined`（従来の開始プロンプトへ戻す）。
+ */
+export function buildMilestonePrompt(input: MilestonePromptInput): string | undefined {
+  const { trigger, createdReferences } = input;
+  if (trigger.kind !== 'milestone' || input.cwd === undefined || input.cwd === '') {
+    return undefined;
+  }
+  // GitLabのMRは `!` で番号を書く。レビューのskill・subagentはコマンドに `glab` が出ないため、
+  // 作ったMRのURLでも判定する
+  const isGitLab =
+    GLAB_COMMAND.test(stripQuotedArguments(trigger.command)) ||
+    createdReferences.some((reference) => reference.url.includes('/merge_requests/'));
+  const change = (number: string): string => (isGitLab ? `MR !${number}` : `PR #${number}`);
+  let next: string | undefined;
+  switch (trigger.milestone) {
+    case 'issueCreated': {
+      const number = lastCreatedNumber(createdReferences, 'issue');
+      next = number === undefined ? undefined : `#${number}に着手`;
+      break;
+    }
+    case 'prCreated': {
+      const number = lastCreatedNumber(createdReferences, 'pr');
+      next = number === undefined ? undefined : `${change(number)}を自己レビュー`;
+      break;
+    }
+    case 'reviewed': {
+      // レビューの指摘は旧セッションの会話にしか無い。指摘が残りうるレビュー（承認でないもの、
+      // subagent・skillによるもの）は従来の開始プロンプトで引き継ぐ
+      const number = approvedReviewNumberOf(trigger.command);
+      next = number === undefined ? undefined : `${change(number)}をmergeしcleanup`;
+      break;
+    }
+    case 'merged':
+      next = 'ロードマップから次のIssueを選ぶ';
+      break;
+  }
+  if (next === undefined) {
+    return undefined;
+  }
+  const lines = [`前提: cwd=${input.cwd}`, `次: ${next}`];
+  if (input.profileChange !== undefined) {
+    const { model, effort } = input.profileChange;
+    lines.push(`model/effort: ${model || '既定'} / ${effort || '既定'}`);
+  }
+  return lines.join('\n');
+}
+
 /**
  * 回答待ちで終わったと判定する末尾の形（Issue #1191）。
  *
@@ -1344,6 +1522,28 @@ export function passesSafeBoundaryGate(input: SafeBoundaryGateInput): boolean {
 }
 
 /**
+ * 前段を止めている理由が、バックグラウンド処理の実行中だけか（Issue #2004）。
+ *
+ * 真のときは、バックグラウンド処理が終われば区切りとして通る。利用者へ「終了待ち」と示す
+ * 条件で、busy・承認待ち・質問待ち等でも止まっているときは偽。`reflexEnabled` のときは、
+ * 質問で終わったターンも後段（Reflex）へ回すため、`awaitingUserAnswer` を理由に数えない
+ * （`maybeAutoHandoffAtSafeBoundary` の前段判定と揃える）。
+ */
+export function isWaitingOnlyForBackground(
+  input: SafeBoundaryGateInput,
+  reflexEnabled: boolean,
+): boolean {
+  if (!input.backgroundRunning) {
+    return false;
+  }
+  const withoutBackground = { ...input, backgroundRunning: false };
+  return (
+    passesSafeBoundaryGate(withoutBackground) ||
+    (reflexEnabled && passesSafeBoundaryGate({ ...withoutBackground, awaitingUserAnswer: false }))
+  );
+}
+
+/**
  * 分類器を起動してよいかを絞る鍵（Issue #1090の確認点1）。
  *
  * 前回の判定から材料が変わっていなければ、同じ結論が出るだけのため呼ばない。
@@ -1437,6 +1637,70 @@ export function decideAutoHandoff(input: AutoHandoffDecisionInput): HandoffTrigg
     };
   }
   return undefined;
+}
+
+/**
+ * 区切りの契機で自動引き継ぎをどう扱うか（Issue #1947）。
+ *
+ * - `offer`: 残量に余裕があれば新セッションを開かず、引き継ぎを提案するだけで止める
+ * - `start`: 従来どおり新セッションを開く
+ */
+export type AutoHandoffBoundaryAction = 'offer' | 'start';
+
+/**
+ * 自動引き継ぎを始めず、提案だけで止めるか（Issue #1947）。
+ *
+ * 対象は `assistantSuggested` と `milestone` だけ。どちらも残量を見ずに発火するため、
+ * 引き継ぎ先も一段落するたびにhandoffプロンプトを出し、それを拾って引き継ぐ連鎖が
+ * 「（続き40）」まで延びた。残量が `softThresholdPercent` 以下なら引き継いだ方が良いので
+ * 従来どおり始める。残量が分からないときは引き継ぐ理由が無いので提案で止める。
+ * 残量の閾値・自動圧縮・softThreshold・profileChangedは引き継ぐ理由そのものなので対象外。
+ */
+export function offersInsteadOfAutoHandoff(
+  trigger: HandoffTrigger,
+  remainingPercent: number | undefined,
+  softThresholdPercent: number,
+  action: AutoHandoffBoundaryAction,
+): boolean {
+  if (action !== 'offer') {
+    return false;
+  }
+  if (trigger.kind !== 'assistantSuggested' && trigger.kind !== 'milestone') {
+    return false;
+  }
+  return remainingPercent === undefined || remainingPercent > softThresholdPercent;
+}
+
+/**
+ * 分類器・Reflexを起動しても、結果が同じターンの提案済みで黙って捨てられると分かるか
+ * （Issue #1949）。
+ *
+ * 起動の結果として成り立つ契機のうち、`offersInsteadOfAutoHandoff` の対象外は
+ * `softThreshold`（残量が `softThresholdPercent` 以下のときだけ成立）と
+ * `profileChanged`（`onProfileChange` のときだけ成立）である。この2つが成立しえず、
+ * 同じターンで提案を出し終えていれば、`assistantSuggested` が出ても `requestHandoff` が
+ * 提案の重複として何もせず返すため、起動の費用だけが無駄になる。
+ *
+ * 提案をまだ出していないターンでは、結果次第で提案が出るので打ち切らない。
+ */
+export function probeIsRedundantAfterOffer(input: {
+  action: AutoHandoffBoundaryAction;
+  remainingPercent: number | undefined;
+  softThresholdPercent: number;
+  onProfileChange: boolean;
+  offeredTurnSeq: number | undefined;
+  turnCompletionSeq: number;
+}): boolean {
+  if (input.action !== 'offer' || input.onProfileChange) {
+    return false;
+  }
+  if (
+    input.remainingPercent !== undefined &&
+    input.remainingPercent <= input.softThresholdPercent
+  ) {
+    return false;
+  }
+  return input.offeredTurnSeq === input.turnCompletionSeq;
 }
 
 /**

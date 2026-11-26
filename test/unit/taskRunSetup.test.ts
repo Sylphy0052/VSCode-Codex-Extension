@@ -38,6 +38,8 @@ const hoisted = vi.hoisted(() => {
       finishRun: fn(),
       suspendRun: fn(),
       resumeRun: fn(),
+      findRoadmapRun: fn(),
+      setGoal: fn(),
     },
     orchestrator: {
       canDecide: fn(),
@@ -274,6 +276,7 @@ function makeDeps(overrides: Partial<TaskRunSetupDeps> = {}): TaskRunSetupDeps {
     store: { list: () => [] } as unknown as TaskRunSetupDeps['store'],
     windowId: 'window-1',
     globalStorageDir: '/tmp/global-storage',
+    extensionVersion: '0.0.0-test',
     hosts: {} as TaskRunSetupDeps['hosts'],
     worktreeQueue: worktreeQueue as unknown as TaskRunSetupDeps['worktreeQueue'],
     git: git as unknown as TaskRunSetupDeps['git'],
@@ -400,12 +403,13 @@ afterEach(() => {
 });
 
 describe('setupTaskRun: 組み立てと破棄', () => {
-  it('4つのコマンドとKanbanのシリアライザを登録する', () => {
+  it('5つのコマンドとKanbanのシリアライザを登録する', () => {
     setup();
     expect([...hoisted.commands.keys()].sort()).toEqual([
       'agent.taskRun.kanban',
       'agent.taskRun.start',
       'agent.taskRun.startFromRoadmap',
+      'agent.taskRun.startRoadmapFromChat',
       'agent.taskRun.switch',
     ]);
     expect(hoisted.serializers.map((s) => s.viewType)).toEqual(['agent.taskRunKanban.test']);
@@ -437,6 +441,19 @@ describe('setupTaskRun: 組み立てと破棄', () => {
     expect(fakes.orchestrator.dispose).toHaveBeenCalledTimes(1);
     expect(fakes.questionServer.dispose).toHaveBeenCalledTimes(1);
     expect(fakes.view.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('質問用MCPサーバへツール利用の計測の口を渡し、行は拡張のログへ出す（Issue #2188）', () => {
+    setup();
+    const metrics = opt('questionServer', 'toolUsageMetrics') as {
+      enabled: () => boolean;
+      log: (line: string) => void;
+    };
+    expect(typeof metrics.enabled).toBe('function');
+    metrics.log('[toolUsageMetrics task-run:r1/orchestrator-1] calls=1 kinds=1 tools=a:1');
+    expect(log.infos).toContain(
+      '[toolUsageMetrics task-run:r1/orchestrator-1] calls=1 kinds=1 tools=a:1',
+    );
   });
 
   it('Orchestratorは工程セッションの後ろのトークンを外すためサーバより先に破棄する', () => {
@@ -920,8 +937,7 @@ describe('setupTaskRun: Orchestratorと資源monitorの設定', () => {
     expect(call(opt('monitor', 'thresholds'))).toEqual({ marker: 'thresholds' });
   });
 
-  it('状態が変わったらログへ残し、Orchestratorへrunごとの本文で知らせる', () => {
-    hoisted.describeResourceChange.mockReturnValue('本文');
+  it('状態が変わったらログへ残す（Orchestratorへは知らせない）', () => {
     setup();
     const next = {
       cpuLevel: 'warning',
@@ -933,15 +949,24 @@ describe('setupTaskRun: Orchestratorと資源monitorの設定', () => {
     expect(log.infos[0]).toBe(
       '[task run] 資源の状態: CPU ok -> warning（loadavg） / メモリ ok -> ok / 新規開始 hold',
     );
-    const builder = fakes.orchestrator.notifyResourcePressure.mock.calls[0]?.[0] as (
-      id: string,
-    ) => string;
-    expect(builder('run-7')).toBe('本文');
-    expect(hoisted.describeResourceChange).toHaveBeenCalledWith(undefined, next, 'run-7');
     const prev = { cpuLevel: 'critical', memoryLevel: 'warning' };
     call(opt('monitor', 'onLevelChanged'), prev, next);
     expect(log.infos[1]).toContain('CPU critical -> warning');
     expect(log.infos[1]).toContain('メモリ warning -> ok');
+    expect(fakes.orchestrator.notifyResourcePressure).not.toHaveBeenCalled();
+  });
+
+  it('知らせる変化（onNotify）はOrchestratorへrunごとの本文で知らせる', () => {
+    hoisted.describeResourceChange.mockReturnValue('本文');
+    setup();
+    const prev = { cpuLevel: 'ok', memoryLevel: 'ok' };
+    const next = { cpuLevel: 'warning', memoryLevel: 'ok' };
+    call(opt('monitor', 'onNotify'), prev, next);
+    const builder = fakes.orchestrator.notifyResourcePressure.mock.calls[0]?.[0] as (
+      id: string,
+    ) => string;
+    expect(builder('run-7')).toBe('本文');
+    expect(hoisted.describeResourceChange).toHaveBeenCalledWith(prev, next, 'run-7');
   });
 
   it('計測のたび、保留した工程を始められる扱いのときだけ開始を促す', () => {
@@ -1206,6 +1231,26 @@ describe('コマンド: agent.taskRun.startFromRoadmap', () => {
       'オーケストレータモード: フォルダを開いてから実行してください',
     ]);
     expect(hoisted.startRoadmapRunCommand).not.toHaveBeenCalled();
+  });
+
+  it('チャットからの起動コマンドは不正なgoalを断り、runに触れない（Issue #2193）', async () => {
+    __mock.setWorkspaceFolder(ROOT);
+    setup();
+    // 断るときは同期で返すので、Promiseでくるんで受ける
+    const handler = command('agent.taskRun.startRoadmapFromChat') as (raw: unknown) => unknown;
+    const start = (raw: unknown): Promise<unknown> => Promise.resolve(handler(raw));
+    const base = { folder: ROOT, engine: 'claude', issueNumber: 1, reason: '起動' };
+    for (const goal of [
+      '目的だけの文字列',
+      { objective: '目的' },
+      { objective: 'あ'.repeat(501), completionCriteria: '条件' },
+      { objective: '😀'.repeat(251), completionCriteria: '条件' },
+      { objective: ' \n ', completionCriteria: '条件' },
+    ]) {
+      await expect(start({ ...base, goal })).resolves.toMatchObject({ accepted: false });
+    }
+    expect(fakes.controller.findRoadmapRun).not.toHaveBeenCalled();
+    expect(fakes.controller.setGoal).not.toHaveBeenCalled();
   });
 
   it('Issue番号を検証して渡す（正の安全な整数だけ）', async () => {

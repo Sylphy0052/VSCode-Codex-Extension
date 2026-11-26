@@ -42,6 +42,12 @@ export function decideStartPolicy(cpu: ResourceLevel, memory: ResourceLevel): St
 /** 例外の1本（liveness lane）を続けて始める間隔の下限。 */
 export const LIVENESS_LANE_INTERVAL_MS = 60_000;
 
+/**
+ * 状態が下がったことをOrchestratorへ知らせる前に、下がった状態が続くのを待つ時間（Issue #1981）。
+ * 閾値付近で上下を繰り返すたびに通知が届くのを防ぐ。上がったときは待たずに知らせる。
+ */
+export const RESOURCE_RELEASE_NOTIFY_DELAY_MS = 60_000;
+
 /** CPUの状態を下げるのに、戻しの閾値を下回り続ける必要のある計測の回数。 */
 const CPU_RELEASE_SAMPLES = 2;
 
@@ -138,6 +144,15 @@ export interface ResourceMonitorDeps {
    * （計測を始めてから初めてなら`undefined`で、両方okだったものとして扱う）。
    */
   onLevelChanged(prev: ResourceSnapshot | undefined, snapshot: ResourceSnapshot): void;
+  /**
+   * Orchestratorへ知らせる状態の変化（Issue #1981）。前回知らせた状態より上がった指標があればすぐ呼び、
+   * 下がっただけなら、下がった状態が`releaseNotifyDelayMs`続いてから1回だけ呼ぶ。待つ間に知らせた
+   * 状態へ戻ったら呼ばない。`prev`は前回知らせた計測（まだ知らせていなければ`undefined`で、両方ok
+   * だったものとして扱う）。
+   */
+  onNotify?(prev: ResourceSnapshot | undefined, snapshot: ResourceSnapshot): void;
+  /** 下がったことを知らせるまで待つ時間（ms）。既定は`RESOURCE_RELEASE_NOTIFY_DELAY_MS`。 */
+  releaseNotifyDelayMs?: number;
   /** 計測のたびに呼ぶ。例外の1本の間隔が空いたときに開始を試みるのに使う。 */
   onSampled?(snapshot: ResourceSnapshot): void;
   log(message: string): void;
@@ -259,6 +274,10 @@ export class ResourceMonitor {
   /** 直近に枠を取る前の`lastLivenessStartAt`。枠を返すときに戻す。 */
   private livenessLaneBefore: number | undefined;
   private observedFreedBytesPerStage: number | undefined;
+  /** Orchestratorへ最後に知らせた計測（Issue #1981）。`undefined`は両方okとして扱う。 */
+  private notified: ResourceSnapshot | undefined;
+  /** 下がったことを知らせるまで待つタイマー。 */
+  private releaseTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly deps: ResourceMonitorDeps) {}
 
@@ -341,6 +360,8 @@ export class ResourceMonitor {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
+    this.clearReleaseTimer();
+    this.notified = undefined;
     this.epoch += 1;
     this.latest = undefined;
     this.failure = undefined;
@@ -468,7 +489,53 @@ export class ResourceMonitor {
     ) {
       this.deps.onLevelChanged(prev, snapshot);
     }
+    this.updateNotification(snapshot);
     this.deps.onSampled?.(snapshot);
+  }
+
+  /**
+   * 前回知らせた状態と比べ、上がった指標があればすぐ知らせ、下がっただけなら待ってから知らせる
+   * （Issue #1981）。待つ間に知らせた状態へ戻ったら、下がったことは知らせない。
+   */
+  private updateNotification(snapshot: ResourceSnapshot): void {
+    const base = this.notified;
+    const cpuDelta = LEVEL_ORDER[snapshot.cpuLevel] - LEVEL_ORDER[base?.cpuLevel ?? 'ok'];
+    const memoryDelta = LEVEL_ORDER[snapshot.memoryLevel] - LEVEL_ORDER[base?.memoryLevel ?? 'ok'];
+    if (cpuDelta > 0 || memoryDelta > 0) {
+      this.clearReleaseTimer();
+      this.notified = snapshot;
+      this.deps.onNotify?.(base, snapshot);
+      return;
+    }
+    if (cpuDelta === 0 && memoryDelta === 0) {
+      this.clearReleaseTimer();
+      return;
+    }
+    if (this.releaseTimer === undefined) {
+      this.releaseTimer = setTimeout(
+        () => this.notifyRelease(),
+        this.deps.releaseNotifyDelayMs ?? RESOURCE_RELEASE_NOTIFY_DELAY_MS,
+      );
+    }
+  }
+
+  /** 下がった状態が続いた。知らせる時点の最新の計測で知らせる。 */
+  private notifyRelease(): void {
+    this.releaseTimer = undefined;
+    const latest = this.latest;
+    if (this.disposed || latest === undefined) {
+      return;
+    }
+    const base = this.notified;
+    this.notified = latest;
+    this.deps.onNotify?.(base, latest);
+  }
+
+  private clearReleaseTimer(): void {
+    if (this.releaseTimer !== undefined) {
+      clearTimeout(this.releaseTimer);
+      this.releaseTimer = undefined;
+    }
   }
 }
 
@@ -617,13 +684,13 @@ function decisionLines(snapshot: ResourceSnapshot, runId: string): string[] {
     `${formatCpu(snapshot)} / ${formatMemory(snapshot)}`,
     describeStartPolicy(snapshot.startPolicy),
     describePause(assessRunPause(snapshot, runId)),
-    formatDiagnostics(snapshot.host),
   ];
 }
 
 /**
  * 状態の変化をOrchestratorへ知らせる本文（runごと。pauseの効果がrunの工程で変わるため）。
  * 閾値の解釈と対処の選択はLLMに任せず、監視側で決めた扱いを書く（Issue #1807）。
+ * 診断値と毎回同じ締めの文は載せない（締めの文の内容は導入文に1回だけ書く。Issue #1981）。
  */
 export function describeResourceChange(
   prev: ResourceSnapshot | undefined,
@@ -632,10 +699,8 @@ export function describeResourceChange(
 ): string {
   const lines = [
     `資源の状態が変わりました（CPU ${prev?.cpuLevel ?? 'ok'}→${snapshot.cpuLevel} / ` +
-      `メモリ ${prev?.memoryLevel ?? 'ok'}→${snapshot.memoryLevel}）。` +
-      '以下の扱いは監視側で決めたもので、拡張がそのとおりに動かす。',
+      `メモリ ${prev?.memoryLevel ?? 'ok'}→${snapshot.memoryLevel}）`,
     ...decisionLines(snapshot, runId),
-    '動いている工程は止めない。start_stageは受け付け、新規開始の扱いに従って始める。',
   ];
   if (
     (prev?.startPolicy ?? 'unrestricted') !== 'unrestricted' &&
@@ -643,7 +708,6 @@ export function describeResourceChange(
   ) {
     lines.push('保留していた工程の開始を再開する。一時停止した工程はresume_stageで再開できる。');
   }
-  lines.push('工程ごとの使用量はget_run_stateで確かめられる。');
   return lines.join('\n');
 }
 
@@ -679,7 +743,9 @@ export function formatResourceLines(
   }
   const lines = [
     `資源: ${snapshot.level}（${snapshot.sampledAt.toISOString()}に計測）`,
-    ...decisionLines(snapshot, runId).map((line) => `  ${line}`),
+    ...[...decisionLines(snapshot, runId), formatDiagnostics(snapshot.host)].map(
+      (line) => `  ${line}`,
+    ),
     ...failureLine,
   ];
   const own = snapshot.stages.filter((s) => s.runId === runId);

@@ -53,7 +53,82 @@ export const EXCLUDED_COMMANDS: readonly string[] = [
   'pip install *',
   // sandboxと両立しない（公式ドキュメントのトラブルシューティング）
   'docker *',
+  // 計算機サーバ（Issue #2133）。`~/.ssh`の鍵をsandboxへ渡さず、承認フローを通して外で走らせる
+  'ssh *',
+  'scp *',
+  'rsync *',
 ];
+
+/**
+ * 設定で足すパターンの先頭に置けない語。シェル・`eval`・ラッパーは後ろに任意のコマンドを取り、
+ * `bash *`や`env *`を載せるとどんなコマンドでもsandboxの外へ出せてしまう（Issue #2133）。
+ */
+const UNSAFE_EXTRA_HEADS: ReadonlySet<string> = new Set([
+  'bash',
+  'sh',
+  'zsh',
+  'dash',
+  'ksh',
+  'fish',
+  'eval',
+  'source',
+  '.',
+  'xargs',
+  'env',
+  'timeout',
+  'nice',
+  'nohup',
+  'time',
+  'command',
+  'builtin',
+  'sudo',
+  'su',
+  'stdbuf',
+  'exec',
+]);
+
+/**
+ * 設定で足すパターンとして危険か。先頭の語がワイルドカード・変数（`*`だけのパターンは全コマンドに
+ * 一致してsandboxを実質無効にする）か、任意のコマンドを起動できるシェル・ラッパーなら危険とする。
+ */
+export function isUnsafeExtraExcludedCommand(pattern: string): boolean {
+  const head = pattern.trim().split(/\s+/)[0] ?? '';
+  return head === '' || /[*?$`]/.test(head) || UNSAFE_EXTRA_HEADS.has(head);
+}
+
+/**
+ * 利用者が設定（`agent.claude.sandbox.extraExcludedCommands`）で足した除外パターンを整える
+ * （Issue #2133）。文字列でないもの・空・改行を含むもの・固定の一覧と重複するもの・
+ * sandboxを実質無効にする危険なもの（{@link isUnsafeExtraExcludedCommand}）は捨てる。
+ */
+export function normalizeExtraExcludedCommands(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const result: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'string') {
+      continue;
+    }
+    const pattern = item.trim();
+    if (
+      pattern === '' ||
+      /[\r\n]/.test(pattern) ||
+      isUnsafeExtraExcludedCommand(pattern) ||
+      EXCLUDED_COMMANDS.includes(pattern) ||
+      result.includes(pattern)
+    ) {
+      continue;
+    }
+    result.push(pattern);
+  }
+  return result;
+}
+
+/** 固定の{@link EXCLUDED_COMMANDS}に、設定で足したパターンを後ろへ合流させる。 */
+export function sandboxExcludedCommands(extra: readonly string[] = []): string[] {
+  return [...EXCLUDED_COMMANDS, ...normalizeExtraExcludedCommands(extra)];
+}
 
 /** bubblewrapの試し起動の時間上限。名前空間を作れないときは即座に失敗するので短くてよい。 */
 const BWRAP_TIMEOUT_MS = 10_000;
@@ -90,6 +165,7 @@ export function buildClaudeSandboxSettings(
   mode: ClaudeSandboxMode,
   cwd: string,
   environment: ClaudeSandboxEnvironment,
+  extraExcludedCommands: readonly string[] = [],
 ): Record<string, unknown> {
   return {
     sandbox: {
@@ -97,7 +173,7 @@ export function buildClaudeSandboxSettings(
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
       failIfUnavailable: true,
-      excludedCommands: [...EXCLUDED_COMMANDS],
+      excludedCommands: sandboxExcludedCommands(extraExcludedCommands),
       // 既定では許可されていない接続先へ繋ぐたびに承認（`SandboxNetworkAccess`）が届く。
       // これは接続先のホストしか持たず、コマンドの中身（`gh pr merge`など）を見る承認判定を
       // 素通りさせるため、sandbox内の接続は全て拒否し、ネットワークを要するコマンドは
@@ -112,6 +188,50 @@ export function buildClaudeSandboxSettings(
     },
   };
 }
+
+/**
+ * 最適化の試行（Issue #2107）のセッション用のsandbox設定。書き込みは作業ディレクトリ
+ * （候補のworktree）の中だけに許し、sandboxの外で走るコマンドもネットワークも作らない。
+ *
+ * 工程用の{@link buildClaudeSandboxSettings}との違いは、`excludedCommands`が空であること。
+ * 工程用は`gh`・`git push`などをsandboxの外（承認フロー）で走らせるが、試行のセッションには
+ * 承認ハンドラが無く、外で走るコマンドがそのまま実行されてしまう。
+ */
+export function buildClaudeTrialSandboxSettings(
+  environment: ClaudeSandboxEnvironment,
+  denyWritePaths: readonly string[] = [],
+): Record<string, unknown> {
+  return {
+    sandbox: {
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      failIfUnavailable: true,
+      excludedCommands: [],
+      network: { strictAllowlist: true, allowedDomains: [] },
+      // 作業ディレクトリがgit worktreeだと、CLIはそのgit共通ディレクトリ（共有の`.git`のrefs・
+      // objects）を書き込み許可へ自動で足す（2.1.325。設定で外す手段は無い）。候補の外
+      // （共有の`.git`・基準と最良のworktree）は`denyWrite`で明示的に塞ぐ。共有の`.git`は
+      // `runTrialStage`が必ず渡す。`denyWrite`が既定の書き込み許可より優先されることは、
+      // 工程用の設定（作業ディレクトリ自体を`denyWrite`する`read-only`）で実測済み
+      ...(denyWritePaths.length > 0 ? { filesystem: { denyWrite: [...denyWritePaths] } } : {}),
+      ...(environment.weakerNested ? { enableWeakerNestedSandbox: true } : {}),
+    },
+  };
+}
+
+/**
+ * 試行のセッションで拒否するツール。`git`・`gh`・`glab`はsandboxだけに頼らず、ツールの側でも
+ * 塞ぐ（`git commit`・`git push`・`git config`・`git remote`・ブランチの操作はすべて`git`）。
+ * ネットワークを要するツールも落とす。
+ */
+export const CLAUDE_TRIAL_DISALLOWED_TOOLS: readonly string[] = [
+  'Bash(git *)',
+  'Bash(gh *)',
+  'Bash(glab *)',
+  'WebFetch',
+  'WebSearch',
+];
 
 /**
  * sandbox付きのセッションへ`--append-system-prompt`で伝える指示（Issue #1610）。
@@ -130,9 +250,15 @@ export function buildClaudeSandboxSettings(
  *
  * 出力をファイルへリダイレクトした形（`glab api … > out.json`）もsandbox内で走る（Issue #1674）。
  * 出力をsandboxの外でファイルへ書く手段は無いので、直接読ませる。
+ *
+ * 設定で足したパターン（`python3 /home/<user>/.../cs.py *`など。Issue #2133）も同じく先頭一致で、
+ * `~/`は展開されず一致しないため、設定と同じ絶対パスで打たせる。足したものがあるときだけ伝える。
  */
-export function buildClaudeSandboxPrompt(): string {
-  const commands = EXCLUDED_COMMANDS.map((pattern) => pattern.replace(/ \*$/, '')).join(' / ');
+export function buildClaudeSandboxPrompt(extraExcludedCommands: readonly string[] = []): string {
+  const extra = normalizeExtraExcludedCommands(extraExcludedCommands);
+  const commands = sandboxExcludedCommands(extra)
+    .map((pattern) => pattern.replace(/ \*$/, ''))
+    .join(' / ');
   return [
     'Bashのコマンドはsandbox内で走り、ネットワークと認証情報を使えない。',
     `次のコマンドは、単独で実行したときだけsandboxの外で走る: ${commands}。`,
@@ -141,6 +267,11 @@ export function buildClaudeSandboxPrompt(): string {
     '前にcdも付けず、git -C <dir> pushのようにgitとサブコマンドの間へ引数も挟まない。作業ディレクトリでそのまま打つ。',
     '引数にコマンド置換（$(…)、バッククォート、"$(cat <<EOF …)"）も使わない。PR/MRやIssueの本文は先にWriteツールでファイルへ書き、gh ... --body-file <path>、glab api ... --field description=@<path>のようにファイルから渡す。',
     'これらが認証やネットワークのエラーで失敗したら、使えないと判断する前に単独で打ち直す。',
+    ...(extra.length > 0
+      ? [
+          `一覧のうち ${extra.map((pattern) => pattern.replace(/ \*$/, '')).join(' / ')} は、書かれたとおりの絶対パスのまま先頭から単独で打つ。~/や相対パスに書き換えず、連結・リダイレクト・$(…)も付けない。`,
+        ]
+      : []),
   ].join('\n');
 }
 
@@ -154,12 +285,13 @@ export function claudeSandboxArgs(
   mode: ClaudeSandboxMode,
   cwd: string,
   environment: ClaudeSandboxEnvironment,
+  extraExcludedCommands: readonly string[] = [],
 ): string[] {
   return [
     '--settings',
-    JSON.stringify(buildClaudeSandboxSettings(mode, cwd, environment)),
+    JSON.stringify(buildClaudeSandboxSettings(mode, cwd, environment, extraExcludedCommands)),
     '--append-system-prompt',
-    buildClaudeSandboxPrompt(),
+    buildClaudeSandboxPrompt(extraExcludedCommands),
   ];
 }
 

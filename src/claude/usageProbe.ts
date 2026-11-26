@@ -14,10 +14,12 @@ import { killWithEscalation } from '../process/childProcess';
 import type { ChatUsage } from '../appserver/chatState';
 import type { Logger } from '../log';
 import { probeIntervalMs } from './accountPolicy';
-import { parseUsageReport, parseUsageSlots, type UsageSlots } from './usageText';
+import { parseUsageReport, parseUsageSlots, type UsageSlot, type UsageSlots } from './usageText';
 
 /** 応答が返らないまま居座らせない。使用量は無くても困らない情報なので短く切る。 */
 const TIMEOUT_MS = 20_000;
+/** `readFresh`が、別の取得が先に走っていたときに待って読み直す上限回数。 */
+const READ_FRESH_ATTEMPTS = 3;
 
 /** 失敗の理由としてログへ出す、stdout・stderrそれぞれの長さの上限（Issue #1939）。 */
 const LOG_EXCERPT_CHARS = 300;
@@ -47,10 +49,13 @@ const MIN_INTERVAL_MS = 15 * 60_000;
 const RETRY_INTERVAL_MS = 60_000;
 
 /**
- * 連続失敗がこの回数に達したウィンドウは、自動の取得を止める（Issue #1914）。
- * 他のウィンドウの成功が共有されるか、ウィンドウを開き直すまで再開しない。
+ * 連続失敗がこの回数に達したら、1回だけログへ残す。取得は止めず、`intervalAfter`の
+ * 上限の間隔で取り直し続ける。CLIは使用率の取得に一時的に失敗すると、その節を黙って省いた
+ * 出力を返す。止めると、回復してもウィンドウを開き直すまで未計測のままになる（Issue #1962）。
  */
 const MAX_CONSECUTIVE_FAILURES = 5;
+/** 共有記録の`failures`は、`readAt`からこの時間以上たつと0とみなす（Issue #1920）。 */
+const STALE_FAILURES_MS = 60 * 60_000;
 
 /**
  * 取得中であることを示す排他ファイル名の接頭辞（`sharedDir`の直下）。
@@ -77,6 +82,14 @@ interface SharedUsageRecord {
   failures: number;
   /** `readAt`の時点の、5時間枠と週次のうち高い方の使用率。次の取得間隔を決める（Issue #1924）。 */
   highestPct?: number;
+  /** 直近に読めた5時間枠と週次（Issue #2174）。取得中の印を書くときも前回の値を残す。 */
+  slots?: ProbedSlots;
+}
+
+/** `/usage`から読んだ5時間枠と週次と、読んだ時刻（ms。Issue #2174）。 */
+export interface ProbedSlots {
+  slots: UsageSlots;
+  readAt: number;
 }
 
 /**
@@ -88,6 +101,11 @@ export interface UsageProbeAccounts {
   currentId(): Promise<string | undefined>;
   /** 取得した枠を`id`の記録へ書く。取得中に切り替わっていたら呼び出し側が捨てる。 */
   record(id: string, slots: UsageSlots, nowMs: number): Promise<void>;
+  /**
+   * 使用率を読めなかったとき、CLIが保存した直近の値を`id`の記録へ写す（Issue #1964）。
+   * 写した値の取得時刻を返す。写さなければ`undefined`。
+   */
+  recordCached?(id: string): Promise<number | undefined>;
   /** 取得に成功した後に呼ぶ（自動切り替えの判断を行う）。 */
   onProbed?(slots: UsageSlots, nowMs: number): Promise<void>;
 }
@@ -113,15 +131,22 @@ function intervalAfter(failures: number, highestPct = 0): number {
 export class ClaudeUsageProbe {
   /** この時刻までは`read`しても何もしない。 */
   private nextReadAt = 0;
+  /** 他のウィンドウが取得権を持っていて取れなかったとき、この時刻までは強制取得でも再試行しない。 */
+  private claimRetryAt = 0;
   /** 共有先が無いときに使う、ウィンドウ内での連続失敗の回数。 */
   private failures = 0;
-  /** 連続失敗が上限に達して、自動の取得を止めているか。 */
-  private stopped = false;
-  /** このウィンドウで`claude`を1回でも起動したか。 */
-  private launched = false;
   private running = false;
   /** 自分が取得中のロックの世代。取得していなければundefined。 */
   private claimedGeneration: number | undefined;
+  /** 次の`read`で間隔・共有の結果を無視して取得するか（Issue #1955）。 */
+  private freshRequested = false;
+  /** 進行中の取得。終われば解決する（失敗しても拒否しない）。 */
+  private inFlight: Promise<void> = Promise.resolve();
+  /**
+   * 進行中の`readOnce`で受け取り先へ渡すもの（Issue #2174）。`undefined`なら渡さない（前の値を
+   * 残す）。`{ probed: undefined }`なら、今の値が無いことを渡す（前の値を消させる）。
+   */
+  private readSlots: { probed: ProbedSlots | undefined } | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -133,6 +158,14 @@ export class ClaudeUsageProbe {
     private readonly sharedDir?: string,
     /** 取得した枠の記録先と自動切り替えの呼び出し先（Issue #1924）。未指定なら記録しない。 */
     private readonly accounts?: UsageProbeAccounts,
+    /**
+     * 5時間枠と週次の使用率・リセット時刻を読めたら呼ぶ（Issue #2174。Mission Controlの見込み用）。
+     * 他のウィンドウの結果を使ったときも呼ぶ。切り替え前のアカウントの値は渡さない。
+     * `undefined`は「今の値が無い」で、受け取り先は持っている値を捨てる。`requestFresh`
+     * （アカウントの切り替えの前後）と、5時間枠と週次の無い共有の結果を使ったとき・自分の取得で
+     * 読めず共有にも残っていなかったときに渡す。
+     */
+    private readonly onSlots?: (probed: ProbedSlots | undefined) => void,
   ) {}
 
   /** 取得した枠を稼働中だったアカウントへ記録し、自動切り替えの判断を呼ぶ。失敗しても取得は成功扱い。 */
@@ -150,10 +183,63 @@ export class ClaudeUsageProbe {
       }
       await this.accounts.onProbed?.(slots, now);
     } catch (e) {
+      this.log.warn(`使用率の記録で止まりました: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * 使用率を読めなかったとき、CLIが保存した直近の値を稼働中だったアカウントへ記録する
+   * （Issue #1964）。CLIは`/api/oauth/usage`が429を返すと、`/usage`の使用率の節を黙って省く。
+   * 保存値は取得時刻つきで記録し、画面にはいつの値かを出す。古い値なので自動切り替えの
+   * 判断（`onProbed`）には使わない。
+   */
+  private async recordCached(startedAccount: string): Promise<void> {
+    if (this.accounts?.recordCached === undefined) {
+      return;
+    }
+    try {
+      const fetchedAt = await this.accounts.recordCached(startedAccount);
+      if (fetchedAt !== undefined) {
+        this.log.info(
+          `使用量を読めなかったため、Claude Codeが${new Date(fetchedAt).toLocaleString()}に取得した値を記録しました。`,
+        );
+      }
+    } catch (e) {
       this.log.warn(
-        `使用率の記録で止まりました: ${e instanceof Error ? e.message : String(e)}`,
+        `保存された使用率の記録で止まりました: ${e instanceof Error ? e.message : String(e)}`,
       );
     }
+  }
+
+  /**
+   * 次の`read`を、間隔・他のウィンドウの結果に関わらず取得させる
+   * （Issue #1955）。アカウントを切り替えた直後に、切り替え先の使用率を取るために使う。
+   * 共有の結果は切り替え前のアカウントのものでありうるので使わない。
+   * 他のウィンドウが取得権を持っていて読めなかったときは、再試行の間隔を空けて次の`read`へ持ち越す。
+   */
+  requestFresh(): void {
+    this.freshRequested = true;
+    // 持っている5時間枠と週次は切り替え前のアカウントのものでありうる。取り直しが失敗しても
+    // 切り替え前の値を今の値として出し続けないよう、先に捨てさせる（Issue #2174）
+    this.deliverSlots(undefined);
+  }
+
+  /**
+   * `requestFresh`してから読む。取得中なら、その取得（切り替え前のアカウントのものでありうる）
+   * が終わるのを待ってから読み直す。待っている間に別の取得（ポーリング）が始まって
+   * `read`が何もしなかったときは、その取得も待って読み直す（Issue #1959）。
+   * 他のウィンドウが取得権を持っているときの`undefined`は、呼び出し側が扱う。
+   */
+  async readFresh(now: () => number = Date.now): Promise<ChatUsage | undefined> {
+    this.requestFresh();
+    for (let attempt = 0; attempt < READ_FRESH_ATTEMPTS; attempt++) {
+      await this.inFlight;
+      const usage = await this.read(now());
+      if (usage !== undefined || !this.running) {
+        return usage;
+      }
+    }
+    return undefined;
   }
 
   /**
@@ -163,44 +249,96 @@ export class ClaudeUsageProbe {
    *
    * @param now 現在時刻（ミリ秒）。テストから差し替える。
    */
-  async read(now: number = Date.now()): Promise<ChatUsage | undefined> {
-    if (this.running || now < this.nextReadAt) {
-      return undefined;
+  read(now: number = Date.now()): Promise<ChatUsage | undefined> {
+    // 強制取得は通常の間隔を無視するが、取得権を取れなかった後の再試行の間隔は守る
+    if (
+      this.running ||
+      now < this.claimRetryAt ||
+      (now < this.nextReadAt && !this.freshRequested)
+    ) {
+      return Promise.resolve(undefined);
     }
     this.running = true;
+    // 取得中に切り替えられたら、他のウィンドウの結果を使った場合も含めて切り替え前の
+    // アカウントの値なので、画面へは出さない
+    this.readSlots = undefined;
+    const run = this.readOnce(now).then((usage) => {
+      if (this.freshRequested) {
+        return undefined;
+      }
+      this.emitSlots();
+      return usage;
+    });
+    this.inFlight = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private emitSlots(): void {
+    const result = this.readSlots;
+    this.readSlots = undefined;
+    if (result !== undefined) {
+      this.deliverSlots(result.probed);
+    }
+  }
+
+  private deliverSlots(probed: ProbedSlots | undefined): void {
+    if (this.onSlots === undefined) {
+      return;
+    }
+    try {
+      this.onSlots(probed);
+    } catch (e) {
+      this.log.warn(
+        `使用率の受け渡しで止まりました: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  private async readOnce(now: number): Promise<ChatUsage | undefined> {
+    const forced = this.freshRequested;
     let claimed = false;
     try {
-      const fresh = await this.readFreshShared(now);
+      const fresh = forced ? undefined : await this.readFreshShared(now);
       if (fresh !== undefined) {
         return this.adopt(fresh);
-      }
-      if (this.stopped) {
-        // 止めている間は起動しない。他のウィンドウの成功が共有されれば、上のadoptで再開する
-        this.nextReadAt = now + RETRY_INTERVAL_MS;
-        return undefined;
       }
       // 読んで書くまでの間に別ウィンドウが起動しないよう、排他的に作れたウィンドウだけが取得する
       claimed = await this.claim(now);
       if (!claimed) {
-        this.nextReadAt = now + RETRY_INTERVAL_MS;
+        this.claimRetryAt = now + RETRY_INTERVAL_MS;
         return undefined;
       }
+      this.claimRetryAt = 0;
       // 取得権を得るまでの間に別ウィンドウが終えていれば、その結果を使う
-      const again = await this.readFreshShared(now);
+      const again = forced ? undefined : await this.readFreshShared(now);
       if (again !== undefined) {
         return this.adopt(again);
       }
-      const failures = (await this.readShared())?.failures ?? this.failures;
-      if (failures >= MAX_CONSECUTIVE_FAILURES && this.launched) {
-        // 他のウィンドウが上限に達した。ログはそのウィンドウが出しているので、黙って止める。
-        // まだ起動していないウィンドウ（開き直した直後など）は、1回だけ試してから止まる
-        this.stopped = true;
-        this.nextReadAt = now + RETRY_INTERVAL_MS;
-        return undefined;
-      }
-      this.launched = true;
-      // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする
-      await this.writeShared({ readAt: now, usage: undefined, failures });
+      const previous = await this.readShared();
+      // 時間が空いた記録の失敗は、今の失敗と続いているとは言えないので数えない
+      const failures =
+        previous === undefined
+          ? this.failures
+          : now - previous.readAt >= STALE_FAILURES_MS
+            ? 0
+            : previous.failures;
+      // 前回の5時間枠と週次（Issue #2174）。強制取得はアカウントの切り替え直後に、切り替え前の
+      // 値を使わないために行うので、前回の値を引き継がない（他のウィンドウがadoptすると、
+      // 切り替え前のアカウントの値を今の値として渡してしまう）
+      const carriedSlots = forced ? undefined : previous?.slots;
+      // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする。
+      // 取得中にadoptした他のウィンドウへ割合が届くよう、前回の値は残す
+      await this.writeShared({
+        readAt: now,
+        usage: previous?.usage,
+        failures,
+        ...(carriedSlots === undefined ? {} : { slots: carriedSlots }),
+      });
+      // 稼働中を読む直前に下ろす。取得中に切り替わって再度求められたら、次の`read`で取り直す
+      this.freshRequested = false;
       const startedAccount = await this.accounts?.currentId().catch(() => undefined);
       const result = await this.run();
       const output = result?.stdout;
@@ -213,6 +351,16 @@ export class ClaudeUsageProbe {
       }
       const slots = output === undefined ? undefined : parseUsageSlots(output, now);
       const highestPct = slots === undefined ? undefined : highestOf(slots);
+      if (slots !== undefined) {
+        this.readSlots = { probed: { slots, readAt: now } };
+      } else if (previous !== undefined && !forced) {
+        // 読めなければ共有に残っていた値に揃える。他のウィンドウがアカウントを切り替えて強制取得した
+        // 後の記録には5時間枠と週次が無いので、手元の切り替え前の値をここで捨てさせる（Issue #2174）。
+        // 強制取得なら`requestFresh`で捨てさせ済み
+        this.readSlots = { probed: carriedSlots };
+      }
+      // 保存値で代わりに記録できても、新しい値は取れていないので失敗として数え、再試行の
+      // 間隔を延ばす。CLIは429を約32分覚えて再要求しないため、短い間隔で取り直しても取れない
       const nextFailures = usage === undefined ? failures + 1 : 0;
       this.recordResult(now, nextFailures, highestPct);
       await this.writeShared({
@@ -220,9 +368,16 @@ export class ClaudeUsageProbe {
         usage,
         failures: nextFailures,
         ...(highestPct === undefined ? {} : { highestPct }),
+        ...(slots !== undefined
+          ? { slots: { slots, readAt: now } }
+          : carriedSlots === undefined
+            ? {}
+            : { slots: carriedSlots }),
       });
       if (slots !== undefined) {
         await this.recordSlots(startedAccount, slots, now);
+      } else if (usage === undefined && startedAccount !== undefined) {
+        await this.recordCached(startedAccount);
       }
       return usage;
     } finally {
@@ -247,25 +402,20 @@ export class ClaudeUsageProbe {
   private adopt(record: SharedUsageRecord): ChatUsage | undefined {
     this.failures = record.failures;
     this.nextReadAt = record.readAt + intervalAfter(record.failures, record.highestPct);
-    if (record.usage !== undefined) {
-      this.stopped = false;
-    }
+    // 5時間枠と週次の無い記録は、強制取得の途中か失敗（切り替え前の値を引き継がない）、
+    // まだ読めていない、旧版が書いた、のどれか。どれも今の値が無いので、前の値を捨てさせる
+    this.readSlots = { probed: record.slots };
     return record.usage;
   }
 
-  /** 自分で取得した結果から、次に取得する時刻と停止を決める。 */
+  /** 自分で取得した結果から、次に取得する時刻を決める。 */
   private recordResult(now: number, failures: number, highestPct?: number): void {
     this.failures = failures;
     this.nextReadAt = now + intervalAfter(failures, highestPct);
-    if (failures === 0) {
-      this.stopped = false;
-      return;
-    }
-    if (failures >= MAX_CONSECUTIVE_FAILURES && !this.stopped) {
-      this.stopped = true;
+    if (failures === MAX_CONSECUTIVE_FAILURES) {
       this.log.warn(
-        `使用量の取得が${failures}回続けて失敗したため、自動の取得を止めます。` +
-          '他のウィンドウで取得できるか、ウィンドウを開き直すと再開します。',
+        `使用量の取得が${failures}回続けて失敗しました。` +
+          `以後${MIN_INTERVAL_MS / 60_000}分おきに取り直します。`,
       );
     }
   }
@@ -451,7 +601,7 @@ export class ClaudeUsageProbe {
 }
 
 /** 外部プロセスの出力を、ログの1行に収まる形へ縮める。空なら空と分かるように出す。 */
-function logExcerpt(text: string): string {
+export function logExcerpt(text: string): string {
   const flat = text.replace(/\s+/g, ' ').trim();
   if (flat === '') {
     return '（空）';
@@ -482,12 +632,49 @@ function parseSharedUsageRecord(raw: string): SharedUsageRecord | undefined {
       : 0;
   const highestPct =
     typeof v.highestPct === 'number' && Number.isFinite(v.highestPct) ? v.highestPct : undefined;
+  const slots = parseSharedSlots(v.slots);
   return {
     readAt: v.readAt,
     usage: parseSharedUsage(v.usage),
     failures,
     ...(highestPct === undefined ? {} : { highestPct }),
+    ...(slots === undefined ? {} : { slots }),
   };
+}
+
+/** 共有ファイルの5時間枠と週次（Issue #2174）。旧版は書かない。形の違う枠は捨てる。 */
+function parseSharedSlots(value: unknown): ProbedSlots | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.readAt !== 'number' || !Number.isFinite(v.readAt)) {
+    return undefined;
+  }
+  const raw = v.slots;
+  if (typeof raw !== 'object' || raw === null) {
+    return undefined;
+  }
+  const r = raw as Record<string, unknown>;
+  const fiveHour = parseSharedSlot(r.fiveHour);
+  const weekly = parseSharedSlot(r.weekly);
+  if (fiveHour === undefined && weekly === undefined) {
+    return undefined;
+  }
+  return { slots: { fiveHour, weekly }, readAt: v.readAt };
+}
+
+function parseSharedSlot(value: unknown): UsageSlot | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.pct !== 'number' || !Number.isFinite(v.pct)) {
+    return undefined;
+  }
+  const resetsAt =
+    typeof v.resetsAt === 'number' && Number.isFinite(v.resetsAt) ? v.resetsAt : undefined;
+  return { pct: v.pct, resetsAt };
 }
 
 function parseSharedUsage(value: unknown): ChatUsage | undefined {

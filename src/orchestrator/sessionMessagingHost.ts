@@ -14,7 +14,11 @@ import {
   type DispatchErrorLogPort,
   type McpConnection,
   type McpTransportPort,
+  type SessionProfilePort,
+  type StartRoadmapOrchestratorPort,
+  type WebGptDiscussionPort,
 } from './messaging';
+import { formatToolUsageMetricsLine, ToolUsageCounter } from './toolUsageMetrics';
 import { formatSessionTarget, type SessionBridgePort, type SessionProvider } from './sessionBridge';
 
 /**
@@ -64,9 +68,27 @@ export interface SessionMessagingHost {
    * Codexは`thread/start`の応答でしかスレッドidが判らないため、起動前にここでURLを取り、
    * 起動後に`bind`する。Claude Codeは起動前にセッションidが決まるため、発行直後に
    * `bind`できる。
+   *
+   * `options.webGptDiscussion`を渡すと、その会話へ`start_webgpt_discussion`を見せる
+   * （Issue #2051）。タスク実行の会話では渡さない。
    */
-  register(provider: SessionProvider): SessionMessagingRegistration;
+  register(
+    provider: SessionProvider,
+    options?: SessionMessagingRegisterOptions,
+  ): SessionMessagingRegistration;
   close(): Promise<void>;
+}
+
+export interface SessionMessagingRegisterOptions {
+  /** この会話でWebGPTとの議論を始める口（Issue #2051）。会話に束縛した関数を渡す。 */
+  webGptDiscussion?: WebGptDiscussionPort | undefined;
+  /** この会話のmodel/effortを変える口（Issue #2053）。会話に束縛した関数を渡す。 */
+  sessionProfile?: SessionProfilePort | undefined;
+  /**
+   * この会話でロードマップのオーケストレータモードを起動する口（Issue #2070）。会話に束縛した
+   * 関数を渡す。Orchestratorと工程セッションでは渡さない。
+   */
+  startRoadmapOrchestrator?: StartRoadmapOrchestratorPort | undefined;
 }
 
 export interface SessionMessagingHostDeps {
@@ -75,6 +97,12 @@ export interface SessionMessagingHostDeps {
   /** セッション宛の解決。`extension.ts`が組み立てた実体を毎回読む（値で持たない）。 */
   sessionBridge: () => SessionBridgePort | undefined;
   logPort?: DispatchErrorLogPort;
+  /**
+   * ツールの実利用率の記録（Issue #1324 受入基準1）。会話ごとにカウンタを持ち、有効な間の
+   * 呼び出しだけを数えて、会話の`dispose`時点でも有効なら1行出す。`enabled`は毎回読む
+   * （会話の途中で設定を切り替えても効く）。ワークフローのrun側（`runner.ts`）と設定キーは同じ。
+   */
+  toolUsageMetrics?: { enabled: () => boolean; log: (line: string) => void };
   /** Claude Code用のMCP設定ファイルを置くディレクトリ。省略するとファイルを作らない。 */
   configDir?: string;
 }
@@ -107,7 +135,10 @@ export async function startSessionMessagingHost(
   if (deps.configDir !== undefined) pruneStaleMcpConfigFiles(deps.configDir, CONFIG_PREFIX);
 
   return {
-    register(provider: SessionProvider): SessionMessagingRegistration {
+    register(
+      provider: SessionProvider,
+      options?: SessionMessagingRegisterOptions,
+    ): SessionMessagingRegistration {
       const token = randomBytes(16).toString('hex');
       const entry: SessionEntry = { provider, ref: undefined, handler: undefined };
       const transport: McpTransportPort = {
@@ -120,8 +151,26 @@ export async function startSessionMessagingHost(
         listRunTasks: () => [],
         sessionBridge: deps.sessionBridge,
         sessionOnly: true,
+        webGptDiscussion: options?.webGptDiscussion,
+        sessionProfile: options?.sessionProfile,
+        startRoadmapOrchestrator: options?.startRoadmapOrchestrator,
       });
-      const mcpServer = new MessagingMcpServer(hub, transport, deps.logPort);
+      // 有効かどうかは呼び出しのたびと会話の終了時に読む。通常の会話はrunより長く開いたままに
+      // なりやすく、登録時に1回だけ決めると、設定を切り替えても既存の会話へ反映されない
+      const metrics = deps.toolUsageMetrics;
+      const toolUsage = metrics === undefined ? undefined : new ToolUsageCounter();
+      const mcpServer = new MessagingMcpServer(
+        hub,
+        transport,
+        deps.logPort,
+        metrics === undefined || toolUsage === undefined
+          ? undefined
+          : {
+              record: (taskId, toolName) => {
+                if (metrics.enabled()) toolUsage.record(taskId, toolName);
+              },
+            },
+      );
       void mcpServer; // 生成することで`transport.onConnection`にハンドラを登録させる
       entries.set(token, entry);
       const url = server.urlForToken(token);
@@ -147,6 +196,13 @@ export async function startSessionMessagingHost(
           entry.ref = formatSessionTarget({ windowId: deps.windowId, provider, threadId });
         },
         dispose(): void {
+          // 終了時点で無効なら、途中まで数えた分も出さない。呼ばれなかった会話は行を出さない
+          // （接続ごとの集計が空）
+          if (metrics !== undefined && toolUsage !== undefined && metrics.enabled()) {
+            for (const counts of toolUsage.snapshot()) {
+              metrics.log(formatToolUsageMetricsLine(`chat-${provider}`, counts));
+            }
+          }
           entries.delete(token);
           if (claudeConfigPath !== undefined) {
             removeMcpConfigFile(claudeConfigPath);

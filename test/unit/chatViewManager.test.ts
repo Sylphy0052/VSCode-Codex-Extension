@@ -732,7 +732,7 @@ describe('ChatViewManager', () => {
   describe('セッション単位のモデル設定（issue #844）', () => {
     it('変更を他セッションへ波及させず、同じthreadIdを開き直すと復元する', async () => {
       __mock.setConfig('codex', { model: 'global-model', reasoningEffort: 'low' });
-      const sessionSettings = new SessionModelSettingsStore(fakeMemento());
+      const sessionSettings = new SessionModelSettingsStore();
       const { manager, connection } = createManager({ sessionSettings });
 
       const firstStart = manager.openNew('/workspace/root');
@@ -921,7 +921,7 @@ describe('ChatViewManager', () => {
         'workflowMenu',
         'teamWorkflow',
         'workflowView',
-        'sessionKanban',
+        'missionControl',
         'openProgress',
       ]) {
         expect(isInOverflowMenu(html, id), `${id} は「…」メニューにあるはず`).toBe(true);
@@ -1231,6 +1231,73 @@ describe('ChatViewManager', () => {
       expect(first).toBeDefined();
       expect(second).toBeDefined();
       expect(second?.activeSequence).toBeGreaterThan(first?.activeSequence as number);
+    });
+  });
+
+  describe('Mission Controlで選んだセッションへの操作（Issue #2160）', () => {
+    const openTwo = async () => {
+      const env = createManager();
+      const a = env.manager.openNew('/workspace/a');
+      await tick();
+      env.connection.resolveFirst('thread/start', threadStartResult('thread-a'));
+      await a;
+      const panelA = __mock.lastCreatedPanel();
+      const b = env.manager.openNew('/workspace/b');
+      await tick();
+      env.connection.resolveFirst('thread/start', threadStartResult('thread-b'));
+      await b;
+      return { ...env, panelA, panelB: __mock.lastCreatedPanel() };
+    };
+
+    it('名前の変更・クリア・分岐は最後にアクティブなチャットではなく指定したセッションに効く', async () => {
+      const { manager, connection, panelA, panelB } = await openTwo();
+
+      const renamed = manager.controlSessionAsync('thread-a', { kind: 'rename', name: 'A名' });
+      await tick();
+      connection.resolveFirst('thread/name/set', {});
+      expect(await renamed).toEqual({ ok: true });
+      expect(connection.requests.find((r) => r.method === 'thread/name/set')?.params).toEqual(
+        expect.objectContaining({ threadId: 'thread-a', name: 'A名' }),
+      );
+
+      const forked = manager.controlSessionAsync('thread-a', { kind: 'fork' });
+      await tick();
+      expect(connection.requests.find((r) => r.method === 'thread/fork')?.params).toEqual({
+        threadId: 'thread-a',
+      });
+      connection.resolveFirst('thread/fork', threadStartResult('thread-a-fork'));
+      await tick(40);
+      connection.resolveFirst('thread/resume', { thread: { id: 'thread-a-fork', turns: [] } });
+      expect(await forked).toEqual({ ok: true });
+
+      const cleared = manager.controlSessionAsync('thread-a', { kind: 'clear' });
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-a2'));
+      expect(await cleared).toEqual({ ok: true });
+      expect(panelA?.disposed).toBe(true);
+      expect(panelB?.disposed).toBe(false);
+      expect(manager.isOpen('thread-b')).toBe(true);
+      // 消した会話のidへの操作は断る
+      expect((await manager.controlSessionAsync('thread-a', { kind: 'clear' })).ok).toBe(false);
+    });
+
+    it('コマンドパレットのクリアは従来どおり最後にアクティブなチャットに効く', async () => {
+      const { manager, connection, panelA, panelB } = await openTwo();
+      const cleared = manager.clearActive();
+      await tick();
+      connection.resolveFirst('thread/start', threadStartResult('thread-b2'));
+      await cleared;
+      expect(panelB?.disposed).toBe(true);
+      expect(panelA?.disposed).toBe(false);
+    });
+
+    it('Codexのセッションは巻き戻しを断る', async () => {
+      const { manager } = await openTwo();
+      const result = await manager.controlSessionAsync('thread-a', {
+        kind: 'rewindPreview',
+        messageId: 'u-1',
+      });
+      expect(result.ok).toBe(false);
     });
   });
 
@@ -1801,17 +1868,17 @@ describe('ChatViewManager', () => {
     });
   });
 
-  it('三点メニューのセッションカンバンからagent.sessionKanbanを実行する', async () => {
+  it('三点メニューのMission Controlからagent.missionControl.openを実行する', async () => {
     const { manager, connection } = createManager();
     const opened = manager.openNew();
     await tick();
     connection.resolveFirst('thread/start', threadStartResult('thread-session-kanban'));
     await opened;
 
-    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'sessionKanban' });
+    __mock.lastCreatedPanel()?.webview.simulateMessage({ type: 'missionControl' });
     await tick();
 
-    expect(__mock.executedCommands).toContain('agent.sessionKanban');
+    expect(__mock.executedCommands).toContain('agent.missionControl.open');
   });
 
   describe('タブ名の状態表示（issue #286、design.md §14.55）', () => {
@@ -2506,14 +2573,26 @@ describe('handoffプロンプトの決定論検知で自動引き継ぎする（
     expect(threadStarts(connection)).toBe(1);
   });
 
-  it('onAssistantSuggestion=false なら決定論検知でも発火しない', async () => {
+  it('onHandoffPrompt=false なら決定論検知でも発火しない', async () => {
+    __mock.setConfig('agent', {
+      'autoHandoff.router': false,
+      'autoHandoff.onHandoffPrompt': false,
+    });
+    const connection = await finishTurnWith(HANDOFF_PROMPT);
+    await tick(20);
+    expect(threadStarts(connection)).toBe(1);
+  });
+
+  // 地の文の提案だけを止めても、handoffプロンプトの検知は止まらない（Issue #2066）
+  it('onAssistantSuggestion=false でも、handoffプロンプトが出れば新しいセッションを開く', async () => {
     __mock.setConfig('agent', {
       'autoHandoff.router': false,
       'autoHandoff.onAssistantSuggestion': false,
     });
     const connection = await finishTurnWith(HANDOFF_PROMPT);
-    await tick(20);
-    expect(threadStarts(connection)).toBe(1);
+    await vi.waitFor(() => {
+      expect(threadStarts(connection)).toBe(2);
+    });
   });
 
   it('自動引き継ぎ自体がOFFなら発火しない', async () => {

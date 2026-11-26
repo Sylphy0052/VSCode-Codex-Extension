@@ -505,6 +505,11 @@ export const workspace = {
  */
 export const Uri = {
   file: (fsPath: string): FakeUri => ({ fsPath }),
+  /** 本物と同じく区切りを`/`で足すだけ（Issue #2136）。 */
+  joinPath: (base: FakeUri, ...segments: string[]): FakeUri => {
+    const fsPath = [base.fsPath, ...segments].join('/');
+    return { fsPath, toString: () => fsPath } as FakeUri;
+  },
   /** 本物と同じく文字列をそのまま保持するだけ（`strict`の検証はしない）。 */
   parse: (value: string): FakeUri => ({ fsPath: value }),
   from: ({ scheme, path }: { scheme: string; path?: string }): FakeSchemeUri => ({
@@ -532,6 +537,14 @@ export const env = {
   openExternal: async (uri: { fsPath: string }): Promise<boolean> => {
     state.openedExternalUris.push(uri.fsPath);
     return true;
+  },
+  /** クリップボード（Issue #2138）。書かれた文字列を`written`へ記録するだけ。 */
+  clipboard: {
+    written: [] as string[],
+    writeText: (text: string): Promise<void> => {
+      env.clipboard.written.push(text);
+      return Promise.resolve();
+    },
   },
 };
 
@@ -625,8 +638,9 @@ export const window = {
    * テスト用: 実際にエディタへ表示はせず、渡された文書のパスを
    * `__mock.openedTextDocumentPaths` へ記録するだけ（issue #205）。
    */
-  showTextDocument: (doc: { uri: FakeUri }, _options?: unknown): Promise<void> => {
-    state.openedTextDocumentPaths.push(doc.uri.fsPath);
+  showTextDocument: (doc: { uri: FakeUri } | FakeUri, _options?: unknown): Promise<void> => {
+    // 実APIは文書とUriのどちらも受ける
+    state.openedTextDocumentPaths.push(('uri' in doc ? doc.uri : doc).fsPath);
     return Promise.resolve(undefined);
   },
   showQuickPick: (items: readonly unknown[], _options?: unknown): Promise<unknown> =>

@@ -5,6 +5,16 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
 import type { Logger } from '../log';
+import { stripControlChars } from '../orchestrator/sanitize';
+import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import { isApprovalLevel, type ApprovalLevel } from '../provider/approvalLevel';
+import { parseAttachmentInputs, type AttachmentInput } from '../provider/attachments';
+import {
+  parseAskUserQuestionAnswers,
+  parsePendingItems,
+  type PendingAnswerMode,
+  type PendingItem,
+} from './pendingItem';
 import type { SessionActivityState } from './sessionActivity';
 
 /**
@@ -43,12 +53,150 @@ export interface SharedSession {
    * 読み手は「無ければ走っていない」として扱う。
    */
   loop?: SharedLoopState | undefined;
+  /**
+   * この会話で人の回答を待っている項目（Issue #2135）。要約だけを載せ、全文は
+   * `approvalDetail`で取り寄せる。古い版のウィンドウが書いたファイルには無い。
+   */
+  pending?: PendingItem[] | undefined;
+  /**
+   * 最後の出力の1行（Issue #2137）。Mission Controlの一覧に出す。外部由来のテキストなので
+   * 読み手は文字列として表示するだけにする。古い版のウィンドウが書いたファイルには無い。
+   */
+  lastOutput?: string | undefined;
+  /** 出力が最後に変わったのを書き手が見た時刻（ms）。停滞の判定に使う。 */
+  lastOutputAt?: number | undefined;
+  /**
+   * CLIが通知した、実際に使っているmodel（Issue #2151のカード表示）。通知が無ければ無い。
+   * 外部由来のテキストなので、読み手は1行へ畳んで文字列として表示するだけにする。
+   */
+  model?: string | undefined;
+  /** セッション累計のトークン数（Codexだけ。Claude Codeは費用を出す）。 */
+  tokens?: number | undefined;
+  /** セッションの推定費用（USD。Claude Codeだけ）。 */
+  costUsd?: number | undefined;
+  /**
+   * オーケストレータ配下の子セッションか（Issue #2171）。Mission Controlは返事待ちに出さない。
+   * 古い版のウィンドウが書いたファイルには無い（無ければ`false`として扱う）。
+   */
+  taskManaged?: boolean | undefined;
+  /** 引き継ぎ後に旧タブとして残っているか（Issue #2171）。返事待ちに出さない。 */
+  handoffKept?: boolean | undefined;
+  /**
+   * 返事待ちのまま人がまだ見ていないか（Issue #2171）。会話を持つウィンドウが判定して書き、
+   * 既読（タブの表示・Mission Controlの詳細ペインでの表示）で下げる。
+   */
+  unread?: boolean | undefined;
+  /**
+   * セッションの目的の1文要約（Issue #2172）。別のAIが利用者の発話から作った文なので外部由来の
+   * テキストとして扱い、読み手は1行へ畳んで文字列として表示するだけにする。古い版のファイルには無い。
+   */
+  purpose?: string | undefined;
+  /** 目的を要約したときの作業ディレクトリのブランチ名（Issue #2172）。似た要約を見分けるのに使う。 */
+  branch?: string | undefined;
+  /**
+   * セッションで起動したskill（Issue #2173。Claude Codeだけ）。古い順。skill名は外部由来の
+   * テキストなので、読み手は1行へ畳んで文字列として表示するだけにする。古い版のファイルには無い。
+   */
+  skills?: SharedSkillUse[] | undefined;
+}
+
+/** セッションで起動したskillの1件（Issue #2173）。 */
+export interface SharedSkillUse {
+  name: string;
+  /** 起動した時刻（ms）。 */
+  at: number;
+}
+
+/** `skills`に載せる件数の上限（新しい方から残す）。 */
+export const MAX_SHARED_SKILLS = 50;
+
+/** skill名の上限（文字数）。 */
+export const MAX_SHARED_SKILL_NAME_CHARS = 80;
+
+/** `Date`で表せる時刻の上限（ms）。 */
+const MAX_DATE_MS = 8.64e15;
+
+/**
+ * 起動時刻として受ける未来側の余裕（ms）。書き手と読み手は同じ機械だが、時刻の丸めや
+ * 書き込みの間に時計が進む分を見込む。
+ */
+const MAX_SHARED_SKILL_FUTURE_MS = 60_000;
+
+/**
+ * 共有ファイルの`skills`を信用せずに読む（Issue #2173）。形の合わない要素だけを落とし、
+ * 名前は1行へ畳んで長さを切り、新しい方から`MAX_SHARED_SKILLS`件に絞る。
+ * 時刻が0以下（1970年として出てしまう）や`now`より先のものも落とす。
+ * 新しい方から見て上限に達したら止め、配列が長くても全要素を無害化しない。
+ */
+export function parseSharedSkills(
+  value: unknown,
+  now: number = Date.now(),
+): SharedSkillUse[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const maxAt = Math.min(now + MAX_SHARED_SKILL_FUTURE_MS, MAX_DATE_MS);
+  const skills: SharedSkillUse[] = [];
+  const entries = value as unknown[];
+  for (let i = entries.length - 1; i >= 0 && skills.length < MAX_SHARED_SKILLS; i--) {
+    const raw = entries[i];
+    if (typeof raw !== 'object' || raw === null) {
+      continue;
+    }
+    const entry = raw as Record<string, unknown>;
+    const rawName = entry['name'];
+    // 外部由来のskill名は制御文字・不可視文字を除いて1行に均し、長さを切る
+    const name =
+      typeof rawName === 'string'
+        ? sanitizeInlineText(rawName, MAX_SHARED_SKILL_NAME_CHARS).replace(/\s+/gu, ' ').trim()
+        : '';
+    const at = nonNegativeNumber(entry['at']);
+    // Dateで表せない時刻は表示で`NaN`になるので落とす
+    if (name !== '' && at !== undefined && at > 0 && at <= maxAt) {
+      skills.push({ name, at });
+    }
+  }
+  return skills.length === 0 ? undefined : skills.reverse();
+}
+
+/**
+ * 会話の項目から、起動したskillを古い順に集める（Issue #2173）。起動時刻を持つ`skillContext`
+ * だけを数える（圧縮後の付け直しは時刻を持たない）。名前が空の項目は落とす。
+ */
+export function collectSkillUses(
+  items: readonly { kind: string; detail: string; skillLaunchedAt?: number | undefined }[],
+): SharedSkillUse[] | undefined {
+  const uses = items
+    .filter((item) => item.kind === 'skillContext' && item.skillLaunchedAt !== undefined)
+    .map((item) => ({ name: item.detail, at: item.skillLaunchedAt }));
+  return parseSharedSkills(uses);
+}
+
+/** `purpose`の上限（文字数）。書き手の上限（`MAX_SESSION_PURPOSE_CHARS`）に省略記号の分を足す。 */
+export const MAX_SHARED_PURPOSE_CHARS = 81;
+
+/** `branch`の上限（文字数）。 */
+export const MAX_SHARED_BRANCH_CHARS = 120;
+
+/** `lastOutput`の上限（文字数）。共有ファイルと画面へ長い行を流さない。 */
+export const MAX_SHARED_LAST_OUTPUT_CHARS = 200;
+
+/** `model`の上限（文字数）。 */
+export const MAX_SHARED_MODEL_CHARS = 80;
+
+/** 0以上の有限の数だけを通す（共有ファイルの中身は別ウィンドウ由来で信用しない）。 */
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 interface SharedSessionFile {
   windowId: string;
   updatedAt: number;
   sessions: SharedSession[];
+  /**
+   * 会話に属さない待ち項目（task runの質問。Issue #2135）。古い版のファイルには無い。
+   */
+  pending?: PendingItem[] | undefined;
 }
 
 /** 読み込み側が扱う、他ウィンドウ1つ分のスナップショット。 */
@@ -56,6 +204,8 @@ export interface SharedWindowSessions {
   windowId: string;
   updatedAt: number;
   sessions: SharedSession[];
+  /** 会話に属さない待ち項目（Issue #2135）。無ければ空配列。 */
+  pending?: PendingItem[] | undefined;
 }
 
 /** heartbeatの間隔。状態変化時はこれを待たず、下の間引きの範囲で書く。 */
@@ -116,6 +266,11 @@ function isSafeId(value: string): boolean {
   return ID_PATTERN.test(value);
 }
 
+/** ウィンドウid（`generateWindowId`が作るUUID）の形か。画面から届いた宛先の検証に使う。 */
+export function isWindowIdShape(value: unknown): value is string {
+  return typeof value === 'string' && isSafeId(value);
+}
+
 const ACTIVITY_STATES: readonly SessionActivityState[] = [
   'idle',
   'running',
@@ -147,9 +302,72 @@ function isSharedSession(value: unknown): value is SharedSession {
   );
 }
 
-/** 形の合わない`loop`を落として取り込む（1項目の不整合でセッションごと消さない）。 */
-function normalizeSharedSession(session: SharedSession): SharedSession {
-  return isSharedLoopState(session.loop) ? session : { ...session, loop: undefined };
+/**
+ * 形の合わない`loop`を落として取り込む（1項目の不整合でセッションごと消さない）。
+ *
+ * `pending`は要素ごとに確かめる（Issue #2135）。宛先（`session.windowId`）は中身を信じず、
+ * ファイル名から取った`windowId`で上書きする（要求ファイルの置き場所になるため）。
+ */
+function normalizeSharedSession(session: SharedSession, windowId: string): SharedSession {
+  const pending = withOwnerWindow(parsePendingItems(session.pending), windowId);
+  const loop = isSharedLoopState(session.loop) ? session.loop : undefined;
+  // 最終出力（Issue #2137）は形と長さを確かめ、合わなければ無かったものとして落とす
+  const lastOutput =
+    typeof session.lastOutput === 'string'
+      ? session.lastOutput.replace(/[\r\n]+/gu, ' ').slice(0, MAX_SHARED_LAST_OUTPUT_CHARS)
+      : undefined;
+  const lastOutputAt =
+    typeof session.lastOutputAt === 'number' && Number.isFinite(session.lastOutputAt)
+      ? session.lastOutputAt
+      : undefined;
+  // カードの補足（Issue #2151）も同じく、形の合わないものは無かったものとして落とす
+  const model = inlineText(session.model, MAX_SHARED_MODEL_CHARS);
+  const tokens = nonNegativeNumber(session.tokens);
+  const costUsd = nonNegativeNumber(session.costUsd);
+  // 返事待ちの判定に使う印（Issue #2171）。`true`以外は立っていないものとして扱う
+  const taskManaged = session.taskManaged === true ? true : undefined;
+  const handoffKept = session.handoffKept === true ? true : undefined;
+  const unread = session.unread === true ? true : undefined;
+  // 目的の1文要約とブランチ名（Issue #2172）も1行へ畳んで長さを切る
+  const purpose = inlineText(session.purpose, MAX_SHARED_PURPOSE_CHARS);
+  const branch = inlineText(session.branch, MAX_SHARED_BRANCH_CHARS);
+  // 起動したskill（Issue #2173）は要素ごとに確かめる
+  const skills = parseSharedSkills(session.skills);
+  return {
+    ...session,
+    loop,
+    pending,
+    lastOutput,
+    lastOutputAt,
+    model,
+    tokens,
+    costUsd,
+    taskManaged,
+    handoffKept,
+    unread,
+    purpose,
+    branch,
+    skills,
+  };
+}
+
+/**
+ * 文字列なら1行へ畳み、長さを切る。空・文字列以外は`undefined`。
+ *
+ * 改行・制御文字（C0・C1・U+2028/2029）は空白へ、双方向制御文字・不可視文字は除く
+ * （`stripControlChars`）。書き手が古い版でも、ファイルが書き換えられていても、
+ * 一覧の行を崩したり表示を逆向きにしたりさせない。
+ */
+export function inlineText(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const text = stripControlChars(value).replace(/\s+/gu, ' ').trim().slice(0, max);
+  return text === '' ? undefined : text;
+}
+
+function withOwnerWindow(items: readonly PendingItem[], windowId: string): PendingItem[] {
+  return items.map((item) => ({ ...item, session: { ...item.session, windowId } }));
 }
 
 /**
@@ -163,7 +381,7 @@ function normalizeSharedSession(session: SharedSession): SharedSession {
  * 形の合わない`sessions`の要素だけを落とし、ファイル全体は捨てない
  * （1件の不整合で、そのウィンドウのセッションが丸ごと消えないようにする）。
  */
-function parseSharedSessionFile(raw: string): SharedSessionFile | undefined {
+function parseSharedSessionFile(raw: string, windowId: string): SharedSessionFile | undefined {
   const parsed: unknown = JSON.parse(raw);
   if (typeof parsed !== 'object' || parsed === null) {
     return undefined;
@@ -178,7 +396,10 @@ function parseSharedSessionFile(raw: string): SharedSessionFile | undefined {
   return {
     windowId: v.windowId,
     updatedAt: v.updatedAt,
-    sessions: v.sessions.filter(isSharedSession).map(normalizeSharedSession),
+    sessions: v.sessions
+      .filter(isSharedSession)
+      .map((session) => normalizeSharedSession(session, windowId)),
+    pending: withOwnerWindow(parsePendingItems(v.pending), windowId),
   };
 }
 
@@ -228,6 +449,8 @@ export class SessionHubWriter {
     private readonly windowId: string,
     private readonly getSessions: () => readonly SharedSession[],
     private readonly log: Logger,
+    /** 会話に属さない待ち項目（task runの質問。Issue #2135）。省略時は書かない。 */
+    private readonly getWindowPending: () => readonly PendingItem[] = () => [],
   ) {
     this.filePath = path.join(sessionsDir(this.root), `${this.windowId}.json`);
   }
@@ -285,6 +508,7 @@ export class SessionHubWriter {
         windowId: this.windowId,
         updatedAt: Date.now(),
         sessions: [...this.getSessions()],
+        pending: [...this.getWindowPending()],
       };
       try {
         await mkdir(sessionsDir(this.root), { recursive: true });
@@ -534,7 +758,7 @@ export class SessionHubReader implements vscode.Disposable {
     }
     try {
       const raw = await readFile(filePath, 'utf8');
-      const parsed = parseSharedSessionFile(raw);
+      const parsed = parseSharedSessionFile(raw, windowId);
       const now = Date.now();
       if (parsed === undefined || now - parsed.updatedAt > STALE_MS) {
         this.fileState.delete(windowId);
@@ -568,7 +792,7 @@ export class SessionHubReader implements vscode.Disposable {
     // 知らせる（Issue #1809）
     const signature = JSON.stringify(
       this.cache
-        .map((state): [string, SharedSession[]] => [state.windowId, state.sessions])
+        .map((state): [string, unknown] => [state.windowId, [state.sessions, state.pending]])
         .sort(compareBySignatureKey),
     );
     if (signature === this.lastFiredSignature) {
@@ -661,7 +885,37 @@ export type SessionHubRequestKind =
   | 'sideQuestion'
   | 'sideQuestionResult'
   | 'handoffDetail'
-  | 'handoffDecision';
+  | 'handoffDecision'
+  | 'answerQuestion'
+  | 'answerPrompt'
+  | 'answerTaskRunQuestion'
+  /** Mission Controlから会話を閉じる・archive・delete（Issue #2149の1）。 */
+  | 'close'
+  | 'archive'
+  | 'delete'
+  /** Mission ControlのComposer: 添付・補完・送信キュー（Issue #2158）。 */
+  | 'sendWithAttachments'
+  | 'fileCandidates'
+  | 'commandCandidates'
+  | 'queuedMessages'
+  | 'cancelQueued'
+  /** Mission Controlから実行中セッションの設定を見る・変える（Issue #2159）。 */
+  | 'sessionSettings'
+  | 'changeSetting'
+  /**
+   * Mission Controlで選んだセッションへの操作（Issue #2160）。`pin` / `unpin`は履歴の印で
+   * 会話に属さないため要求元のウィンドウで済ませるが、版の違う相手から届いても扱えるよう列挙する。
+   */
+  | 'rename'
+  | 'fork'
+  | 'pin'
+  | 'unpin'
+  | 'clear'
+  | 'handoff'
+  | 'rewindPreview'
+  | 'rewind'
+  /** Mission Controlの詳細ペインで表示した返事待ちを既読にする（Issue #2171）。 */
+  | 'markRead';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。
@@ -692,6 +946,39 @@ export interface SessionApprovalDetail {
    * 答えられない。統括ページからは中身だけ出し、ボタンは出さない。
    */
   decidable: boolean;
+  /**
+   * 回答の形（Issue #2135）。`decision`は承認・拒否、`choices`はAskUserQuestionの選択肢、
+   * `text`はCodexの問い合わせのフォーム。古い版のウィンドウからの応答には無い。
+   */
+  answer?: PendingAnswerMode | undefined;
+  /** `kind === 'askUserQuestion'`のときの質問一覧（Issue #2135）。 */
+  questions?: SharedAskUserQuestion[] | undefined;
+  /** `kind === 'codexPrompt'`のときの入力欄（Issue #2135）。 */
+  fields?: SharedPromptField[] | undefined;
+  /**
+   * 統括ページからは答えられない理由（Issue #2135）。伏せ字の入力欄を持つ問い合わせは、
+   * 値を共有ディレクトリへ書かせないためタブ側で答えさせる。
+   */
+  answerBlockedReason?: string | undefined;
+}
+
+/** AskUserQuestionの質問1件（`AskUserQuestionItem`と同じ形。Issue #2135）。 */
+export interface SharedAskUserQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+}
+
+/** Codexの問い合わせの入力欄1つ（`PromptField`の表示に要る分だけ。Issue #2135）。 */
+export interface SharedPromptField {
+  id: string;
+  label: string;
+  description: string;
+  options: Array<{ value: string; label: string }>;
+  multiple: boolean;
+  allowOther: boolean;
+  required: boolean;
 }
 
 /**
@@ -769,17 +1056,146 @@ export function isSharedHandoffDecision(value: unknown): value is SharedHandoffD
 }
 
 /**
- * 会話の直近のやり取り1件（Issue #1260）。
+ * 会話のやり取り1件（Issue #1260、#2157）。
  *
- * 載せるのは人の発言とエージェントの応答だけで、コマンド実行・思考・ファイル変更は
- * 含めない。カードは会話の流れを掴むためのもので、詳細はタブ側で読む。
+ * 人の発言とエージェントの応答に加え、ツール呼び出し（`tool`）とファイル変更（`diff`）も
+ * 載せる（Issue #2157。Mission Controlの詳細ペインで折りたたんで出す）。思考は含めない。
+ * 古い版の読み手は`tool` / `diff`を知らないので、形の合わない要素として落とす。
  */
 export interface SessionRecentTurn {
-  role: 'user' | 'agent';
-  /** 本文。長いものは送る前に切り詰める（`truncated`が立つ）。 */
+  role: 'user' | 'agent' | 'tool' | 'diff';
+  /** 本文。`tool`は出力、`diff`はunified diff。長いものは送る前に切り詰める（`truncated`が立つ）。 */
   text: string;
   /** 本文を切り詰めたか。画面は全文をタブ側で読むよう促す。 */
   truncated: boolean;
+  /** `tool` / `diff`の見出し（コマンド行・ツール名・変更したファイル）。 */
+  title?: string | undefined;
+  /**
+   * 人の発言（`role === 'user'`）の固定のid（Issue #2160）。巻き戻しの起点の指定に使う。
+   * 表示テキストや位置では、取り寄せてから選ぶまでに会話が進むと別の発言を指すため。
+   */
+  id?: string | undefined;
+}
+
+/** 発言のidの長さの上限。ClaudeのメッセージidはUUIDで、これより十分短い（Issue #2160）。 */
+export const MAX_TURN_ID_CHARS = 256;
+
+/** セッション名の長さの上限（Issue #2160）。タブ・履歴に出して読める長さ。 */
+export const MAX_SESSION_NAME_CHARS = 200;
+
+/**
+ * 名前の変更で届いた名前を、信用せずに読み解く（Issue #2160）。前後の空白を落とし、空・改行入り・
+ * 上限超えは`undefined`にする。webviewと別ウィンドウの要求ファイルのどちらから届いた値もここを通す。
+ */
+export function parseSessionName(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const name = value.trim();
+  return name === '' || name.length > MAX_SESSION_NAME_CHARS || /[\r\n]/u.test(name)
+    ? undefined
+    : name;
+}
+
+/** 巻き戻しの起点の発言のidを形だけ確かめる（Issue #2160）。会話との突き合わせは受信側が行う。 */
+export function parseTurnId(value: unknown): string | undefined {
+  return typeof value === 'string' &&
+    value !== '' &&
+    value.length <= MAX_TURN_ID_CHARS &&
+    !/[\r\n]/u.test(value)
+    ? value
+    : undefined;
+}
+
+/**
+ * 送信キューの1件（Issue #2158）。応答中に送って待たせている指示。
+ *
+ * 取り消しの`cancelQueued`は、この`id`を添えて送り、受け取った側がidで突き合わせる。
+ */
+export interface SessionQueuedMessage {
+  /** 項目の安定したid。 */
+  id: string;
+  /** 本文。長いものは`MAX_QUEUED_TEXT_CHARS`で切り詰める（`truncated`が立つ）。 */
+  text: string;
+  truncated: boolean;
+  /** 添えた画像の枚数。中身は運ばない。 */
+  attachments: number;
+}
+
+/** 送信キューの1件の本文を運ぶ上限。画面で見分けられれば足りる。 */
+export const MAX_QUEUED_TEXT_CHARS = 2000;
+
+/**
+ * 承認レベルの変更が効く範囲（Issue #2159）。
+ *
+ * - `session` — このセッションだけ（Claude。`applyApprovalLevel`がタブの値を変える）
+ * - `global` — Codex全体の設定（`settings.updateApprovalLevel('codex', ...)`がユーザー設定を
+ *   書き換え、タスク設定を持たない全Codexセッションの次のターンへ効く）
+ * - `task` — タスクの設定で起動したCodexセッション。全体の設定を変えても効かないため変えられない
+ */
+export type SessionApprovalScope = 'session' | 'global' | 'task';
+
+/** 実行中セッションの今の設定（Issue #2159）。`sessionSettings` / `changeSetting`の応答に載る。 */
+export interface SessionSettingsDetail {
+  /** 空文字はCLIの既定。 */
+  model: string;
+  /** 空文字はCLIの既定。 */
+  effort: string;
+  /** 選べるmodel。先頭は既定（`slug: ''`）。各要素の`efforts`がそのmodelで選べるeffort。 */
+  models: SessionHandoffModelOption[];
+  /** `ask` / `auto` / `full`。どれにも当たらなければ空文字（カスタム）。 */
+  approvalLevel: string;
+  approvalScope: SessionApprovalScope;
+  planMode: boolean;
+  /** fast modeの今の値。`undefined`はこのセッションで使えない（Codex・CLIが未対応）。 */
+  fastMode?: boolean | undefined;
+  /** 変更を受け付けるか。入力欄を閉じたタブは見るだけ。 */
+  editable: boolean;
+}
+
+/** 変えられる設定の種別（Issue #2159）。 */
+export const SESSION_SETTING_KINDS = [
+  'model',
+  'effort',
+  'approvalLevel',
+  'planMode',
+  'fastMode',
+] as const;
+export type SessionSettingKind = (typeof SESSION_SETTING_KINDS)[number];
+
+/** 設定の変更1件（Issue #2159）。 */
+export type SessionSettingChange =
+  | { setting: 'model'; value: string }
+  | { setting: 'effort'; value: string }
+  | { setting: 'approvalLevel'; value: ApprovalLevel }
+  | { setting: 'planMode'; value: boolean }
+  | { setting: 'fastMode'; value: boolean };
+
+/** model・effortの値の長さの上限。CLIのmodel名はこれより十分短い。 */
+const MAX_SETTING_VALUE_CHARS = 200;
+
+/**
+ * 設定の変更を、信用せずに読み解く（Issue #2159）。webviewと別ウィンドウの要求ファイルの
+ * どちらから届いた値も、ここを通してから使う。値が候補にあるかは受信側が確かめる。
+ */
+export function parseSessionSettingChange(
+  setting: unknown,
+  value: unknown,
+): SessionSettingChange | undefined {
+  switch (setting) {
+    case 'model':
+    case 'effort':
+      return typeof value === 'string' && value.length <= MAX_SETTING_VALUE_CHARS
+        ? { setting, value }
+        : undefined;
+    case 'approvalLevel':
+      return isApprovalLevel(value) ? { setting, value } : undefined;
+    case 'planMode':
+    case 'fastMode':
+      return typeof value === 'boolean' ? { setting, value } : undefined;
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -812,10 +1228,34 @@ export interface SessionHubReplyPayload {
    * 代わりに「いつ時点の内容か」をこれで示す（何秒前の状態を見ているかが判る）。
    */
   capturedAt?: number | undefined;
+  /**
+   * `turns`の先頭が会話の何件目か（0始まり）と、会話全体の件数（Issue #2157）。
+   *
+   * 古い版の書き手は返さない。読み手は無ければ「これ以上遡れない」として扱う。
+   */
+  turnStart?: number | undefined;
+  turnTotal?: number | undefined;
   /** `kind === 'sideQuestion'` / `'sideQuestionResult'`の応答（Issue #1261）。 */
   sideQuestion?: SessionSideQuestion | undefined;
   /** `kind === 'handoffDetail'`の応答（Issue #1280）。保留が無ければ`undefined`。 */
   handoff?: SessionHandoffDetail | undefined;
+  /** `kind === 'fileCandidates'`の応答（Issue #2158）。作業ディレクトリからの相対パス。 */
+  files?: string[] | undefined;
+  /** `kind === 'commandCandidates'`の応答（Issue #2158）。 */
+  commands?: SessionSlashCommand[] | undefined;
+  /** `kind === 'queuedMessages'`の応答（Issue #2158）。 */
+  queued?: SessionQueuedMessage[] | undefined;
+  /** `kind === 'sessionSettings'` / `'changeSetting'`の応答（Issue #2159）。 */
+  settings?: SessionSettingsDetail | undefined;
+  /** `kind === 'rewindPreview'`の応答（Issue #2160）。戻すと変わるファイル。 */
+  rewindFiles?: string[] | undefined;
+}
+
+/** スラッシュコマンドの候補1件（`SlashCommand`と同じ形。Issue #2158）。 */
+export interface SessionSlashCommand {
+  name: string;
+  description: string;
+  argumentHint: string;
 }
 
 /** 1件の要求。`kind`ごとの追加項目はここへ並べる。 */
@@ -840,6 +1280,12 @@ export interface SessionHubRequest {
   /** `kind === 'recentTurns'`のときに欲しい件数（Issue #1260）。受信側が範囲へ丸める。 */
   limit?: number | undefined;
   /**
+   * `kind === 'recentTurns'`のとき、この件数目より前を取る（Issue #2157。0始まり・含まない）。
+   * 省くと末尾から取る。古い版の受信側は無視して末尾を返すが、そのときは応答に
+   * `turnStart`が無いので、要求側はそれ以上遡らない。
+   */
+  before?: number | undefined;
+  /**
    * `kind === 'sideQuestionResult'`のときの、進み具合を知りたい質問のid（Issue #1261）。
    *
    * この要求そのもののidである`requestId`とは別物なので名前を分ける
@@ -859,6 +1305,39 @@ export interface SessionHubRequest {
   handoffModel?: string | undefined;
   /** `handoffDecision === 'repick'`のときに指定するeffort。空文字はCLIの既定。 */
   handoffEffort?: string | undefined;
+  /**
+   * `kind === 'answerQuestion'` / `'answerPrompt'`のときの、対象の要求id（Issue #2135）。
+   * `answerTaskRunQuestion`では使わず、`pendingId`で引く。
+   */
+  pendingRequestId?: string | undefined;
+  /** `kind === 'answerTaskRunQuestion'`のときの`PendingItem.id`（Issue #2135）。 */
+  pendingId?: string | undefined;
+  /** `kind === 'answerQuestion'`のときの回答（質問文→選んだラベル）。受信側が質問と突き合わせる。 */
+  answers?: Record<string, string[]> | undefined;
+  /** `kind === 'answerPrompt'`のときの回答。受信側が形と制約を確かめる。 */
+  submission?: unknown;
+  /**
+   * `kind === 'sendWithAttachments'`のときの画像（データURL。Issue #2158）。
+   *
+   * パスで渡さず中身を載せる。パスを書けば受信側にそのファイルを読ませられてしまうため。
+   * 大きさは`parseAttachmentInputs`の上限（base64で約14MB）に収まり、要求ファイル全体は
+   * `MAX_REQUEST_FILE_BYTES`で頭打ちにする。
+   */
+  attachments?: AttachmentInput[] | undefined;
+  /** `kind === 'fileCandidates'`のときの絞り込みの文字列（Issue #2158）。 */
+  query?: string | undefined;
+  /** `kind === 'cancelQueued'`のときの位置（Issue #2158）。照合には使わず補助。 */
+  index?: number | undefined;
+  /** `kind === 'changeSetting'`のときの設定の種別（Issue #2159）。受信側が検証する。 */
+  setting?: string | undefined;
+  /** `kind === 'changeSetting'`のときの値。model・effort・承認レベルは文字列、plan/fastは真偽値。 */
+  settingValue?: string | boolean | undefined;
+  /** `kind === 'cancelQueued'`のときの項目id。 */
+  queuedId?: string | undefined;
+  /** `kind === 'rename'`のときの新しい名前（Issue #2160）。受信側が検証する。 */
+  name?: string | undefined;
+  /** `kind === 'rewindPreview'` / `'rewind'`のときの戻す起点の発言のid（Issue #2160）。 */
+  messageId?: string | undefined;
 }
 
 /** 要求に対する応答。 */
@@ -877,8 +1356,20 @@ export interface SessionHubRequestOutcome {
   payload?: SessionHubReplyPayload | undefined;
 }
 
+/**
+ * 要求ファイル1つの大きさの上限（Issue #2158）。画像の添付（データURLで合計約14MB。
+ * `MAX_TOTAL_DATA_URL_CHARS`）が収まり、それ以上は読まない。
+ */
+export const MAX_REQUEST_FILE_BYTES = 16 * 1024 * 1024;
+
 /** 応答を待つ上限。これを過ぎたら要求ファイルを取り下げる。 */
 const REPLY_TIMEOUT_MS = 5_000;
+/**
+ * CLIを起動する操作（archive・delete。Issue #2149）の応答を待つ上限。`REQUEST_TTL_MS`より
+ * 短くし、受信側の掃除で要求・応答が消される前に打ち切る。受信側はターンの中断（上限5秒）と
+ * CLI（`execFile`の上限30秒）を順に待つため、その合計より長くする。
+ */
+export const LONG_REPLY_TIMEOUT_MS = 45_000;
 /** 応答ファイルの確認間隔。 */
 const REPLY_POLL_MS = 150;
 /**
@@ -934,11 +1425,27 @@ function parseRequest(raw: string): SessionHubRequest | undefined {
     approvalRequestId: typeof v.approvalRequestId === 'string' ? v.approvalRequestId : undefined,
     decision: typeof v.decision === 'string' ? v.decision : undefined,
     limit: typeof v.limit === 'number' ? v.limit : undefined,
+    before: typeof v.before === 'number' ? v.before : undefined,
     sideQuestionId: typeof v.sideQuestionId === 'string' ? v.sideQuestionId : undefined,
     handoffRequestId: typeof v.handoffRequestId === 'string' ? v.handoffRequestId : undefined,
     handoffDecision: typeof v.handoffDecision === 'string' ? v.handoffDecision : undefined,
     handoffModel: typeof v.handoffModel === 'string' ? v.handoffModel : undefined,
     handoffEffort: typeof v.handoffEffort === 'string' ? v.handoffEffort : undefined,
+    pendingRequestId: typeof v.pendingRequestId === 'string' ? v.pendingRequestId : undefined,
+    pendingId: typeof v.pendingId === 'string' ? v.pendingId : undefined,
+    answers: parseAskUserQuestionAnswers(v.answers),
+    submission: v.submission,
+    attachments: parseAttachmentInputs(v.attachments),
+    query: typeof v.query === 'string' ? v.query : undefined,
+    index: typeof v.index === 'number' ? v.index : undefined,
+    queuedId: typeof v.queuedId === 'string' ? v.queuedId : undefined,
+    name: typeof v.name === 'string' ? v.name : undefined,
+    messageId: typeof v.messageId === 'string' ? v.messageId : undefined,
+    setting: typeof v.setting === 'string' ? v.setting : undefined,
+    settingValue:
+      typeof v.settingValue === 'string' || typeof v.settingValue === 'boolean'
+        ? v.settingValue
+        : undefined,
   };
 }
 
@@ -966,9 +1473,16 @@ function parseReply(raw: string): SessionHubReply | undefined {
  * とは別に、読み手側でも持つ。共有ディレクトリへ書くのは別プロセスで、その版が同じ
  * 上限で絞っている保証は無い。書き手側より少しだけ緩くして、正しい相手からの応答を
  * 切り落とさないようにする。
+ *
+ * Issue #2157で会話を範囲指定で遡れるようにしたため、書き手の1回分（50件・本文8,000字）に
+ * 合わせて引き上げた。
  */
-const MAX_REPLY_TURNS = 40;
+const MAX_REPLY_TURNS = 60;
 const MAX_REPLY_TEXT_CHARS = 2_000;
+/** やり取り1件の本文の上限（Issue #2157。書き手の8,000字より少しだけ緩くする）。 */
+const MAX_REPLY_TURN_TEXT_CHARS = 10_000;
+/** `tool` / `diff`の見出しの上限（Issue #2157）。 */
+const MAX_REPLY_TITLE_CHARS = 1_000;
 
 /**
  * 脇道の質問の回答として読み取る上限（Issue #1261）。
@@ -979,6 +1493,81 @@ const MAX_REPLY_TEXT_CHARS = 2_000;
  * 正しい相手からの回答を切り落とさないようにする。
  */
 const MAX_REPLY_ANSWER_CHARS = 8_000;
+
+/**
+ * Composerの候補・送信キューとして読み取る上限（Issue #2158）。書き手の上限（ファイル候補50件・
+ * キューの本文`MAX_QUEUED_TEXT_CHARS`）より少しだけ緩くする。
+ */
+const MAX_REPLY_FILES = 60;
+const MAX_REPLY_PATH_CHARS = 1_000;
+const MAX_REPLY_COMMANDS = 500;
+const MAX_REPLY_COMMAND_NAME_CHARS = 200;
+const MAX_REPLY_COMMAND_TEXT_CHARS = 1_000;
+const MAX_REPLY_QUEUED = 100;
+
+function parseCandidateFiles(raw: readonly unknown[]): string[] {
+  return raw
+    .filter(
+      (f): f is string => typeof f === 'string' && f !== '' && f.length <= MAX_REPLY_PATH_CHARS,
+    )
+    .slice(0, MAX_REPLY_FILES);
+}
+
+function parseSlashCommands(raw: readonly unknown[]): SessionSlashCommand[] {
+  const commands: SessionSlashCommand[] = [];
+  for (const entry of raw) {
+    if (commands.length >= MAX_REPLY_COMMANDS) {
+      break;
+    }
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const v = entry as Record<string, unknown>;
+    if (
+      typeof v.name !== 'string' ||
+      v.name === '' ||
+      v.name.length > MAX_REPLY_COMMAND_NAME_CHARS
+    ) {
+      continue;
+    }
+    commands.push({
+      name: v.name,
+      description:
+        typeof v.description === 'string'
+          ? v.description.slice(0, MAX_REPLY_COMMAND_TEXT_CHARS)
+          : '',
+      argumentHint:
+        typeof v.argumentHint === 'string'
+          ? v.argumentHint.slice(0, MAX_REPLY_COMMAND_TEXT_CHARS)
+          : '',
+    });
+  }
+  return commands;
+}
+
+function parseQueuedMessages(raw: readonly unknown[]): SessionQueuedMessage[] {
+  const queued: SessionQueuedMessage[] = [];
+  for (const entry of raw) {
+    if (queued.length >= MAX_REPLY_QUEUED) {
+      break;
+    }
+    // 位置で取り消すため、読めない要素も落とさず空の1件として数える（位置がずれないように）
+    const v = typeof entry === 'object' && entry !== null ? (entry as Record<string, unknown>) : {};
+    const text = typeof v.text === 'string' ? v.text : '';
+    queued.push({
+      id: typeof v.id === 'string' ? v.id : '',
+      text: text.slice(0, MAX_QUEUED_TEXT_CHARS),
+      truncated: v.truncated === true || text.length > MAX_QUEUED_TEXT_CHARS,
+      attachments:
+        typeof v.attachments === 'number' &&
+        Number.isSafeInteger(v.attachments) &&
+        v.attachments >= 0
+          ? v.attachments
+          : 0,
+    });
+  }
+  return queued;
+}
 
 /**
  * 応答の`payload`を、信用せずに読み解く（Issue #1259）。
@@ -996,14 +1585,37 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
     return { sideQuestion };
   }
   if (Array.isArray(v.turns)) {
+    const turns = parseRecentTurns(v.turns);
+    const range = parseTurnRange(v.turnStart, v.turnTotal, v.turns.length, turns.length);
     return {
-      turns: parseRecentTurns(v.turns),
+      turns,
       capturedAt: typeof v.capturedAt === 'number' ? v.capturedAt : undefined,
+      turnStart: range?.start,
+      turnTotal: range?.total,
     };
   }
   if (v.handoff !== undefined) {
     const handoff = parseHandoffDetail(v.handoff);
     return handoff === undefined ? undefined : { handoff };
+  }
+  // Issue #2158: Composerの候補・送信キュー
+  if (Array.isArray(v.files)) {
+    return { files: parseCandidateFiles(v.files) };
+  }
+  if (Array.isArray(v.commands)) {
+    return { commands: parseSlashCommands(v.commands) };
+  }
+  if (Array.isArray(v.queued)) {
+    return { queued: parseQueuedMessages(v.queued) };
+  }
+  // Issue #2160: 巻き戻しで戻るファイル。形は補完の候補と同じ（相対・絶対のパスの配列）
+  if (Array.isArray(v.rewindFiles)) {
+    return { rewindFiles: parseCandidateFiles(v.rewindFiles) };
+  }
+  // Issue #2159: 実行中セッションの設定
+  if (v.settings !== undefined) {
+    const settings = parseSessionSettingsDetail(v.settings);
+    return settings === undefined ? undefined : { settings };
   }
   const raw = v.approvals;
   if (!Array.isArray(raw)) {
@@ -1028,9 +1640,95 @@ function parsePayload(value: unknown): SessionHubReplyPayload | undefined {
         : [],
       // 読めない版から届いた場合は押せない側へ倒す。誤って承認させない
       decidable: v.decidable === true,
+      // 回答の形（Issue #2135）は付いているときだけ載せる。無ければ承認・拒否として扱う
+      ...(v.answer === 'choices' || v.answer === 'text' ? { answer: v.answer } : {}),
+      ...optionalField('questions', parseSharedQuestions(v.questions)),
+      ...optionalField('fields', parseSharedPromptFields(v.fields)),
+      ...optionalField(
+        'answerBlockedReason',
+        typeof v.answerBlockedReason === 'string' ? v.answerBlockedReason : undefined,
+      ),
     });
   }
   return { approvals };
+}
+
+/** 値があるときだけその項目を持つオブジェクトにする（無い項目を`undefined`で生やさない）。 */
+function optionalField<K extends string, V>(key: K, value: V | undefined): Partial<Record<K, V>> {
+  return value === undefined ? {} : ({ [key]: value } as Partial<Record<K, V>>);
+}
+
+const MAX_REPLY_QUESTIONS = 10;
+const MAX_REPLY_OPTIONS = 20;
+const MAX_REPLY_FIELDS = 20;
+const MAX_REPLY_LABEL_CHARS = 500;
+
+function readText(value: unknown): string {
+  return typeof value === 'string' ? value.slice(0, MAX_REPLY_LABEL_CHARS) : '';
+}
+
+/** AskUserQuestionの質問一覧を、信用せずに読み解く（Issue #2135）。 */
+function parseSharedQuestions(value: unknown): SharedAskUserQuestion[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const questions: SharedAskUserQuestion[] = [];
+  for (const entry of value.slice(0, MAX_REPLY_QUESTIONS)) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const q = entry as Record<string, unknown>;
+    // 質問文は回答のキーになる。切り詰めると送り返したときに一致しないため、長すぎる質問は落とす
+    if (typeof q.question !== 'string' || q.question.length > MAX_REPLY_TEXT_CHARS) {
+      continue;
+    }
+    questions.push({
+      question: q.question,
+      header: readText(q.header),
+      options: Array.isArray(q.options)
+        ? q.options
+            .slice(0, MAX_REPLY_OPTIONS)
+            .filter((o): o is Record<string, unknown> => typeof o === 'object' && o !== null)
+            .filter((o) => typeof o.label === 'string' && o.label.length <= MAX_REPLY_LABEL_CHARS)
+            .map((o) => ({ label: o.label as string, description: readText(o.description) }))
+        : [],
+      multiSelect: q.multiSelect === true,
+    });
+  }
+  return questions;
+}
+
+/** Codexの問い合わせの入力欄を、信用せずに読み解く（Issue #2135）。 */
+function parseSharedPromptFields(value: unknown): SharedPromptField[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const fields: SharedPromptField[] = [];
+  for (const entry of value.slice(0, MAX_REPLY_FIELDS)) {
+    if (typeof entry !== 'object' || entry === null) {
+      continue;
+    }
+    const f = entry as Record<string, unknown>;
+    if (typeof f.id !== 'string' || f.id.length > MAX_REPLY_LABEL_CHARS) {
+      continue;
+    }
+    fields.push({
+      id: f.id,
+      label: readText(f.label),
+      description: readText(f.description),
+      options: Array.isArray(f.options)
+        ? f.options
+            .slice(0, MAX_REPLY_OPTIONS)
+            .filter((o): o is Record<string, unknown> => typeof o === 'object' && o !== null)
+            .filter((o) => typeof o.value === 'string' && o.value.length <= MAX_REPLY_LABEL_CHARS)
+            .map((o) => ({ value: o.value as string, label: readText(o.label) }))
+        : [],
+      multiple: f.multiple === true,
+      allowOther: f.allowOther === true,
+      required: f.required === true,
+    });
+  }
+  return fields;
 }
 
 /**
@@ -1081,18 +1779,47 @@ function parseRecentTurns(raw: readonly unknown[]): SessionRecentTurn[] {
       continue;
     }
     const v = entry as Record<string, unknown>;
-    if ((v.role !== 'user' && v.role !== 'agent') || typeof v.text !== 'string') {
+    if (
+      (v.role !== 'user' && v.role !== 'agent' && v.role !== 'tool' && v.role !== 'diff') ||
+      typeof v.text !== 'string'
+    ) {
       continue;
     }
-    const capped = v.text.length > MAX_REPLY_TEXT_CHARS;
+    const capped = v.text.length > MAX_REPLY_TURN_TEXT_CHARS;
     turns.push({
       role: v.role,
-      text: capped ? v.text.slice(0, MAX_REPLY_TEXT_CHARS) : v.text,
+      text: capped ? v.text.slice(0, MAX_REPLY_TURN_TEXT_CHARS) : v.text,
       // こちらで切った分も「続きがある」ものとして扱う
       truncated: capped || v.truncated === true,
+      title: typeof v.title === 'string' ? cap(v.title, MAX_REPLY_TITLE_CHARS) : undefined,
+      // 巻き戻しの起点に使う発言のid（Issue #2160）。受信側が会話と突き合わせるので形だけ見る
+      id: v.role === 'user' ? parseTurnId(v.id) : undefined,
     });
   }
   return turns;
+}
+
+/**
+ * 応答の範囲（`turnStart` / `turnTotal`）を読み解く（Issue #2157）。
+ *
+ * 形の合わない要素を落とした・件数の上限で切ったときは、位置が実際の会話とずれるため
+ * 範囲を捨てる（要求側はそれ以上遡らない。ずれた位置で継ぎ足して会話を壊すよりよい）。
+ */
+function parseTurnRange(
+  rawStart: unknown,
+  rawTotal: unknown,
+  rawCount: number,
+  parsedCount: number,
+): { start: number; total: number } | undefined {
+  if (!Number.isSafeInteger(rawStart) || !Number.isSafeInteger(rawTotal)) {
+    return undefined;
+  }
+  const start = rawStart as number;
+  const total = rawTotal as number;
+  if (rawCount !== parsedCount || start < 0 || start + parsedCount > total) {
+    return undefined;
+  }
+  return { start, total };
 }
 
 /** 選び直しの候補の上限（Issue #1280）。モデル一覧がこの数を超えることは実際には無い。 */
@@ -1133,6 +1860,33 @@ function parseHandoffDetail(value: unknown): SessionHandoffDetail | undefined {
     trigger: typeof v.trigger === 'string' ? v.trigger : '',
     canReclassify: v.canReclassify === true,
     models: Array.isArray(v.models) ? parseHandoffModelOptions(v.models) : [],
+  };
+}
+
+/**
+ * 実行中セッションの設定を、信用せずに読み解く（Issue #2159）。
+ *
+ * 範囲の分からない値は変更できない側へ倒す: 承認の範囲が読めなければ`task`（変えられない）、
+ * `editable`は`true`のときだけ変更を受け付ける。
+ */
+export function parseSessionSettingsDetail(value: unknown): SessionSettingsDetail | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const v = value as Record<string, unknown>;
+  if (typeof v.model !== 'string' || typeof v.effort !== 'string') {
+    return undefined;
+  }
+  const scope = v.approvalScope;
+  return {
+    model: v.model.slice(0, MAX_SETTING_VALUE_CHARS),
+    effort: v.effort.slice(0, MAX_SETTING_VALUE_CHARS),
+    models: Array.isArray(v.models) ? parseHandoffModelOptions(v.models) : [],
+    approvalLevel: isApprovalLevel(v.approvalLevel) ? v.approvalLevel : '',
+    approvalScope: scope === 'session' || scope === 'global' ? scope : 'task',
+    planMode: v.planMode === true,
+    fastMode: typeof v.fastMode === 'boolean' ? v.fastMode : undefined,
+    editable: v.editable === true,
   };
 }
 
@@ -1230,12 +1984,27 @@ export class SessionHubRequestPort {
       approvalRequestId?: string | undefined;
       decision?: string | undefined;
       limit?: number | undefined;
+      before?: number | undefined;
       sideQuestionId?: string | undefined;
       handoffRequestId?: string | undefined;
       handoffDecision?: string | undefined;
       handoffModel?: string | undefined;
       handoffEffort?: string | undefined;
+      pendingRequestId?: string | undefined;
+      pendingId?: string | undefined;
+      answers?: Record<string, string[]> | undefined;
+      submission?: unknown;
+      attachments?: AttachmentInput[] | undefined;
+      query?: string | undefined;
+      index?: number | undefined;
+      queuedId?: string | undefined;
+      setting?: string | undefined;
+      settingValue?: string | boolean | undefined;
+      name?: string | undefined;
+      messageId?: string | undefined;
     },
+    /** 応答を待つ上限（ms）。既定は`REPLY_TIMEOUT_MS`。`LONG_REPLY_TIMEOUT_MS`を超えない。 */
+    timeoutMs: number = REPLY_TIMEOUT_MS,
   ): Promise<SessionHubReply> {
     const requestId = randomUUID();
     if (!isSafeId(targetWindowId)) {
@@ -1250,15 +2019,23 @@ export class SessionHubRequestPort {
       issuedAt: Date.now(),
     };
     const filePath = path.join(requestsDirFor(this.root, targetWindowId), `${requestId}.json`);
+    const body = JSON.stringify(request);
+    // 受け取る側は上限を超える要求ファイルを読まずに捨てる。書く前に断り、相手を待たない
+    if (Buffer.byteLength(body, 'utf8') > MAX_REQUEST_FILE_BYTES) {
+      return { requestId, ok: false, error: '送る内容が大きすぎます（画像を減らしてください）' };
+    }
     try {
       await mkdir(requestsDirFor(this.root, targetWindowId), { recursive: true });
       await mkdir(repliesDir(this.root), { recursive: true });
-      await writeAtomic(filePath, JSON.stringify(request));
+      await writeAtomic(filePath, body);
     } catch (e) {
       this.log.warn(`セッション統括: 要求の送信に失敗しました（${input.kind}）: ${String(e)}`);
       return { requestId, ok: false, error: '要求を送れませんでした' };
     }
-    const reply = await this.waitForReply(requestId);
+    const reply = await this.waitForReply(
+      requestId,
+      Math.min(Math.max(timeoutMs, 0), LONG_REPLY_TIMEOUT_MS),
+    );
     if (reply !== undefined) {
       return reply;
     }
@@ -1283,9 +2060,12 @@ export class SessionHubRequestPort {
    * 取りこぼしの余地があり（`SessionHubReader`が`filename`無しのイベントを想定して
    * いるのと同じ事情）、5秒という上限の中では読み直しの方が単純で確実。
    */
-  private async waitForReply(requestId: string): Promise<SessionHubReply | undefined> {
+  private async waitForReply(
+    requestId: string,
+    timeoutMs: number,
+  ): Promise<SessionHubReply | undefined> {
     const replyPath = path.join(repliesDir(this.root), `${requestId}.json`);
-    const deadline = Date.now() + REPLY_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       try {
         const raw = await readFile(replyPath, 'utf8');
@@ -1372,6 +2152,18 @@ export class SessionHubRequestWatcher implements vscode.Disposable {
 
   private async handle(filePath: string): Promise<void> {
     if (this.disposed) {
+      return;
+    }
+    // 画像を載せる要求（Issue #2158）があるため大きさを先に見る。上限を超えるものは読まずに捨てる
+    // （共有ディレクトリへ書ける誰かが巨大なファイルを置いても、拡張ホストのメモリを食わせない）
+    try {
+      const info = await stat(filePath);
+      if (info.size > MAX_REQUEST_FILE_BYTES) {
+        await unlink(filePath);
+        this.log.warn(`セッション統括: 大きすぎる要求を捨てました（${info.size} bytes）`);
+        return;
+      }
+    } catch {
       return;
     }
     let raw: string;

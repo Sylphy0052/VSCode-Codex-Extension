@@ -9,6 +9,8 @@ import {
   stripControlCharsPreservingNewlines,
 } from './sanitize';
 import { TEAM_ROLES } from './rolePresets';
+import { GOAL_CRITERIA_GUIDANCE, parseGoalInput } from './taskRunGoal';
+import type { TaskRunGoal } from './taskRunState';
 import { RECORD_LESSON_TOOL, parseLessonArgs } from './runNotes';
 import { parseSessionTarget, type SessionBridgePort, type SessionTarget } from './sessionBridge';
 import { MAX_HANDOFF_BYTES, type HandoffEntry, type HandoffResult } from './teamHandoff';
@@ -924,6 +926,14 @@ export interface OrchestratorControlPort {
    */
   decideFinalMerge(decision: string, reason: string): OrchestratorControlResult;
   /**
+   * このrunで`decide_final_merge`が意味を持つか（Issue #1324）。`false`なら`tools/list`から
+   * 外し、呼ばれても「未知のツール」で拒否する。判断待ちが立つのは`finalMerge: orchestrator`の
+   * runだけで（`confirm`は人がViewで判断し、`auto` / `pr-only`は判断待ち自体が無い）、
+   * `finalMerge`はrun開始時に一度だけ決まるため、接続中に`true`へ変わることは無い。
+   * 省略時は従来どおり見せる。
+   */
+  canDecideFinalMerge?(): boolean;
+  /**
    * 実行中の定義へ新しいタスクを加える（design.md §16.29、roadmap W4、Issue #338）。
    * 適用先は実行中の定義（`live.def`）で、YAMLファイルへもベストエフォートで追記する
    * （Issue #1614）。追加するタスクにも既存の検証（id形式・循環依存・上限件数・プロンプト長）をそのまま通す。
@@ -1458,6 +1468,281 @@ export const SESSION_TOOLS: readonly McpToolDefinition[] = [
 const SESSION_TOOL_NAMES = new Set(SESSION_TOOLS.map((tool) => tool.name));
 
 /**
+ * この会話からWebGPT（ChatGPT）との議論を始めるツール（Issue #2051）。1セッション用のhubで、
+ * `webGptDiscussion`が渡されているときだけ見せる（タスク実行の会話には渡さない）。
+ *
+ * 呼ばれると拡張機能が利用者に入力欄で確認を取り、確定したときだけ受け付ける。議論は
+ * 呼び出し元のターンが終わり、送信待ちが無くなってから始まる。
+ */
+export const START_WEBGPT_DISCUSSION_TOOL: McpToolDefinition = {
+  name: 'start_webgpt_discussion',
+  description:
+    'この会話でWebGPT（ブラウザのChatGPT）との議論を始める。利用者が「WebGPTと議論して」と' +
+    '頼んだとき、または設計判断が割れて外部の意見が欲しいときに呼ぶ。呼ぶと利用者に議題・' +
+    '会話URL・送信上限の確認を求め、確定するまでこのツールは戻らない。結果が`accepted: true`なら' +
+    '**このターンをすぐ終えること**（ターンの終了後に拡張機能が議論の手順を送る）。' +
+    '`accepted: false`なら`reason`を利用者へ伝え、議論は始まっていない。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      topic: {
+        type: 'string',
+        description: '議題（2000文字以内）。省略すると現在の会話から論点を選ぶ。',
+      },
+      urls: {
+        type: 'array',
+        items: { type: 'string' },
+        maxItems: 3,
+        description:
+          '続きを議論する既存のChatGPT会話のURL（`https://chatgpt.com/c/<id>`、0〜3件）。省略すると新規会話。',
+      },
+      maxSends: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 10,
+        description: '各会話への送信上限（1〜10）。省略すると既定値。',
+      },
+    },
+    additionalProperties: false,
+  },
+};
+
+/** `start_webgpt_discussion`の引数。型だけ確かめた値で、中身の検証は受け取る側が行う。 */
+export interface WebGptDiscussionToolArgs {
+  topic: string | undefined;
+  urls: string[] | undefined;
+  maxSends: number | undefined;
+}
+
+/** `start_webgpt_discussion`の結果。 */
+export interface WebGptDiscussionToolResult {
+  accepted: boolean;
+  reason: string;
+}
+
+/** 呼び出し元の会話で議論の確認と予約を行う口。会話ごとに束縛した関数を渡す。 */
+export type WebGptDiscussionPort = (
+  args: WebGptDiscussionToolArgs,
+) => Promise<WebGptDiscussionToolResult>;
+
+/**
+ * `start_webgpt_discussion`の引数を型だけ確かめて取り出す。型が違えば理由を返す。
+ * URLの形式・範囲・文字数は、入力欄と同じ検証を受け取る側（拡張機能のビュー）で行う。
+ */
+export function parseWebGptDiscussionToolArgs(
+  args: Record<string, unknown>,
+): { ok: true; value: WebGptDiscussionToolArgs } | { ok: false; reason: string } {
+  const { topic, urls, maxSends } = args;
+  if (topic !== undefined && typeof topic !== 'string') {
+    return { ok: false, reason: 'topicは文字列で指定してください' };
+  }
+  if (
+    urls !== undefined &&
+    (!Array.isArray(urls) || !urls.every((url): url is string => typeof url === 'string'))
+  ) {
+    return { ok: false, reason: 'urlsは文字列の配列で指定してください' };
+  }
+  if (maxSends !== undefined && (typeof maxSends !== 'number' || !Number.isInteger(maxSends))) {
+    return { ok: false, reason: 'maxSendsは整数で指定してください' };
+  }
+  return {
+    ok: true,
+    value: {
+      topic,
+      urls: urls === undefined ? undefined : [...(urls as string[])],
+      maxSends,
+    },
+  };
+}
+
+/**
+ * 通常チャットのモデルがロードマップのオーケストレータモードを起動するツール（Issue #2070）。
+ * 1セッション用のhubで、`startRoadmapOrchestrator`が渡されているときだけ見せる。Orchestratorと
+ * 工程セッション（タスク実行の会話）には渡さない（run内から別のrunを立てる再帰を防ぐため）。
+ *
+ * 起動前の確認は出さない。人の関門はKanbanの計画承認（runは`awaitingApproval`で始まる）。
+ */
+export const START_ROADMAP_ORCHESTRATOR_TOOL: McpToolDefinition = {
+  name: 'start_roadmap_orchestrator',
+  description:
+    'ロードマップIssueのオーケストレータモード（実装以降を自動で進めるrun）を起動する。' +
+    'Issueを起票してロードマップへ載せ終え、実装へ進む段になったときに呼ぶ（子Issueが1件でも呼ぶ）。' +
+    'ロードマップの子Issueを進める依頼を受けたときも呼ぶ。会話の中で実装しない。' +
+    '調査だけ、質問への回答、ロードマップに載せない小さな修正では呼ばない。' +
+    '同じロードマップIssueのrunが既にあれば新しく作らず、ロードマップを読み直させる' +
+    '（中断中なら再開してから読み直させる）。起動したrunの計画は承認待ちで始まり、' +
+    '利用者がKanbanで承認すると工程が進む。結果が`accepted: true`なら**このターンをすぐ終えること**。' +
+    '`accepted: false`なら`reason`を利用者へ伝え、runは始まっていない。' +
+    '利用者の意図からrunの目的が分かるときは`goal`に渡す。' +
+    `${GOAL_CRITERIA_GUIDANCE}。省くとロードマップ本文の「目的」「完了条件」の節を使い、節も無ければ目的を置かない。` +
+    '既存のrunを読み直すときに`goal`を渡すと、そのrunの目的を直す。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      roadmapIssueNumber: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'ロードマップIssueの番号。省略するとroadmapラベルのopenなIssueが1本のときそれを使う。',
+      },
+      reason: {
+        type: 'string',
+        description: '起動する理由（1行）。会話と作業ログに残る。',
+      },
+      goal: {
+        type: 'object',
+        description: `runの目的（任意）。${GOAL_CRITERIA_GUIDANCE}`,
+        properties: {
+          objective: { type: 'string', description: '目的（観測できる結果で書く）' },
+          completionCriteria: {
+            type: 'string',
+            description: '完了条件（数値・状態・動作のような観測できる結果）',
+          },
+        },
+        required: ['objective', 'completionCriteria'],
+        additionalProperties: false,
+      },
+    },
+    required: ['reason'],
+    additionalProperties: false,
+  },
+};
+
+/** `start_roadmap_orchestrator`の引数。型と必須だけを確かめた値。 */
+export interface StartRoadmapOrchestratorToolArgs {
+  roadmapIssueNumber: number | undefined;
+  reason: string;
+  /** runの目的（Issue #2193）。`parseGoalInput`で均した値。省略なら`undefined`。 */
+  goal: TaskRunGoal | undefined;
+}
+
+/** `start_roadmap_orchestrator`の結果。 */
+export interface StartRoadmapOrchestratorToolResult {
+  accepted: boolean;
+  reason: string;
+  /** 起動した・読み直したrunのID。 */
+  runId?: string | undefined;
+  /** 既存runを読み直しただけなら`true`。 */
+  reused?: boolean | undefined;
+  /** 渡した`goal`をrunに記録したら`true`（Issue #2193）。`goal`を渡さなければ省く。 */
+  goalApplied?: boolean | undefined;
+}
+
+/** 呼び出し元の会話でロードマップのrunを起動する口。会話ごとに束縛した関数を渡す。 */
+export type StartRoadmapOrchestratorPort = (
+  args: StartRoadmapOrchestratorToolArgs,
+) => Promise<StartRoadmapOrchestratorToolResult>;
+
+/** `start_roadmap_orchestrator`の引数を型と必須だけ確かめて取り出す。 */
+export function parseStartRoadmapOrchestratorToolArgs(
+  args: Record<string, unknown>,
+): { ok: true; value: StartRoadmapOrchestratorToolArgs } | { ok: false; reason: string } {
+  const { roadmapIssueNumber, reason } = args;
+  if (
+    roadmapIssueNumber !== undefined &&
+    (typeof roadmapIssueNumber !== 'number' ||
+      !Number.isInteger(roadmapIssueNumber) ||
+      roadmapIssueNumber < 1)
+  ) {
+    return { ok: false, reason: 'roadmapIssueNumberは1以上の整数で指定してください' };
+  }
+  if (typeof reason !== 'string' || reason.trim() === '') {
+    return { ok: false, reason: 'reasonに起動する理由を1行で指定してください' };
+  }
+  const goal = parseGoalInput(args.goal, 'start');
+  if (!goal.ok) {
+    return { ok: false, reason: goal.message };
+  }
+  return { ok: true, value: { roadmapIssueNumber, reason, goal: goal.value } };
+}
+
+/**
+ * 呼び出し元の会話のmodel/effortを変えるツール（Issue #2053）。1セッション用のhubで、
+ * `sessionProfile`が渡されているときだけ見せる（タスク実行の会話には渡さない）。
+ *
+ * 対象は接続に束縛した会話だけで、引数では選ばせない。値の検証と反映は受け取る側
+ * （拡張機能のビュー）が、UIで変えたときと同じ経路で行う。
+ */
+export const SET_SESSION_PROFILE_TOOL: McpToolDefinition = {
+  name: 'set_session_profile',
+  description:
+    'この会話のmodelとeffortを変える。作業内容に対して今のmodel/effortが合わないと判断したときに呼ぶ。' +
+    'いつから効くかは結果に書かれる（Claude Codeは同じターンの続きから、Codexは次の発言から）。' +
+    '会話の冒頭は履歴が無くcache損失が小さいので、作業に合う値へ切り替えてよい。' +
+    '途中でmodelを変えるとprompt cacheが作り直しになるため、その費用に見合うときだけ使う。' +
+    '使える値はモデル一覧で検証され、不正な値は使える値の一覧付きで' +
+    '拒否される。既定へ戻す（空文字）ことはできない。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      model: {
+        type: 'string',
+        description: '変更後のmodel（モデル一覧のslug）。省略すると今のmodelのまま。',
+      },
+      effort: {
+        type: 'string',
+        description:
+          '変更後のeffort。省略すると今のeffortのまま（変更後のmodelで使えなければ既定へ戻る）。',
+      },
+      reason: {
+        type: 'string',
+        description: '変える理由（1行）。会話と作業ログに残る。',
+      },
+    },
+    required: ['reason'],
+    additionalProperties: false,
+  },
+};
+
+/** `set_session_profile`の引数。型と必須だけを確かめた値で、値の検証は受け取る側が行う。 */
+export interface SessionProfileToolArgs {
+  model: string | undefined;
+  effort: string | undefined;
+  reason: string;
+}
+
+/** `set_session_profile`の結果。 */
+export interface SessionProfileToolResult {
+  applied: boolean;
+  message: string;
+}
+
+/** 呼び出し元の会話のmodel/effortを変える口。会話ごとに束縛した関数を渡す。 */
+export type SessionProfilePort = (
+  args: SessionProfileToolArgs,
+) => Promise<SessionProfileToolResult>;
+
+/**
+ * `set_session_profile`の引数を型と必須だけ確かめて取り出す。型が違う・空文字・両方省略なら
+ * 理由を返す。値がモデル一覧にあるかは受け取る側で確かめる。
+ */
+export function parseSessionProfileToolArgs(
+  args: Record<string, unknown>,
+): { ok: true; value: SessionProfileToolArgs } | { ok: false; reason: string } {
+  const { model, effort, reason } = args;
+  if (model !== undefined && typeof model !== 'string') {
+    return { ok: false, reason: 'modelは文字列で指定してください' };
+  }
+  if (effort !== undefined && typeof effort !== 'string') {
+    return { ok: false, reason: 'effortは文字列で指定してください' };
+  }
+  if (typeof reason !== 'string' || reason.trim() === '') {
+    return { ok: false, reason: 'reason（変える理由）を指定してください' };
+  }
+  if (model === undefined && effort === undefined) {
+    return { ok: false, reason: 'modelとeffortの少なくとも一方を指定してください' };
+  }
+  // 空文字（既定へ戻す）は実セッションに効かない（`claudeChatView.ts`の`applyToSession`）ため拒否する
+  if (model === '' || effort === '') {
+    return {
+      ok: false,
+      reason: '既定へ戻す（空文字）ことはできません。使う値を明示してください',
+    };
+  }
+  return { ok: true, value: { model, effort, reason } };
+}
+
+/**
  * オーケストレーター用の接続にだけ見せるツール（design.md §16.23）。
  * タスク用の接続の `tools/list` には現れず、呼んでも「未知のツール」として拒否される。
  */
@@ -1608,6 +1893,22 @@ export interface TaskMessagingHubDeps {
    */
   sessionOnly?: boolean;
   /**
+   * WebGPTとの議論を呼び出し元の会話で始める口（Issue #2051）。`sessionOnly`のhubでだけ読み、
+   * 渡されているときだけ`start_webgpt_discussion`を見せる。タスク実行の会話には渡さない。
+   */
+  webGptDiscussion?: WebGptDiscussionPort | undefined;
+  /**
+   * 呼び出し元の会話のmodel/effortを変える口（Issue #2053）。`sessionOnly`のhubでだけ読み、
+   * 渡されているときだけ`set_session_profile`を見せる。タスク実行の会話には渡さない。
+   */
+  sessionProfile?: SessionProfilePort | undefined;
+  /**
+   * ロードマップのオーケストレータモードを呼び出し元の会話で起動する口（Issue #2070）。
+   * `sessionOnly`のhubでだけ読み、渡されているときだけ`start_roadmap_orchestrator`を見せる。
+   * Orchestratorと工程セッションには渡さない。
+   */
+  startRoadmapOrchestrator?: StartRoadmapOrchestratorPort | undefined;
+  /**
    * オーケストレーターが今メッセージを受け取れるか（Issue #1513）。タスクから
    * オーケストレーターへの送信を受け付けたときにだけ呼ぶ。`recovering`・`unavailable`なら
    * 結果の`reason`へその旨を足し、`unavailable`では`expectReply`を落として積む
@@ -1722,6 +2023,20 @@ export class TaskMessagingHub {
    */
   get sessionBridge(): SessionBridgePort | undefined {
     return this.deps.sessionBridge?.();
+  }
+
+  /** WebGPTとの議論を始める口（Issue #2051）。1セッション用のhubでだけ返す。 */
+  get webGptDiscussion(): WebGptDiscussionPort | undefined {
+    return this.deps.sessionOnly === true ? this.deps.webGptDiscussion : undefined;
+  }
+
+  /** 呼び出し元の会話のmodel/effortを変える口（Issue #2053）。1セッション用のhubでだけ返す。 */
+  get sessionProfile(): SessionProfilePort | undefined {
+    return this.deps.sessionOnly === true ? this.deps.sessionProfile : undefined;
+  }
+
+  get startRoadmapOrchestrator(): StartRoadmapOrchestratorPort | undefined {
+    return this.deps.sessionOnly === true ? this.deps.startRoadmapOrchestrator : undefined;
   }
 
   /**
@@ -2167,6 +2482,13 @@ export const DISPATCH_ERROR_SUPPRESSION_SUMMARY_INTERVAL = 100;
  * （design.md §16.21「ツールの引数でタスクidを名乗らせない」）。
  */
 export class MessagingMcpServer {
+  /**
+   * `set_session_profile`（Issue #2053）の呼び出しを1本ずつ流す鎖。同じ会話から続けて
+   * 呼ばれたとき、保存と実セッションへの送信の順が入れ替わらないようにする
+   * （1セッション用のhubはセッションごとにこのサーバを1つ持つ）。
+   */
+  private sessionProfileChain: Promise<unknown> = Promise.resolve();
+
   constructor(
     private readonly hub: TaskMessagingHub,
     transport: McpTransportPort,
@@ -2308,7 +2630,18 @@ export class MessagingMcpServer {
     // だけが通る）とセッション宛の道具に絞る。`sessionBridge`が未設定ならそもそも
     // 宛先解決ができないため、何も見せない
     if (this.hub.sessionOnly) {
-      return this.hub.sessionBridge === undefined ? [] : [SEND_MESSAGE_TOOL, ...SESSION_TOOLS];
+      // WebGPTとの議論（Issue #2051）は宛先解決を使わないため、`sessionBridge`とは独立に足す
+      // model/effortの変更（Issue #2053）も同じ理由で独立に足す
+      const ownTools = [
+        ...(this.hub.webGptDiscussion === undefined ? [] : [START_WEBGPT_DISCUSSION_TOOL]),
+        ...(this.hub.sessionProfile === undefined ? [] : [SET_SESSION_PROFILE_TOOL]),
+        ...(this.hub.startRoadmapOrchestrator === undefined
+          ? []
+          : [START_ROADMAP_ORCHESTRATOR_TOOL]),
+      ];
+      return this.hub.sessionBridge === undefined
+        ? ownTools
+        : [SEND_MESSAGE_TOOL, ...SESSION_TOOLS, ...ownTools];
     }
     const base = [LIST_TASKS_TOOL, SEND_MESSAGE_TOOL];
     const handoffTools = this.hub.handoff === undefined ? [] : HANDOFF_TOOLS;
@@ -2348,6 +2681,12 @@ export class MessagingMcpServer {
                 return false;
               }
               if (tool.name === RECORD_LESSON_TOOL.name && control.recordLesson === undefined) {
+                return false;
+              }
+              if (
+                tool.name === DECIDE_FINAL_MERGE_TOOL.name &&
+                control.canDecideFinalMerge?.() === false
+              ) {
                 return false;
               }
               return true;
@@ -2403,6 +2742,16 @@ export class MessagingMcpServer {
 
     // 1セッション用のhub（Issue #1305）では、run内の道具を名前を推測して呼ばれても通さない
     // （`visibleTools`で見せていないものを、呼び出し時にも同じ条件で弾く多層防御の流儀）
+    if (name === START_WEBGPT_DISCUSSION_TOOL.name) {
+      return this.handleWebGptDiscussionCall(request, args);
+    }
+    if (name === SET_SESSION_PROFILE_TOOL.name) {
+      return this.handleSessionProfileCall(request, args);
+    }
+    if (name === START_ROADMAP_ORCHESTRATOR_TOOL.name) {
+      return this.handleStartRoadmapOrchestratorCall(request, args);
+    }
+
     if (this.hub.sessionOnly && name !== 'send_message' && !SESSION_TOOL_NAMES.has(name)) {
       return failure(request.id, -32602, `未知のツールです: ${name}`);
     }
@@ -2562,6 +2911,100 @@ export class MessagingMcpServer {
       request.id,
       toolTextResult(JSON.stringify({ ...result, reason, crossWindow: true }), !result.accepted),
     );
+  }
+
+  /**
+   * `start_webgpt_discussion`（Issue #2051）の呼び出し。口が無いhub（run用・タスク実行の会話）
+   * では「未知のツール」で拒否する（`visibleTools`と同じ条件の多層防御）。利用者の確認を
+   * 待つため、結果が返るまで時間がかかる。
+   */
+  private async handleWebGptDiscussionCall(
+    request: JsonRpcRequest,
+    args: Record<string, unknown>,
+  ): Promise<JsonRpcResponse> {
+    const port = this.hub.webGptDiscussion;
+    if (port === undefined) {
+      return failure(request.id, -32602, `未知のツールです: ${START_WEBGPT_DISCUSSION_TOOL.name}`);
+    }
+    const parsed = parseWebGptDiscussionToolArgs(args);
+    let result: WebGptDiscussionToolResult;
+    if (!parsed.ok) {
+      result = { accepted: false, reason: parsed.reason };
+    } else {
+      try {
+        result = await port(parsed.value);
+      } catch (error) {
+        result = {
+          accepted: false,
+          reason: `議論を開始できませんでした: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
+  }
+
+  /**
+   * `set_session_profile`（Issue #2053）の呼び出し。口が無いhub（run用・タスク実行の会話）
+   * では「未知のツール」で拒否する（`visibleTools`と同じ条件の多層防御）。
+   */
+  private async handleSessionProfileCall(
+    request: JsonRpcRequest,
+    args: Record<string, unknown>,
+  ): Promise<JsonRpcResponse> {
+    const port = this.hub.sessionProfile;
+    if (port === undefined) {
+      return failure(request.id, -32602, `未知のツールです: ${SET_SESSION_PROFILE_TOOL.name}`);
+    }
+    const parsed = parseSessionProfileToolArgs(args);
+    let result: SessionProfileToolResult;
+    if (!parsed.ok) {
+      result = { applied: false, message: parsed.reason };
+    } else {
+      try {
+        const call = this.sessionProfileChain.then(() => port(parsed.value));
+        this.sessionProfileChain = call.catch(() => undefined);
+        result = await call;
+      } catch (error) {
+        result = {
+          applied: false,
+          message: `model/effortを変えられませんでした: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+    }
+    return success(request.id, toolTextResult(JSON.stringify(result), !result.applied));
+  }
+
+  /**
+   * `start_roadmap_orchestrator`（Issue #2070）の呼び出し。口が無いhub（run用・タスク実行の会話）
+   * では「未知のツール」で拒否する（`visibleTools`と同じ条件の多層防御）。
+   */
+  private async handleStartRoadmapOrchestratorCall(
+    request: JsonRpcRequest,
+    args: Record<string, unknown>,
+  ): Promise<JsonRpcResponse> {
+    const port = this.hub.startRoadmapOrchestrator;
+    if (port === undefined) {
+      return failure(
+        request.id,
+        -32602,
+        `未知のツールです: ${START_ROADMAP_ORCHESTRATOR_TOOL.name}`,
+      );
+    }
+    const parsed = parseStartRoadmapOrchestratorToolArgs(args);
+    let result: StartRoadmapOrchestratorToolResult;
+    if (!parsed.ok) {
+      result = { accepted: false, reason: parsed.reason };
+    } else {
+      try {
+        result = await port(parsed.value);
+      } catch (error) {
+        result = {
+          accepted: false,
+          reason: `オーケストレータモードを起動できませんでした: ${sanitizeInlineText(error instanceof Error ? error.message : String(error), 200)}`,
+        };
+      }
+    }
+    return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
   }
 
   /**
@@ -2731,6 +3174,10 @@ export class MessagingMcpServer {
     // `decide_final_merge`はrun全体で1つの判断（統合PR/MRという1つの対象）にしか使えず、
     // 他の制御ツールと違って`taskId`を取らない。`target`（`taskId`）を読む前に分岐する
     if (name === DECIDE_FINAL_MERGE_TOOL.name) {
+      // `visibleTools`で外したrun（`finalMerge: orchestrator`以外）では同じ条件で拒否する
+      if (control.canDecideFinalMerge?.() === false) {
+        return failure(request.id, -32602, `未知のツールです: ${name}`);
+      }
       const result = control.decideFinalMerge(str(args['decision']), str(args['reason']));
       return success(request.id, toolTextResult(JSON.stringify(result), !result.accepted));
     }

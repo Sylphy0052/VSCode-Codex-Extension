@@ -4,6 +4,7 @@ import * as path from 'node:path';
 
 import * as vscode from 'vscode';
 import type { AskUserQuestionItem } from '../claude/askUserQuestion';
+import { ClaudeSandboxProbe, nodeSandboxProbePorts } from '../claude/sandbox';
 import { CLAUDE_EFFORTS } from '../claude/types';
 import { FALLBACK_EFFORTS } from '../codex/modelCatalog';
 import {
@@ -11,11 +12,20 @@ import {
   readClaudeConfig,
   readConfig,
   readReflexEnabled,
+  readPluginRoadmapSettings,
+  readSelfImproveBudgetRaw,
+  readSelfImproveSourcesRaw,
   readTaskRunLowPriorityEnabled,
   readTaskRunMaxParallelPerFolder,
+  readTaskRunOptimizeLimits,
+  readTaskRunOptimizeRefuter,
+  readTaskRunAutoStartStagesEnabled,
+  readTaskRunEndReviewConfig,
+  readTaskRunPlanApprovalMode,
   readTaskRunPlanAutoApproveEnabled,
   readTaskRunResourceIntervalMs,
   readTaskRunResourceThresholds,
+  readToolUsageMetricsEnabled,
 } from '../config';
 import type { Logger } from '../log';
 import type { CliCommandRunner } from '../orchestrator/forge';
@@ -33,6 +43,18 @@ import {
   type RoadmapRunForgePorts,
 } from '../orchestrator/roadmapRunForge';
 import type { RunNotesStore } from '../orchestrator/runNotes';
+import { parseGithubRepo, RunRetrospective } from '../orchestrator/runRetrospective';
+import { normalizeRetrospectiveSources, taskRunSummary } from '../orchestrator/runSummary';
+import {
+  createGithubPluginRoadmapForge,
+  isPluginRepoName,
+  readSyncedCommit,
+} from '../orchestrator/pluginRoadmapForge';
+import { createGithubRetrospectiveForge } from '../orchestrator/runRetrospectiveForge';
+import { normalizeConfig } from '../orchestrator/selfImproveBudget';
+import { OptimizeLoopHost } from '../orchestrator/optimizeLoopHost';
+import { createRefuter, REFUTER_TIMEOUT_MS } from '../orchestrator/optimizeRefute';
+import { runHeadlessPromptDetailed } from '../loop/headlessCli';
 import type { ExtensionSafetyBaseline } from '../orchestrator/taskConfig';
 import {
   TaskRunController,
@@ -44,9 +66,19 @@ import {
   TASK_LEASE_DIR_NAME,
   TaskRunLeaseManager,
 } from '../orchestrator/taskRunLease';
+import { createRunMetricsRecorder, RUN_METRICS_DIR_NAME } from '../orchestrator/runMetricsStore';
+import { setupChatRetrospective, type ChatConversationHost } from './chatRetrospectiveSetup';
+import { createWorkflowRunMetricsRecorder } from '../orchestrator/retrospectiveMetrics/workflowRunMetrics';
+import type { WorkflowRunStore } from '../orchestrator/runStore';
+import {
+  MAX_AUTO_RETRIES,
+  MAX_GATES_PER_TASK,
+  MAX_REVIEW_ROUNDS,
+} from '../orchestrator/taskRunGates';
+import { judgeEndReview } from '../orchestrator/taskRunEndReview';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
-import { createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
+import { createIssueReader, createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
 import { assessTaskRun } from '../orchestrator/taskRunScheduler';
 import {
   getTask,
@@ -59,9 +91,11 @@ import {
 } from '../orchestrator/taskRunState';
 import type { TaskRunStore } from '../orchestrator/taskRunStore';
 import type { TaskSessionConfig, TaskSessionHost } from '../orchestrator/taskSession';
+import { checkSelfImproveMerge } from '../orchestrator/selfImproveMergeCheck';
 import { createStageObservationPorts } from '../orchestrator/taskStageObservation';
 import { TaskStageRunner } from '../orchestrator/taskStageRunner';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
+import { GOAL_REASON_MAX_LENGTH, parseGoalInput } from '../orchestrator/taskRunGoal';
 import {
   nodeWorktreeFileSystem,
   type GitCommandRunner,
@@ -80,8 +114,12 @@ import { taskRunLabel } from './taskRunKanbanModel';
 import { currentWorkspaceFolders, TaskRunKanbanViewManager } from './taskRunKanbanView';
 import { createStageReflexJudges } from './taskRunStageJudges';
 import { sessionHubRoot } from './sessionHub';
+import { listTaskRunPendingItems, type TaskRunPendingPort } from './taskRunPending';
+import type { McRunsPort } from './missionControlRuns';
+import { createMcRunsPort } from './missionControlRunsPort';
 import {
   startRoadmapRunCommand,
+  startRoadmapRunFromChat,
   type RoadmapRunStartDeps,
   type RunSettings,
 } from './taskRunRoadmapStart';
@@ -103,6 +141,8 @@ export interface TaskRunSetupDeps {
   windowId: string;
   /** 専有権ファイルの置き場を決める（`sessionHubRoot`の下）。`context.globalStorageUri.fsPath`。 */
   globalStorageDir: string;
+  /** 実行中の拡張機能の版。runごとの指標の群分けの鍵にする（Issue #2081）。 */
+  extensionVersion: string;
   hosts: Record<TaskRunEngine, TaskSessionHost>;
   worktreeQueue: WorktreeCreationQueue;
   git: GitCommandRunner;
@@ -119,7 +159,40 @@ export interface TaskRunSetupDeps {
    * 1インスタンスを渡す。
    */
   runNotes?: RunNotesStore;
+  /**
+   * エンジンの週次使用率（%）。自律改善の予算（Issue #2084）の判断に使う。省略時・分からないときは
+   * `undefined`で、使用率では止めない。
+   */
+  weeklyUsagePct?: (engine: TaskRunEngine) => Promise<number | undefined>;
+  /** `package.json`の`repository.url`。自己改善（Issue #2086）はこのrepoのrunでだけ行う。 */
+  extensionRepositoryUrl?: string | undefined;
+  /**
+   * task runの質問をsession-hubへ公開する口の置き場（Issue #2135）。渡すと実体を入れる。
+   * `extension.ts`はsession-hubを組み立てる時点でこの箱から読む。
+   */
+  pendingPort?: { current?: TaskRunPendingPort | undefined };
+  /**
+   * Mission ControlのRunsタブ（Issue #2150）の口の置き場。渡すと実体を入れる。`extension.ts`は
+   * Mission Controlを組み立てる時点でこの箱から読む。
+   */
+  missionControlRuns?: { current?: McRunsPort | undefined };
+  /** 通常チャットの会話を区切って振り返る画面（Issue #2123）。省略時は追わない。 */
+  chatConversationHosts?: readonly ChatConversationHost[];
+  /**
+   * ワークフロー（YAML）のrun（Issue #2122）。渡すと、runの終了時に`kind: 'workflow'`の指標を
+   * 記録し、task runと同じ振り返りに掛ける。
+   */
+  workflowRuns?: {
+    store: Pick<WorkflowRunStore, 'onRunFinished'>;
+    /** runのノードのprovider。週次使用率の判断に使う。 */
+    providers(runId: string): readonly TaskRunEngine[];
+    /** ワークフローの上限値（群分けの鍵）。ジョブごとのYAMLの値は入れない。 */
+    limits(): Readonly<Record<string, number>>;
+  };
 }
+
+/** 振り返り（Issue #2086）の状態・予算・記録の置き場。`<globalStorage>`の下。 */
+const SELF_IMPROVE_DIR_NAME = 'self-improve';
 
 /**
  * オーケストレータモード（Issue #1505）の組み立てとコマンド登録。`extension.ts`はここを
@@ -254,7 +327,11 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     );
   };
 
-  const questionServer = new RoadmapQuestionMcpServer({ logWarn: warn });
+  // オーケストレータモードの接続もツールの実利用率を数える（Issue #2188。通常の会話と同じ形）
+  const questionServer = new RoadmapQuestionMcpServer({
+    logWarn: warn,
+    toolUsageMetrics: { enabled: readToolUsageMetricsEnabled, log: (line) => log.info(line) },
+  });
 
   const observation = createStageObservationPorts(ports);
 
@@ -271,8 +348,131 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     log: warn,
   });
 
+  // runの終了時に指標を記録する（Issue #2081）。終了の経路はどれもstoreの更新を通る
+  const recordRunMetrics = createRunMetricsRecorder({
+    dir: path.join(deps.globalStorageDir, RUN_METRICS_DIR_NAME),
+    extensionVersion: deps.extensionVersion,
+    claudeHome: path.join(os.homedir(), '.claude'),
+    limits: {
+      stageMaxIterations: TASK_STAGE_MAX_ITERATIONS,
+      maxReviewRounds: MAX_REVIEW_ROUNDS,
+      maxAutoRetries: MAX_AUTO_RETRIES,
+      maxGatesPerTask: MAX_GATES_PER_TASK,
+    },
+    log: warn,
+  });
+  // 指標を記録した後に振り返る（Issue #2086）。予算（Issue #2084）は振り返りの中で判断し、記録に残す
+  const retrospective = new RunRetrospective({
+    stateDir: path.join(deps.globalStorageDir, SELF_IMPROVE_DIR_NAME),
+    metricsDir: path.join(deps.globalStorageDir, RUN_METRICS_DIR_NAME),
+    runNotes: deps.runNotes,
+    forge: createGithubRetrospectiveForge(ports),
+    ownRepo: parseGithubRepo(deps.extensionRepositoryUrl),
+    plugin: () => {
+      const settings = readPluginRoadmapSettings();
+      if (!isPluginRepoName(settings.repo)) {
+        return undefined;
+      }
+      return {
+        repo: settings.repo,
+        forge: createGithubPluginRoadmapForge(ports, os.homedir()),
+        installedCommit: () => readSyncedCommit(settings.syncedCommitFile),
+      };
+    },
+    budgetConfig: () => normalizeConfig(readSelfImproveBudgetRaw()),
+    sources: () => normalizeRetrospectiveSources(readSelfImproveSourcesRaw()),
+    weeklyUsagePct: async (engine) => deps.weeklyUsagePct?.(engine),
+    now: () => Date.now(),
+    log: (message) => log.info(message),
+  });
+  store.onRunFinished = (run) => {
+    void recordRunMetrics(run).then(() => retrospective.onRunFinished(taskRunSummary(run)));
+  };
+  // 通常チャットの会話の区切りも同じ振り返りへ渡す（Issue #2123）
+  const chatRetrospective = setupChatRetrospective({
+    hosts: deps.chatConversationHosts ?? [],
+    retrospective,
+    runNotes: deps.runNotes,
+    globalStorageDir: deps.globalStorageDir,
+    extensionVersion: deps.extensionVersion,
+    log: warn,
+  });
+  // ワークフローのrunも終了時に指標を記録して振り返る（Issue #2122）。振り返るのは新しい終わり
+  // （finishedAt）の指標を書いたときだけ。再開して終わり直したrunは振り返り直し、同じ終わりの
+  // 再通知では振り返らない（Issue #2129）
+  const workflowRuns = deps.workflowRuns;
+  if (workflowRuns !== undefined) {
+    const recordWorkflowRunMetrics = createWorkflowRunMetricsRecorder({
+      dir: path.join(deps.globalStorageDir, RUN_METRICS_DIR_NAME),
+      extensionVersion: deps.extensionVersion,
+      claudeHome: path.join(os.homedir(), '.claude'),
+      limits: () => workflowRuns.limits(),
+      providers: (runId) => workflowRuns.providers(runId),
+      log: warn,
+    });
+    workflowRuns.store.onRunFinished = (run) => {
+      void recordWorkflowRunMetrics(run).then((summary) =>
+        summary === undefined ? undefined : retrospective.onRunFinished(summary),
+      );
+    };
+  }
+
+  // 最適化のループ（Issue #2111）。試行のセッションはClaudeならsandboxを確かめてから起動する
+  const trialSandboxProbe = new ClaudeSandboxProbe(
+    nodeSandboxProbePorts(() => executableFor('claude')),
+    log,
+  );
+  const optimizeLoop = new OptimizeLoopHost({
+    storageDir: deps.globalStorageDir,
+    cli: deps.cli,
+    trialEngine: async (engine, settings) => {
+      const base = {
+        engine,
+        executable: executableFor(engine),
+        model: settings.model,
+        ...(settings.effort === undefined ? {} : { effort: settings.effort }),
+      };
+      if (engine !== 'claude') {
+        return base;
+      }
+      const probed = await trialSandboxProbe.check();
+      if (!probed.ok) {
+        throw new Error(`試行のセッションのsandboxを使えない: ${probed.reason}`);
+      }
+      return { ...base, claudeSandbox: probed.environment };
+    },
+    // 反証役（Issue #2108）。会話もツールも持たない新規のheadless CLIで判定させる
+    refuter: (trialEngine) => {
+      const settings = readTaskRunOptimizeRefuter();
+      return createRefuter({
+        trialEngine,
+        setting: settings.engine,
+        run: (engine, prompt, signal) =>
+          runHeadlessPromptDetailed(
+            {
+              provider: engine,
+              executable: executableFor(engine),
+              model: settings.model !== '' ? settings.model : engine === 'claude' ? 'sonnet' : '',
+              timeoutMs: REFUTER_TIMEOUT_MS,
+              logWarn: warn,
+              kind: '最適化の反証役',
+              // 長く走るので、工程を止めて待たせるReflexの判定を順番待ちで追い越させる
+              priority: 'background',
+              ...(signal === undefined ? {} : { signal }),
+            },
+            prompt,
+          ),
+      });
+    },
+    limits: () => readTaskRunOptimizeLimits(),
+    usageThresholdPct: () => normalizeConfig(readSelfImproveBudgetRaw()).weeklyUsageThresholdPct,
+    weeklyUsagePct: async (engine) => deps.weeklyUsagePct?.(engine),
+    log: warn,
+  });
+
   const runner = new TaskStageRunner({
     hosts: deps.hosts,
+    optimizeLoop,
     store,
     drive: {
       canDrive: async (runId) => lease.holds(runId) || (await lease.acquire(runId)).ok,
@@ -286,6 +486,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     resolveBaseCommit: (root) => resolveRoadmapBaseCommit(ports, root),
     sessionConfig: (engine) => deps.sessionConfig(engine),
     autoApprove: () => deps.readBaseline().allowAutoApprove,
+    checkSelfImproveMerge: (root, prNumber, options) =>
+      checkSelfImproveMerge(ports, root, prNumber, options),
     maxIterations: TASK_STAGE_MAX_ITERATIONS,
     maxParallelPerFolder: readTaskRunMaxParallelPerFolder,
     startGate: {
@@ -326,6 +528,12 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     modelCatalog,
     planAutoApprove,
     planReview,
+    // 計画を承認する主体（Issue #2073）。既定のhumanでは従来どおり
+    planApprovalMode: () => readTaskRunPlanApprovalMode(),
+    // 終了レビューからの再計画の受付（Issue #2194）
+    endReview: () => readTaskRunEndReviewConfig(),
+    // 判断待ちの工程を推奨値で自動開始する（Issue #2031）。設定はエンジンに依らない
+    autoStartStages: () => readTaskRunAutoStartStagesEnabled(),
     // 関門の判断の審査（Issue #1787）も計画の審査と同じReflexの設定で行う
     gateReview: planReview,
     recommendStageSettings: async (engine, input) => {
@@ -366,6 +574,15 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     log: (message) => log.info(message),
   });
   holder.controller = controller;
+  if (deps.pendingPort !== undefined) {
+    deps.pendingPort.current = {
+      list: (windowId) =>
+        listTaskRunPendingItems(store.list(), (runId) => lease.holds(runId), windowId),
+      answer: (runId, taskId, questionId, answer) =>
+        controller.answerQuestion(runId, taskId, questionId, answer),
+      onDidChange: (listener) => controller.onTransition(() => listener()),
+    };
+  }
 
   const orchestrator = new TaskRunOrchestrator({
     hosts: deps.hosts,
@@ -382,7 +599,58 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     judgeAskUserQuestionAnswerer: judgeAskUserQuestion,
     judgeQuestionAnswerByOrchestrator,
     judgeStopStageAnswerer: judgeStopStage,
+    // 終了レビュー（Issue #2194）。判定は他のReflex判定と同じくReflexモードの親スイッチがOFFなら走らせない
+    endReview: {
+      config: () => readTaskRunEndReviewConfig(),
+      judge: async (run) =>
+        readReflexEnabled()
+          ? judgeEndReview(reflexDeps(run.engine), run)
+          : { kind: 'skipped' as const },
+    },
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
+    readIssue: createIssueReader(ports),
+    startSelfImproveRun: (self, issueNumber) =>
+      retrospective.startSelfImprove({
+        workspaceRoot: self.workspaceRoot,
+        engine: self.engine,
+        issueNumber,
+        runsInFolder: () => controller.listInFolder(self.workspaceRoot),
+        start: async (title) => {
+          const started = await controller.startRun({
+            workspaceRoot: self.workspaceRoot,
+            engine: self.engine,
+            maxParallel: 1,
+            title,
+            parallel: true,
+          });
+          if (!started.ok) {
+            return started;
+          }
+          const n = String(issueNumber);
+          const plan = await controller.proposePlan(started.runId, {
+            tasks: [
+              {
+                id: 'T1',
+                title,
+                summary: `自己改善Issue #${n}の本文（改善の内容・事前登録）に従って実装する。`,
+                acceptanceCriteria: [
+                  `Issue #${n}の改善の内容だけを入れ、保護パスに触れない`,
+                  `PRにself-improveラベルを付け、本文に「Closes #${n}」を入れる`,
+                ],
+                dependsOn: [],
+                existingIssueNumber: issueNumber,
+              },
+            ],
+          });
+          return {
+            ok: true as const,
+            runId: started.runId,
+            message: plan.ok
+              ? `自己改善#${n}のrun（runId=${started.runId}）を作り、計画を提案しました`
+              : `自己改善#${n}のrun（runId=${started.runId}）を作りました。計画は受け付けられませんでした: ${plan.message}`,
+          };
+        },
+      }),
     resourceLines: (runId) =>
       formatResourceLines(holder.monitor?.snapshot, runId, holder.monitor?.sampleFailure),
     startPolicy: () => holder.monitor?.startPolicy ?? 'unrestricted',
@@ -403,7 +671,9 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
           `（${snapshot.cpu.method}） / メモリ ${prev?.memoryLevel ?? 'ok'} -> ${snapshot.memoryLevel}` +
           ` / 新規開始 ${snapshot.startPolicy}`,
       );
-      // pauseの効果はrunの工程で変わるため、本文はrunごとに作る（Issue #1807）
+    },
+    // 下がった側は続いてから知らせる（Issue #1981）。pauseの効果はrunの工程で変わるため、本文はrunごとに作る（Issue #1807）
+    onNotify: (prev, snapshot) => {
       orchestrator.notifyResourcePressure((runId) => describeResourceChange(prev, snapshot, runId));
     },
     onSampled: (snapshot) => {
@@ -452,6 +722,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     controller,
     orchestrator,
     revealStage: (runId, taskId) => runner.revealStageSession(runId, taskId),
+    readOptimizeTrials: (runId, taskId) => optimizeLoop.readTrials(runId, taskId),
     finishRun,
     suspendRun,
     resumeRun,
@@ -487,6 +758,20 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     showRun: (runId) => showRun(view, orchestrator, runId),
   });
 
+  if (deps.missionControlRuns !== undefined) {
+    deps.missionControlRuns.current = createMcRunsPort({
+      controller,
+      view,
+      orchestrator,
+      git: deps.git,
+      cli: deps.cli,
+      log,
+      switchToRun,
+      roadmapStartDeps: (engine) => roadmapStartDeps(engine),
+      defaultMaxParallel: readTaskRunMaxParallelPerFolder,
+    });
+  }
+
   void controller
     .restore()
     .then(() => monitor.refresh())
@@ -496,6 +781,7 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
 
   return [
     transitions,
+    chatRetrospective,
     { dispose: () => monitor.dispose() },
     { dispose: () => lease.dispose() },
     { dispose: () => runner.dispose() },
@@ -533,6 +819,48 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
         }
       },
     ),
+    // チャットのモデルが`start_roadmap_orchestrator`で起動する（Issue #2070）。QuickPickは出さない。
+    // 引数は呼び出し元チャットのフォルダとengine。値は信用せず型を確かめる
+    vscode.commands.registerCommand('agent.taskRun.startRoadmapFromChat', (raw?: unknown) => {
+      const input = raw as
+        | {
+            folder?: unknown;
+            engine?: unknown;
+            issueNumber?: unknown;
+            goal?: unknown;
+            reason?: unknown;
+          }
+        | undefined;
+      const engine = parseEngine(input?.engine);
+      if (typeof input?.folder !== 'string' || input.folder === '' || engine === undefined) {
+        return { accepted: false, reason: 'フォルダとengineを指定してください' };
+      }
+      // 公開コマンドなので、開いているワークスペースフォルダの配下だけを受ける
+      const folder = path.resolve(input.folder);
+      const inWorkspace = (vscode.workspace.workspaceFolders ?? []).some((f) => {
+        const rel = path.relative(f.uri.fsPath, folder);
+        return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+      });
+      if (!inWorkspace) {
+        return { accepted: false, reason: '開いているワークスペースフォルダの外は指定できません' };
+      }
+      // goalは外部由来なので、ツール側で確かめていてもここで確かめ直して均す（Issue #2193）
+      const goal = parseGoalInput(input.goal, 'start');
+      if (!goal.ok) {
+        return { accepted: false, reason: goal.message };
+      }
+      return startRoadmapRunFromChat(roadmapStartDeps(engine), {
+        folder,
+        engine,
+        issueNumber: parseIssueNumber(input.issueNumber),
+        maxParallel: Math.min(readTaskRunMaxParallelPerFolder(), MAX_TASK_RUN_PARALLEL),
+        goal: goal.value,
+        goalReason:
+          typeof input.reason === 'string'
+            ? sanitizeInlineText(input.reason, GOAL_REASON_MAX_LENGTH)
+            : undefined,
+      });
+    }),
     vscode.commands.registerCommand('agent.taskRun.kanban', () => view.show()),
     vscode.commands.registerCommand('agent.taskRun.switch', () =>
       switchRunCommand(controller, view, switchToRun),

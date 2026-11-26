@@ -318,6 +318,38 @@ describe('chatView.ts の補完カバレッジ', () => {
       expect(stateOf(chat).queued).toHaveLength(0);
     });
 
+    it('取り消しはidで照合し、同じ本文の2件が並んでも選んだ側だけを消す（Issue #2158）', async () => {
+      const chat = await openChat();
+      await sendText(chat, '最初の指示');
+      chat.connection.notify('turn/started', { threadId: 'thread-A', turn: { id: 'turn-1' } });
+      await chat.post({ type: 'send', text: '同じ本文' });
+      await chat.post({ type: 'send', text: '同じ本文' });
+      const view = chat.manager.controlSession(chat.threadId, { kind: 'queuedMessages' });
+      const ids = (view.queued ?? []).map((q) => q.id);
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).not.toBe(ids[1]);
+      const keep = stateOf(chat).queued[0];
+
+      // 位置のヒントが古くて0を指していても、2件目のidを消す
+      const ok = chat.manager.controlSession(chat.threadId, {
+        kind: 'cancelQueued',
+        index: 0,
+        queuedId: ids[1]!,
+      });
+      expect(ok).toEqual({ ok: true });
+      expect(stateOf(chat).queued).toHaveLength(1);
+      expect(stateOf(chat).queued[0]).toBe(keep);
+
+      // 見つからないidは、同じ位置に別の指示がいても消さずに断る
+      const gone = chat.manager.controlSession(chat.threadId, {
+        kind: 'cancelQueued',
+        index: 0,
+        queuedId: ids[1]!,
+      });
+      expect(gone).toEqual({ ok: false, error: 'この指示は既に送られたか、取り消されています' });
+      expect(stateOf(chat).queued).toHaveLength(1);
+    });
+
     it('sendQueued と flushQueue は進行中のターンへ turn/steer で割り込む', async () => {
       const chat = await openChat();
       await sendText(chat, '最初の指示');
@@ -491,7 +523,7 @@ describe('chatView.ts の補完カバレッジ', () => {
       ['workflowMenu', 'agent.workflows.menu'],
       ['teamWorkflow', 'agent.workflows.team'],
       ['workflowView', 'agent.workflows.view'],
-      ['sessionKanban', 'agent.sessionKanban'],
+      ['missionControl', 'agent.missionControl.open'],
       ['forgeHub', 'agent.forgeHub'],
       ['orchestratorMode', 'agent.taskRun.start'],
       ['openProgress', 'agent.openProgress'],
@@ -1176,6 +1208,88 @@ describe('chatView.ts の補完カバレッジ', () => {
       expect(
         __mock.messages.errors.some((m) => m.includes('議論するCodexの会話を開いてください')),
       ).toBe(true);
+    });
+  });
+
+  describe('統括ページからの問い合わせへの回答（Issue #2135）', () => {
+    const ask = (chat: OpenedChat, id: number, isSecret = false): Promise<unknown> =>
+      chat.connection.serverRequest(id, 'item/tool/requestUserInput', {
+        threadId: 'thread-A',
+        itemId: 'i1',
+        turnId: 'turn-1',
+        questions: [
+          {
+            id: 'q1',
+            header: '色',
+            question: '好きな色は？',
+            isOther: true,
+            isSecret,
+            options: [{ label: '赤', description: '' }],
+          },
+        ],
+      });
+    const answer = (chat: OpenedChat, id: string, value: string) =>
+      chat.manager.controlSession(chat.threadId, {
+        kind: 'answerPrompt',
+        pendingRequestId: id,
+        submission: { action: 'submit', values: { q1: [value] } },
+      });
+
+    it('問い合わせだけでも承認待ちになり、中身に入力欄が載る', async () => {
+      const chat = await openChat();
+      void ask(chat, 21);
+      await tick();
+      expect(chat.manager.managedSessions()[0]?.activity).toBe('approvalPending');
+      const detail = chat.manager.controlSession(chat.threadId, { kind: 'approvalDetail' });
+      expect(detail.approvals?.[0]).toMatchObject({
+        requestId: '21',
+        kind: 'codexPrompt',
+        decidable: false,
+        answer: 'text',
+        fields: [{ id: 'q1', options: [{ value: '赤', label: '赤' }], allowOther: true }],
+      });
+    });
+
+    it('統括から答えると応答が返り、同じ項目への2回目は既に回答済みになる', async () => {
+      const chat = await openChat();
+      const responded = ask(chat, 22);
+      await tick();
+      expect(answer(chat, '22', '赤')).toEqual({ ok: true });
+      await expect(responded).resolves.toEqual({ answers: { q1: { answers: ['赤'] } } });
+      expect(answer(chat, '22', '青')).toEqual({ ok: false, error: 'この項目は既に回答済みです' });
+    });
+
+    it('タブで答えた後・別経路で解決された後は、統括からの回答を既に回答済みで断る', async () => {
+      const chat = await openChat();
+      const responded = ask(chat, 23);
+      void ask(chat, 24);
+      await tick();
+      await chat.post({
+        type: 'prompt',
+        requestId: 23,
+        submission: { action: 'submit', values: { q1: ['赤'] } },
+      });
+      await expect(responded).resolves.toEqual({ answers: { q1: { answers: ['赤'] } } });
+      chat.connection.notify('serverRequest/resolved', { threadId: 'thread-A', requestId: 24 });
+      await tick();
+      expect(answer(chat, '23', '青')).toEqual({ ok: false, error: 'この項目は既に回答済みです' });
+      expect(answer(chat, '24', '青')).toEqual({ ok: false, error: 'この項目は既に回答済みです' });
+      expect(stateOf(chat).prompts).toHaveLength(0);
+    });
+
+    it('伏せ字の欄は統括から値を送らせず、断るだけを通す', async () => {
+      const chat = await openChat();
+      void ask(chat, 25, true);
+      await tick();
+      expect(answer(chat, '25', 'pw').ok).toBe(false);
+      expect(stateOf(chat).prompts).toHaveLength(1);
+      const decline = chat.manager.controlSession(chat.threadId, {
+        kind: 'answerPrompt',
+        pendingRequestId: '25',
+        submission: { action: 'decline', values: {} },
+      });
+      expect(decline).toEqual({ ok: true });
+      expect(stateOf(chat).prompts).toHaveLength(0);
     });
   });
 

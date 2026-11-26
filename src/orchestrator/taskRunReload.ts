@@ -25,7 +25,11 @@ import type { IssueState, PullRequestState } from './taskStageObservation';
  * Controllerが先に済ませ、ここは純粋関数で遷移だけを決める。
  */
 
-/** 再読み込みで工程セッションが終わった工程へ残す理由。 */
+/**
+ * 再読み込みで工程セッションが終わった工程へ残す理由。
+ * `haltCause`を追加する前に保存したrunは、この文言で再読み込みの停止かを見分ける（`isReloadHalt`）。
+ * 文言を変えるときは、今の文言を旧文言の定数として残し、`isReloadHalt`の比較に足すこと（Issue #2033）。
+ */
 export const RELOAD_HALT_REASON =
   '拡張機能の再読み込みで工程セッションが終わりました。「やり直す」で始め直せます';
 
@@ -75,8 +79,7 @@ export function reconcileTaskRunOnReload(
     const fact = facts.get(task.taskId);
     const merged = fact?.pullRequestState === 'merged';
     // 前回の再読み込みで止めた工程は人が止めたものとして扱わない
-    const userStopped =
-      status === 'halted' && task.attention === 'stopped' && task.failure !== RELOAD_HALT_REASON;
+    const userStopped = status === 'halted' && task.attention === 'stopped' && !isReloadHalt(task);
     const problem =
       merged || userStopped || fact === undefined ? undefined : findExternalProblem(task, fact);
     if (status === 'running' || merged || problem !== undefined) {
@@ -101,10 +104,21 @@ export function reconcileTaskRunOnReload(
       // ターンの終わりを待っていた・開き直す途中だった工程も、resume_stageまで開き直さない
       next = markStagePaused(next, task.taskId, now);
     } else if (status === 'running') {
-      next = haltStage(next, task.taskId, 'stopped', RELOAD_HALT_REASON, now);
+      next = haltStage(next, task.taskId, 'stopped', RELOAD_HALT_REASON, now, 'reload');
     }
   }
   return finishTaskRunIfDone(escalateJudgingGatesOnReload(next, now), now);
+}
+
+/**
+ * 再読み込みで止めた工程か（Issue #2033）。判定は`haltCause`で行う。`haltCause`を追加する前に
+ * 保存したrunには項目が無いため、そのときだけ停止理由が`RELOAD_HALT_REASON`の文言と一致するかで読み替える。
+ */
+export function isReloadHalt(task: OrchestratedTask): boolean {
+  if (task.haltCause !== undefined) {
+    return task.haltCause === 'reload';
+  }
+  return task.failure === RELOAD_HALT_REASON;
 }
 
 /**

@@ -15,6 +15,12 @@
  * キーは`taskId`（`T1`、`T2`…）だけに限る（`__proto__`等の危険なキーが入らない）。
  */
 
+import { digestLedger, type LedgerDigest } from '../secondOpinion/ledger';
+import type { OptimizeSummary } from './optimizeLedger';
+import type { OptimizeRequest } from './optimizeRequest';
+import type { OptimizeLoopState } from './optimizeLoop';
+import { sameOptimization, type OptimizationSpec } from './optimizeSpec';
+import type { TaskMetricsTally } from './runMetrics';
 import { stripControlChars } from './sanitize';
 import { sanitizeInlineText } from './untrustedText';
 
@@ -115,7 +121,22 @@ export interface StageReviewResult {
   remainingFindings: readonly string[];
   /** high・mediumの指摘を残さずに終わった。 */
   passed: boolean;
+  /**
+   * `summary`から読んだ台帳の集計（Issue #2192）。`completeStage`が拡張側で計算する（LLMには書かせない）。
+   * 追加前に保存したrunには無い（`undefined`は「集計していない」で、「台帳なし」とは区別する）。
+   */
+  ledger?: ReviewLedgerState;
 }
+
+/**
+ * review工程の報告から読んだ台帳（Issue #2192）。`kind`で分け、後から状態を足せるようにしてある。
+ * - none: 報告に台帳が無い、または読めなかった（工程は完了として記録する）
+ * - parsed: 台帳を読めた
+ */
+export type ReviewLedgerState = { kind: 'none' } | { kind: 'parsed'; digest: LedgerDigest };
+
+/** タスクに保存する工程報告の`summary`の上限（Issue #2192）。報告の上限より短く切る。 */
+export const MAX_STORED_STAGE_SUMMARY_LENGTH = 1000;
 
 /**
  * 工程の一時停止の段階（Issue #1629）。
@@ -162,9 +183,29 @@ export interface OrchestratedTask {
   existingIssueNumber: number | undefined;
   /**
    * ロードマップで完了済みの子Issueとして置いたタスク（Issue #1623）。全工程を飛ばした状態で作り、
-   * 依存先としてだけ使う。`hasStarted`は偽になるが、計画からは外せない（`withCarriedCompletedTasks`が戻す）。
+   * 依存先としてだけ使う。`hasStarted`は偽になるが、計画からは外せない（`withCarriedTasks`が戻す）。
    */
   completedInRoadmap?: true;
+  /**
+   * 承認した計画に今の内容で入っている（Issue #2028）。計画を出し直して承認待ちに戻っても、
+   * これが付いたタスクは工程を進める。新しいタスクと内容を変えたタスクには付かない。
+   * 追加前に保存したrunには無いが、直前のrunが`approved`なら`proposeTaskPlan`が承認済みとみなす。
+   */
+  planApproved?: true;
+  /**
+   * 最適化の仕様（Issue #2106）。持つタスクを含む計画は、人がKanbanで承認したときだけ承認済みになる。
+   * 外部由来（LLMの出力）のテキストを含む。コマンドは承認済みの値だけを実行する。
+   */
+  optimization?: OptimizationSpec;
+  /**
+   * 一度でも`optimization`を持ったタスク（Issue #2106）。仕様を外して出し直しても、通常のタスクとして
+   * Reflexの自動承認で進めさせないため、外した後も残す。
+   */
+  hadOptimization?: true;
+  /** 最適化の台帳の要約（試行の数・基準値・最良値・最良のcommit）。台帳の本体はglobalStorageのファイル。 */
+  optimizeSummary?: OptimizeSummary;
+  /** 最適化のループの状態（Issue #2111）。試行の回数・経過時間・最良の候補・伸び止まりなど。 */
+  optimizeLoop?: OptimizeLoopState;
   executionId: string;
   stages: Record<TaskStage, TaskStageRecord>;
   /** 報告を受け付ける実行回。実行中のセッションが無ければ`undefined`（どの報告も受け付けない）。 */
@@ -172,6 +213,11 @@ export interface OrchestratedTask {
   attention: TaskAttention;
   /** `attention`が`needsAction`・`failed`のときの理由。 */
   failure: string | undefined;
+  /**
+   * 工程を止めた原因（Issue #2033）。`attention`が`stopped`のとき、再読み込みで止めたものだけ`'reload'`、
+   * 人が止めたものは`undefined`。追加前に保存したrunには無く、`isReloadHalt`が停止理由の文言で読み替える。
+   */
+  haltCause?: 'reload' | undefined;
   /** 「Issue計画」の成果。外部由来のテキスト。 */
   issueDraft: { title: string; body: string } | undefined;
   /** 「Issue作成」の成果、または既存のIssue番号。 */
@@ -180,6 +226,11 @@ export interface OrchestratedTask {
   branch: string | undefined;
   pullRequest: { number: number; url: string } | undefined;
   review: StageReviewResult | undefined;
+  /**
+   * 工程報告（`done`）の`summary`（Issue #2192）。工程ごとに最後の報告だけを残し、
+   * `MAX_STORED_STAGE_SUMMARY_LENGTH`で切る。外部由来（LLMの出力）のテキスト。追加前に保存したrunには無い。
+   */
+  stageSummaries?: Partial<Record<TaskStage, string>>;
   /**
    * 工程セッションが`ask_orchestrator`で尋ねた質問（新しい順ではなく受け付けた順）。
    * 追加前に保存したrunには無い。操作は`taskRunQuestions.ts`。
@@ -192,6 +243,8 @@ export interface OrchestratedTask {
   gates?: readonly StageGate[];
   /** レビュー後に実装へ差し戻した回数。追加前に保存したrunには無い（0回として扱う）。 */
   reviewRounds?: number;
+  /** runごとの指標（Issue #2081）のうち、刈られて後から数えられなくなる件数。 */
+  metricsTally?: TaskMetricsTally;
   /** 実行中の工程の一時停止（Issue #1629）。一時停止していなければ`undefined`。 */
   pause?: TaskStagePause | undefined;
   /**
@@ -216,7 +269,14 @@ export interface TaskClosure {
 }
 
 /** 関門の種類: レビューで直さずに残した指摘がある / 工程が失敗・要対応で止まった。 */
-export type StageGateKind = 'reviewFindings' | 'stageFailed';
+export type StageGateKind = 'reviewFindings' | 'stageFailed' | 'optimization';
+
+/**
+ * 最適化の関門（Issue #2106）を立てた理由。`baselineFailed`（基準値の計測失敗）では`proceed`は測り直しを
+ * 意味し、`sendBack`は選べない。
+ */
+export type OptimizeGateReason =
+  'baselineFailed' | 'treeMismatch' | 'worsenedAfterReview' | 'preMergeFailed';
 
 /**
  * 関門の決着: 実装へ差し戻す / 指摘を残したまま進める / 同じ工程をやり直す /
@@ -248,6 +308,8 @@ export interface StageGate {
   /** Reflexの判定の要約（人へ回した理由を含む）。 */
   reflexSummary: string | undefined;
   resolution: { choice: StageGateChoice; by: StageDecider; at: string } | undefined;
+  /** `optimization`の関門だけ。立てた理由（Issue #2106）。 */
+  optimizeReason?: OptimizeGateReason;
   /** ISO8601。 */
   openedAt: string;
 }
@@ -302,10 +364,34 @@ export type TaskPlanStatus = 'drafting' | 'awaitingApproval' | 'approved';
 export interface TaskPlanReview {
   /** Reflexが「妥当」を閾値以上で答え、承認まで進めた。 */
   autoApproved: boolean;
-  /** Reflexの判定の要約（人へ回した理由を含む）。 */
+  /** Reflexの判定の要約（人へ回した理由を含む）。Reflexまで進まなかったときはその旨。 */
   summary: string;
   /** ISO8601。 */
   reviewedAt: string;
+  /**
+   * 承認した（承認を試みた）主体（Issue #2073）。`agent.taskRun.planApproval.mode=orchestrator`の
+   * `approve_plan`が3段を通した記録にだけ付く。無いときは従来どおりReflexの自動承認の記録。
+   */
+  approver?: 'orchestrator';
+  /** Orchestratorの自己確認（確認した項目と結論）。`approver`があるときだけ。 */
+  selfCheck?: string;
+  /** セカンドオピニオンの結果。`approver`があり、そこまで進んだときだけ。 */
+  secondOpinion?: TaskPlanSecondOpinion;
+}
+
+/**
+ * 計画を承認する主体（設定`agent.taskRun.planApproval.mode`。Issue #2073）。`human`は人がKanbanで
+ * 承認する（既定）。`orchestrator`は`approve_plan`が3段（自己確認・セカンドオピニオン・Reflex）を
+ * 通した計画をOrchestratorが承認する。
+ */
+export type PlanApprovalMode = 'human' | 'orchestrator';
+
+/** 計画のセカンドオピニオン（独立した別のheadless CLIによるレビュー）の結果。 */
+export interface TaskPlanSecondOpinion {
+  /** `valid`=妥当 / `wrong`=誤りがある / `unknown`=判定不能（時間切れ・不正な出力等）。 */
+  verdict: 'valid' | 'wrong' | 'unknown';
+  /** 指摘の短い一覧。`valid`のとき空のこともある。 */
+  findings: readonly string[];
 }
 
 export const TASK_RUN_SCHEMA_VERSION = 1;
@@ -346,6 +432,12 @@ export interface TaskRun {
   /** 開いたOrchestratorセッションのsessionId（全世代）。リロード後の汎用復元から外す判定に使う。 */
   orchestratorSessionRefs: readonly string[];
   /**
+   * Orchestratorへ送ったイベント通知の数（全世代の合計。Issue #2034）。上限（`orchestratorEventsCap`）は
+   * run全体で数えるため、拡張の再読み込みを挟んでも数え直さないよう保存する。
+   * 追加前に保存したrunには無い（0として扱う）。
+   */
+  orchestratorEventsSent?: number | undefined;
+  /**
    * 直近の計画提案に対するReflex判定（Issue #1554）。判定を試みていなければ`undefined`。
    * 追加前に保存したrunには無い（`undefined`として扱う）。
    */
@@ -366,6 +458,82 @@ export interface TaskRun {
    * 項目の無い保存データは再開していないと読む。
    */
   reopenedAt?: string;
+  /**
+   * runの目的と完了条件（Issue #2088）。mergeのたびにOrchestratorが残りのタスクを目的に照らして見直す
+   * 拠り所にする。項目の無い保存データは目的なしと読む。
+   */
+  goal?: TaskRunGoal;
+  /**
+   * `set_goal`でgoalを直した記録（古い順、`MAX_GOAL_REVISIONS`件まで。Issue #2193）。Kanbanに出す。
+   * 項目の無い保存データは修正なしと読む。読むときは`readTaskRunGoalRevisions`を通す。
+   */
+  goalRevisions?: readonly TaskRunGoalRevision[];
+  /**
+   * 終了レビュー（Issue #2194）の記録。全タスクが終わってrunが終わったときにOrchestratorへ送り、
+   * 送ってから上限時間の間だけ、終わったrunへの`propose_plan`を受け付ける。項目の無い保存データは
+   * 終了レビューを送っていない（再開0回）と読む。読むときは`readTaskRunEndReview`を通す。
+   */
+  endReview?: TaskRunEndReview;
+  /**
+   * `start_run`で渡された最適化の依頼（Issue #2109）。指標・正しさの確認・パス・予算の案を含む外部由来の
+   * テキストで、承認済みの仕様ではない（仕様は`propose_plan`の`optimization`を人が承認して初めて決まる）。
+   * 項目の無い保存データは依頼なしと読む。
+   */
+  optimizeRequest?: OptimizeRequest;
+}
+
+/**
+ * runの目的と完了条件（Issue #2088・#2193）。どれも外部由来の文字列で、保存前に1行へ均してある。
+ * 読むときは`readTaskRunGoal`（`taskRunGoal.ts`）を通す（以前の版の固定文を目的なしとして扱うため）。
+ */
+export interface TaskRunGoal {
+  /** 目的。 */
+  objective: string;
+  /**
+   * 完了条件（観測できる結果）。満たしたら残りのタスクがあっても終了を提案する。ロードマップ本文に
+   * 目的の節しか無かったときは無い。
+   */
+  completionCriteria?: string;
+  /**
+   * 出所（Issue #2193）。`start`は起動時の引数、`roadmap`はロードマップ本文の節、`orchestrator`は
+   * `set_goal`。項目の無い保存データは以前の版が入れたもの。
+   */
+  source?: TaskRunGoalSource;
+}
+
+export type TaskRunGoalSource = 'start' | 'roadmap' | 'orchestrator';
+
+/** 終了レビューの記録（Issue #2194）。 */
+export interface TaskRunEndReview {
+  /** 最後に送った終了レビューが対象にした終わり（その時の`finishedAt`）。 */
+  finishedAt: string;
+  /** 最後に終了レビューを送った時刻（ISO8601）。再計画の受付時間はここから数える。 */
+  sentAt: string;
+  /** 終了レビューからの再計画で再開した回数（累計）。 */
+  reopens: number;
+  /**
+   * 最後に送った終了レビューの完了条件の判定（Issue #2195）。判定しなかった・判定できなかったときは
+   * 省く。項目の無い保存データは判定なしと読む。
+   */
+  lastVerdict?: TaskRunEndReviewVerdict;
+  /**
+   * 判定が未達のまま再開した回数（Issue #2195）。続けて未達だった分だけ数え、達した判定の後の再開で
+   * 0へ戻す。停滞の信号に使う。項目の無い保存データは0回と読む。
+   */
+  unmetReopens?: number;
+}
+
+/** 保存する終了レビューの判定。`met`は完了条件を満たした、`unmet`は満たしていない。 */
+export type TaskRunEndReviewVerdict = 'met' | 'unmet';
+
+/** `set_goal`でgoalを直した記録（Issue #2193）。 */
+export interface TaskRunGoalRevision {
+  /** 直した理由。外部由来（Orchestrator）の文字列で、保存前に1行へ均してある。 */
+  reason: string;
+  /** ISO8601。 */
+  at: string;
+  /** 直す前のgoal。無かったときは省く。 */
+  previous?: TaskRunGoal;
 }
 
 /** runが対象にするロードマップIssue（Issue #1623）。 */
@@ -475,6 +643,10 @@ export interface CreateTaskRunInput {
   title?: string;
   /** ロードマップIssueから始めるときの対象（Issue #1623）。 */
   roadmap?: TaskRunRoadmap;
+  /** 目的と完了条件（Issue #2088）。 */
+  goal?: TaskRunGoal;
+  /** 最適化の依頼（Issue #2109）。 */
+  optimizeRequest?: OptimizeRequest;
   now: Date;
 }
 
@@ -501,6 +673,8 @@ export function createTaskRun(input: CreateTaskRunInput): TaskRun {
     orchestratorGeneration: 0,
     orchestratorSessionRefs: [],
     ...(input.roadmap === undefined ? {} : { roadmap: input.roadmap }),
+    ...(input.goal === undefined ? {} : { goal: input.goal }),
+    ...(input.optimizeRequest === undefined ? {} : { optimizeRequest: input.optimizeRequest }),
   };
 }
 
@@ -531,6 +705,19 @@ export function isTaskDone(task: OrchestratedTask): boolean {
   return currentStage(task) === undefined;
 }
 
+/** 最適化のループの状態（Issue #2111）を保存する。タスクが無ければそのまま返す。 */
+export function recordOptimizeLoop(
+  run: TaskRun,
+  taskId: string,
+  state: OptimizeLoopState,
+  now: Date,
+): TaskRun {
+  const task = getTask(run, taskId);
+  return task === undefined
+    ? run
+    : withTask(run, { ...task, optimizeLoop: state, updatedAt: now.toISOString() });
+}
+
 function withTask(run: TaskRun, next: OrchestratedTask): TaskRun {
   if (!isValidTaskId(next.taskId)) {
     throw new Error(`不正なtaskId: ${next.taskId}`);
@@ -556,6 +743,8 @@ export interface TaskDraft {
   existingIssueNumber: number | undefined;
   /** ロードマップで完了済みの子Issue（Issue #1623）。全工程を飛ばした状態で作る。 */
   completedInRoadmap?: true;
+  /** 最適化の仕様（Issue #2106）。`parseOptimizationSpec`を通した値だけを入れる。 */
+  optimization?: OptimizationSpec;
 }
 
 /**
@@ -584,6 +773,7 @@ function newTask(draft: TaskDraft, executionId: string, at: string): Orchestrate
   const workStage = completed ? 'skipped' : 'notStarted';
   return {
     ...draft,
+    ...(draft.optimization === undefined ? {} : { hadOptimization: true as const }),
     executionId,
     stages: {
       issuePlan: emptyStage(issueStage),
@@ -651,20 +841,13 @@ export function proposeTaskPlan(
   const tasks: Record<string, OrchestratedTask> = {};
   for (const draft of drafts) {
     const existing = getTask(run, draft.taskId);
-    // 未着手のタスクで既存Issueが変わったら、Issue工程を飛ばすかどうかから作り直す
+    // 未着手のタスクで既存Issueが変わったら、Issue工程を飛ばすかどうかから作り直す（未承認になる）
     tasks[draft.taskId] =
       existing === undefined
         ? newTask(draft, newExecutionId(draft.taskId), at)
         : existing.existingIssueNumber !== draft.existingIssueNumber
-          ? newTask(draft, existing.executionId, at)
-          : {
-              ...existing,
-              title: draft.title,
-              summary: draft.summary,
-              acceptanceCriteria: draft.acceptanceCriteria,
-              dependsOn: draft.dependsOn,
-              updatedAt: at,
-            };
+          ? withHadOptimization(newTask(draft, existing.executionId, at), existing)
+          : withDraftContent(run, existing, draft, at);
   }
   const next: TaskRun = {
     ...run,
@@ -677,6 +860,71 @@ export function proposeTaskPlan(
   return next;
 }
 
+/**
+ * 既存のタスクの内容を計画の案で差し替える。承認済み（直前のrunが`approved`、または
+ * `planApproved`）で内容が変わらなければ承認済みのまま残し、変われば外す（Issue #2028）。
+ */
+function withDraftContent(
+  run: TaskRun,
+  existing: OrchestratedTask,
+  draft: TaskDraft,
+  at: string,
+): OrchestratedTask {
+  const wasApproved = run.planStatus === 'approved' || existing.planApproved === true;
+  const unchanged =
+    existing.title === draft.title &&
+    existing.summary === draft.summary &&
+    sameStrings(existing.acceptanceCriteria, draft.acceptanceCriteria) &&
+    sameStrings(existing.dependsOn, draft.dependsOn) &&
+    // 最適化の仕様は全項目を比べる。変更も削除も再承認を要する（Issue #2106）
+    sameOptimization(existing.optimization, draft.optimization);
+  const updated: OrchestratedTask = {
+    ...existing,
+    title: draft.title,
+    summary: draft.summary,
+    acceptanceCriteria: draft.acceptanceCriteria,
+    dependsOn: draft.dependsOn,
+    updatedAt: at,
+  };
+  if (draft.optimization === undefined) {
+    delete updated.optimization;
+    if (existing.optimization !== undefined) {
+      updated.hadOptimization = true;
+    }
+  } else {
+    updated.optimization = draft.optimization;
+    updated.hadOptimization = true;
+  }
+  if (wasApproved && unchanged) {
+    updated.planApproved = true;
+  } else {
+    delete updated.planApproved;
+  }
+  return updated;
+}
+
+/** 作り直したタスクへ、元のタスクが一度でも最適化の仕様を持った記録を引き継ぐ（Issue #2106）。 */
+function withHadOptimization(task: OrchestratedTask, existing: OrchestratedTask): OrchestratedTask {
+  return existing.hadOptimization === true || existing.optimization !== undefined
+    ? { ...task, hadOptimization: true }
+    : task;
+}
+
+function sameStrings(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+/**
+ * タスクを計画の承認済みとして扱えるか（Issue #2028）。runが`approved`なら全タスク、
+ * 承認待ちなら`planApproved`の付いたタスクだけ。計画作成中（`drafting`）は無い。
+ */
+export function isTaskPlanApproved(run: TaskRun, task: OrchestratedTask): boolean {
+  return (
+    run.planStatus === 'approved' ||
+    (run.planStatus === 'awaitingApproval' && task.planApproved === true)
+  );
+}
+
 /** 工程を1つでも始めた（飛ばした工程は数えない）。 */
 export function hasStarted(task: OrchestratedTask): boolean {
   return TASK_STAGES.some((stage) => {
@@ -685,9 +933,40 @@ export function hasStarted(task: OrchestratedTask): boolean {
   });
 }
 
-/** 承認待ちの計画を承認する。承認待ちでなければそのまま返す。 */
-export function approveTaskPlan(run: TaskRun): TaskRun {
-  return run.planStatus === 'awaitingApproval' ? { ...run, planStatus: 'approved' } : run;
+/** 計画を承認する主体（Issue #2106）。`human`はKanbanのwebviewからのメッセージの処理だけが渡す。 */
+export type PlanApprover = 'human' | 'orchestrator';
+
+/**
+ * 最適化の仕様を持つ（または一度でも持った）タスクか。指標や準備のコマンドは拡張がsandboxの外で
+ * 実行するので、人だけが承認できる（Issue #2106）。
+ */
+export function isHumanApprovalTask(task: OrchestratedTask): boolean {
+  return task.optimization !== undefined || task.hadOptimization === true;
+}
+
+/** 計画に、人だけが承認できるタスクが含まれるか。含まれるとき`approve_plan`とReflexの自動承認は効かない。 */
+export function planRequiresHumanApproval(run: TaskRun): boolean {
+  return listTasks(run).some(isHumanApprovalTask);
+}
+
+/**
+ * 承認待ちの計画を承認し、全タスクを承認済みにする（Issue #2028）。承認待ちでなければそのまま返す。
+ * 人だけが承認できるタスクを含む計画は、承認者が`human`でなければそのまま返す（Issue #2106）。
+ */
+export function approveTaskPlan(run: TaskRun, approver: PlanApprover = 'orchestrator'): TaskRun {
+  if (run.planStatus !== 'awaitingApproval') {
+    return run;
+  }
+  if (approver !== 'human' && planRequiresHumanApproval(run)) {
+    return run;
+  }
+  const tasks: Record<string, OrchestratedTask> = { ...run.tasks };
+  for (const task of listTasks(run)) {
+    if (task.planApproved !== true) {
+      tasks[task.taskId] = { ...task, planApproved: true };
+    }
+  }
+  return { ...run, planStatus: 'approved', tasks };
 }
 
 /** 直近の計画提案に対するReflex判定を記録する（Issue #1554）。判定を試みていなければ`undefined`。 */
@@ -821,6 +1100,7 @@ export function startStageAttempt(
     currentAttemptId: attempt.attemptId,
     attention: 'none',
     failure: undefined,
+    haltCause: undefined,
     updatedAt: at,
   });
 }
@@ -863,12 +1143,16 @@ export type StageOutput =
  * 工程の完了を確定する。報告の受付（`checkStageReport`）と、Controllerが観測した事実による
  * 完了条件の確認（forgeのIssue・PR、ブランチ）は呼び出し側が先に済ませる前提。
  * mergeとcleanupが終わるとタスクは終わる。
+ *
+ * `summary`（工程報告の要約）があれば工程ごとに切って残す。reviewの成果には`summary`から読んだ
+ * 台帳の集計を添える（Issue #2192）。台帳が読めなくても完了は記録する。
  */
 export function completeStage(
   run: TaskRun,
   ref: StageReportRef,
   output: StageOutput,
   now: Date,
+  summary?: string,
 ): TaskRun {
   const checked = checkStageReport(run, ref);
   if (!checked.ok || output.stage !== ref.stage) {
@@ -890,9 +1174,41 @@ export function completeStage(
         : output.stage === 'implement'
           ? { ...closed, pullRequest: output.pullRequest }
           : output.stage === 'review'
-            ? { ...closed, review: output.review }
+            ? { ...closed, review: withReviewLedger(output.review) }
             : closed;
-  return withTask(run, { ...withOutput, attention: 'none', failure: undefined, updatedAt: at });
+  const trimmed = summary?.trim() ?? '';
+  const withSummary: OrchestratedTask =
+    trimmed === ''
+      ? withOutput
+      : {
+          ...withOutput,
+          stageSummaries: {
+            ...withOutput.stageSummaries,
+            [ref.stage]: trimmed.slice(0, MAX_STORED_STAGE_SUMMARY_LENGTH),
+          },
+        };
+  return withTask(run, {
+    ...withSummary,
+    attention: 'none',
+    failure: undefined,
+    haltCause: undefined,
+    updatedAt: at,
+  });
+}
+
+/**
+ * reviewの成果に台帳の集計を添える（Issue #2192）。台帳は`reviewSummary`に書かせている（#2065）。
+ * 既に集計を持つ成果（呼び出し側で計算済み）はそのまま返す。
+ */
+function withReviewLedger(review: StageReviewResult): StageReviewResult {
+  if (review.ledger !== undefined) {
+    return review;
+  }
+  const digest = digestLedger(review.summary);
+  return {
+    ...review,
+    ledger: digest === undefined ? { kind: 'none' } : { kind: 'parsed', digest },
+  };
 }
 
 /** 「実装とPR作成」の開始時に作ったworktreeとブランチを記録する。 */
@@ -929,6 +1245,7 @@ export function haltStage(
   attention: Extract<TaskAttention, 'needsAction' | 'failed' | 'stopped' | 'awaitingUser'>,
   failure: string | undefined,
   now: Date,
+  cause?: 'reload',
 ): TaskRun {
   const task = getTask(run, taskId);
   const stage = task === undefined ? undefined : currentStage(task);
@@ -943,6 +1260,7 @@ export function haltStage(
     }),
     attention,
     failure,
+    haltCause: cause,
     updatedAt: at,
   });
 }
@@ -1084,6 +1402,7 @@ export function resetStageForRetry(run: TaskRun, taskId: string, now: Date): Tas
     ...withStage(task, stage, { status: 'notStarted', pendingDecision: undefined }),
     attention: 'none',
     failure: undefined,
+    haltCause: undefined,
     updatedAt: now.toISOString(),
   });
 }
@@ -1109,7 +1428,13 @@ export function completeMergedTask(run: TaskRun, taskId: string, now: Date): Tas
       });
     }
   }
-  return withTask(run, { ...next, attention: 'none', failure: undefined, updatedAt: at });
+  return withTask(run, {
+    ...next,
+    attention: 'none',
+    failure: undefined,
+    haltCause: undefined,
+    updatedAt: at,
+  });
 }
 
 /**
@@ -1148,6 +1473,7 @@ export function closeTaskWithoutMerge(
     ...next,
     attention: 'none',
     failure: undefined,
+    haltCause: undefined,
     pause: undefined,
     closedWithoutMerge: { reason: closure.reason, by: closure.by, at },
     updatedAt: at,
@@ -1303,6 +1629,17 @@ export function recordOrchestratorSession(run: TaskRun, sessionId: string): Task
     return run;
   }
   return { ...run, orchestratorSessionRefs: [...run.orchestratorSessionRefs, sessionId] };
+}
+
+/**
+ * Orchestratorへ送ったイベント通知の数を保存する（Issue #2034）。保存値以下なら同じ`run`を返し、
+ * 書き込みを起こさない（数は増えるだけで、遅れて届いた古い数で戻さない）。
+ */
+export function recordOrchestratorEventsSent(run: TaskRun, count: number): TaskRun {
+  if (count <= (run.orchestratorEventsSent ?? 0)) {
+    return run;
+  }
+  return { ...run, orchestratorEventsSent: count };
 }
 
 /** 自動引き継ぎで世代`generation`を起こしたことを記録する（Issue #1553）。 */

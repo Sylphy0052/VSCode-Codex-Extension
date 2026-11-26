@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 import { readChatSkinConfig } from '../config';
 import type { Logger } from '../log';
+import type { OptimizeTrialRecord } from '../orchestrator/optimizeLedger';
 import { MAX_USER_ANSWER_LENGTH, parseUserAnswer } from '../orchestrator/roadmapQuestionMcp';
 import type { TaskRunController } from '../orchestrator/taskRunController';
 import type { TaskRunOrchestratorStatus } from '../orchestrator/taskRunOrchestrator';
@@ -27,6 +28,8 @@ import {
 
 /** 盤面を送る間隔。最初はすぐ送り以降はまとめる。 */
 const POST_INTERVAL_MS = 250;
+/** 確認で取りやめたときに`finishRun`・`suspendRun`・`resumeRun`が返す文。 */
+const CANCELLED = '取りやめました';
 
 /** Kanbanから使うOrchestratorの口。 */
 export interface TaskRunKanbanOrchestratorPort {
@@ -53,6 +56,8 @@ export interface TaskRunKanbanViewDeps {
     runId: string,
     options?: { parallel?: boolean },
   ): Promise<{ ok: boolean; message: string }>;
+  /** 最適化のタスクの台帳の記録を読む（Issue #2109）。無ければ試行の一覧は出さない。 */
+  readOptimizeTrials?(runId: string, taskId: string): Promise<OptimizeTrialRecord[]>;
   log: Logger;
 }
 
@@ -190,15 +195,22 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
     this.dirty = false;
     this.lastPostAt = Date.now();
-    const board = this.deps.controller.board(this.selectedRunId, currentWorkspaceFolders());
+    const folders = currentWorkspaceFolders();
+    const plainBoard = this.deps.controller.board(this.selectedRunId, folders);
+    // 専有権の状態（Issue #1628）。他ウィンドウが持っているときだけKanbanに読み取り専用の案内を出す
+    const seq = ++this.postSeq;
+    // 最適化のタスクがあるときだけ台帳を読み、試行の採否と指標の推移を盤面へ足す（Issue #2109）
+    const trials = await this.readOptimizeTrials(plainBoard.run?.runId);
+    const board =
+      trials.size === 0
+        ? plainBoard
+        : this.deps.controller.board(plainBoard.run?.runId, folders, trials);
     const orchestrator =
       board.run === undefined ? undefined : this.deps.orchestrator.status(board.run.runId);
     const graph =
       board.run === undefined
         ? undefined
         : layoutTaskRunGraph(board.run.columns, this.graphViewportWidth);
-    // 専有権の状態（Issue #1628）。他ウィンドウが持っているときだけKanbanに読み取り専用の案内を出す
-    const seq = ++this.postSeq;
     const lease =
       board.run === undefined ? undefined : await this.deps.controller.leaseStatus(board.run.runId);
     // 選択していないrunも、run一覧で別のウィンドウが持っていると分かるようにする（Issue #1641）。
@@ -224,6 +236,36 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       lease,
       heldElsewhere,
     });
+  }
+
+  /**
+   * runの最適化のタスク（`optimizeLoop`か`optimizeSummary`を持つ）の台帳を読む。読めなかった
+   * タスクは状態だけで表示する（台帳の読み取りの失敗で盤面を止めない）。
+   */
+  private async readOptimizeTrials(
+    runId: string | undefined,
+  ): Promise<Map<string, OptimizeTrialRecord[]>> {
+    const result = new Map<string, OptimizeTrialRecord[]>();
+    const read = this.deps.readOptimizeTrials;
+    const run = runId === undefined ? undefined : this.deps.controller.find(runId);
+    if (read === undefined || run === undefined) {
+      return result;
+    }
+    const targets = Object.values(run.tasks).filter(
+      (t) => t.optimizeLoop !== undefined || t.optimizeSummary !== undefined,
+    );
+    await Promise.all(
+      targets.map(async (task) => {
+        try {
+          result.set(task.taskId, await read(run.runId, task.taskId));
+        } catch (e: unknown) {
+          this.deps.log.warn(
+            `最適化の台帳を読めない（${run.runId}/${task.taskId}）: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }),
+    );
+    return result;
   }
 
   private receive(message: unknown): void {
@@ -268,7 +310,8 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     const controller = this.deps.controller;
     switch (message.type) {
       case 'approvePlan':
-        warnIfRejected(await controller.approvePlan(runId));
+        // 承認者`human`を渡してよいのはこのメッセージの処理だけ（Issue #2106）
+        warnIfRejected(await controller.approvePlan(runId, undefined, 'human'));
         return;
       case 'syncRoadmap': {
         const result = await controller.syncRoadmap(runId);
@@ -371,6 +414,51 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
   }
 
+  /**
+   * Mission Controlからタスクの工程を止める（Issue #2162）。Kanbanの「停止」と同じ条件
+   * （`canStop`）と確認を通す。失敗・取りやめなら理由の文を返す。
+   */
+  async stopTaskStage(runId: string, taskId: string): Promise<string | undefined> {
+    const card = this.findCard(runId, taskId);
+    if (card === undefined || !card.canStop) {
+      return '止められる工程ではありません';
+    }
+    const choice = await vscode.window.showWarningMessage(
+      `${taskId}の工程を停止しますか？ worktreeとブランチは残り、後で「やり直す」で始め直せます。`,
+      { modal: true },
+      '停止する',
+    );
+    if (choice !== '停止する') {
+      return CANCELLED;
+    }
+    const result = await this.deps.controller.stopStage(runId, taskId);
+    this.schedulePost();
+    return result.ok ? undefined : result.message;
+  }
+
+  /**
+   * Mission Controlからタスクの工程をやり直す（Issue #2162）。Kanbanの「やり直す」と同じ
+   * `retryStage`を、ボタンを出す条件（`canRetry`）のときだけ呼ぶ。
+   */
+  async retryTaskStage(runId: string, taskId: string): Promise<string | undefined> {
+    const card = this.findCard(runId, taskId);
+    if (card === undefined || !card.canRetry) {
+      return 'やり直せる工程ではありません';
+    }
+    // MCではキー1つ（Shift+G）で届くので、押し間違いで工程を始め直さないよう確認を出す
+    const choice = await vscode.window.showWarningMessage(
+      `${taskId}の工程をやり直しますか？`,
+      { modal: true },
+      'やり直す',
+    );
+    if (choice !== 'やり直す') {
+      return CANCELLED;
+    }
+    const result = await this.deps.controller.retryStage(runId, taskId);
+    this.schedulePost();
+    return result.ok ? undefined : result.message;
+  }
+
   /** 質問への回答。回答待ちでなくなっていれば（既に回答済み・取り消し済み）知らせる。 */
   private async answerQuestion(
     runId: string,
@@ -439,17 +527,32 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     }
   }
 
-  /** レビューの関門の決着（差し戻す・このまま進める）。失敗の関門は「やり直す」で決着させる。 */
+  /** レビュー・最適化の関門の決着。失敗の関門は「やり直す」で決着させる。 */
   private async resolveGate(
     runId: string,
     taskId: string,
     gateId: unknown,
     choice: unknown,
   ): Promise<void> {
-    if (typeof gateId !== 'string' || (choice !== 'sendBack' && choice !== 'proceed')) {
+    if (
+      typeof gateId !== 'string' ||
+      (choice !== 'sendBack' && choice !== 'proceed' && choice !== 'close')
+    ) {
       return;
     }
-    const result = await this.deps.controller.resolveGate(runId, taskId, gateId, choice);
+    // `close`は最適化の関門（Issue #2106）だけがここから選べる。理由が要るので人の操作として記録する
+    const result =
+      choice === 'close'
+        ? await this.deps.controller.resolveGate(
+            runId,
+            taskId,
+            gateId,
+            choice,
+            'user',
+            undefined,
+            '最適化の関門でユーザーがmergeせずに完了にした',
+          )
+        : await this.deps.controller.resolveGate(runId, taskId, gateId, choice);
     if (!result.ok) {
       void vscode.window.showInformationMessage(`${taskId}: ${result.message}`);
     }
@@ -482,7 +585,11 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
     this.schedulePost();
   }
 
-  private async finishRun(runId: string): Promise<void> {
+  /**
+   * 確かめてからrunを終える。Mission Control（Issue #2150）からも呼ぶ。終えたら`undefined`、
+   * 取りやめ・失敗なら理由の文を返す（失敗は警告も出す）。
+   */
+  async finishRun(runId: string): Promise<string | undefined> {
     const choice = await vscode.window.showWarningMessage(
       'このrunを終えますか？',
       {
@@ -493,16 +600,19 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       'runを終える',
     );
     if (choice !== 'runを終える') {
-      return;
+      return CANCELLED;
     }
-    warnIfRejected(await this.deps.finishRun(runId));
+    const result = await this.deps.finishRun(runId);
+    warnIfRejected(result);
     this.schedulePost();
+    return result.ok ? undefined : result.message;
   }
 
-  private async suspendRun(runId: string): Promise<void> {
+  /** 確かめてからrunを中断する。戻り値は`finishRun`と同じ。 */
+  async suspendRun(runId: string): Promise<string | undefined> {
     const run = this.deps.controller.find(runId);
     if (run === undefined || !isTaskRunActive(run)) {
-      return;
+      return '動いているrunではありません';
     }
     const choice = await vscode.window.showWarningMessage(
       'このrunを中断しますか？',
@@ -514,10 +624,12 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
       'runを中断する',
     );
     if (choice !== 'runを中断する') {
-      return;
+      return CANCELLED;
     }
-    warnIfRejected(await this.deps.suspendRun(runId));
+    const result = await this.deps.suspendRun(runId);
+    warnIfRejected(result);
     this.schedulePost();
+    return result.ok ? undefined : result.message;
   }
 
   /**
@@ -560,10 +672,10 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
    * 中断したrunを再開する。同じフォルダに動いているrunがあれば、並行して再開するか、（1本だけなら）
    * そちらを中断して入れ替えるかを確かめる（Issue #1562）。runの切り替えコマンド（Issue #1561）からも呼ぶ。
    */
-  async resumeRun(runId: string): Promise<void> {
+  async resumeRun(runId: string): Promise<string | undefined> {
     const run = this.deps.controller.find(runId);
     if (run === undefined || run.finishedAt !== undefined || run.suspendedAt === undefined) {
-      return;
+      return '中断中のrunではありません';
     }
     const active = this.deps.controller
       .listActive(run.workspaceRoot)
@@ -592,15 +704,17 @@ export class TaskRunKanbanViewManager implements vscode.Disposable {
         const suspended = await this.deps.suspendRun(active[0]!.runId);
         if (!suspended.ok) {
           warnIfRejected(suspended);
-          return;
+          return suspended.message;
         }
       } else {
-        return;
+        return CANCELLED;
       }
     }
-    warnIfRejected(await this.deps.resumeRun(runId, { parallel }));
+    const result = await this.deps.resumeRun(runId, { parallel });
+    warnIfRejected(result);
     this.selectedRunId = runId;
     this.schedulePost();
+    return result.ok ? undefined : result.message;
   }
 
   /** PRのURLは外部由来。httpsのURLであることを確かめてから開く。 */
@@ -679,6 +793,18 @@ h1 { font-size: 22px; margin: 2px 0 6px; } .eyebrow { color: var(--vscode-descri
 .badge { border: 1px solid var(--vscode-panel-border); border-radius: 999px; font-size: 11px; padding: 1px 7px; } .badge.warn { border-color: var(--vscode-charts-yellow); color: var(--vscode-charts-yellow); } .badge.ok { border-color: var(--vscode-charts-blue); color: var(--vscode-charts-blue); }
 .dep.unmet { text-decoration: underline dotted; color: var(--vscode-charts-yellow); }
 .failure { color: var(--vscode-errorForeground); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
+.optimize { margin-top: 8px; border-top: 1px dashed var(--vscode-panel-border); padding-top: 6px; font-size: 12px; }
+.optimize-summary { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.optimize-trend { width: 100%; max-width: 240px; height: 44px; display: block; margin-top: 4px; }
+.optimize-trend polyline { fill: none; stroke: var(--vscode-descriptionForeground); stroke-width: 1; }
+.optimize-trend circle.adopted { fill: var(--vscode-charts-green); }
+.optimize-trend circle.rejected { fill: var(--vscode-charts-yellow); }
+.optimize-trend circle.invalid { fill: var(--vscode-errorForeground); }
+.optimize-trend circle.baseline { fill: var(--vscode-charts-blue); }
+.optimize-rows { margin: 4px 0 0; padding: 0; list-style: none; max-height: 200px; overflow-y: auto; }
+.optimize-rows li { margin-top: 2px; overflow-wrap: anywhere; }
+.optimize-rows .adopted { color: var(--vscode-charts-green); }
+.optimize-rows .invalid { color: var(--vscode-errorForeground); }
 .paused { color: var(--vscode-editorWarning-foreground); font-size: 12px; margin-top: 6px; overflow-wrap: anywhere; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .link { appearance: none; background: none; border: 0; padding: 0; color: var(--vscode-textLink-foreground); font: inherit; font-size: 12px; cursor: pointer; }
@@ -792,6 +918,8 @@ const script = `
   let current;
   // 概要を展開したカード。盤面の再描画で畳まれないよう覚えておく
   const expandedSummaries = new Set();
+  // 完了列を展開しているか（Issue #2036）。既定は畳む。完了したタスクの数だけ列が伸び、未完了の列が埋もれるため
+  let doneExpanded = savedState.doneExpanded === true;
   let orchestratorStatus;
   // 専有権（Issue #1628）。他ウィンドウが持っているときだけ{ heldByOther: true, holderText }が届く
   let leaseStatus;
@@ -887,6 +1015,19 @@ const script = `
         controls.appendChild(noticeEl);
       }
     }
+    if (run.goal) {
+      // runの目的（Issue #2193）。直した記録は理由と一緒にツールチップで見せる
+      const goal = run.goal;
+      const goalText = goal.objective
+        ? '目的: ' + goal.objective + (goal.completionCriteria ? ' / 完了条件: ' + goal.completionCriteria : '')
+        : '目的: なし';
+      const goalEl = el('span', 'status', goalText + (goal.revisionCount > 0 ? '（' + goal.revisionCount + '回修正）' : ''));
+      goalEl.title = [goalText].concat(goal.revisions.map(function (r) {
+        const at = new Date(r.at);
+        return (isNaN(at.getTime()) ? r.at : at.toLocaleString()) + ' 修正の理由: ' + r.reason + '（直す前: ' + r.previous + '）';
+      })).join(String.fromCharCode(10));
+      controls.appendChild(goalEl);
+    }
     controls.appendChild(button('名前を変更', '', function () { send('renameRun'); }));
     if (orchestratorStatus && !run.suspended) {
       // 世代番号と自動引き継ぎの発生を並べて出す（Issue #1553）
@@ -934,23 +1075,63 @@ const script = `
       // 自動承認（Issue #1554）のときだけ、判定理由を短く残す
       if (run.planReview && run.planReview.autoApproved) {
         const box = el('div', 'plan-box');
-        box.appendChild(el('span', undefined, 'Reflexが計画を妥当と判定し、自動で承認しました。'));
-        box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
+        if (run.planReview.orchestrator) {
+          // approve_planの3段（Issue #2073）。承認した主体はOrchestrator
+          box.appendChild(el('span', undefined, 'Orchestratorが、自己確認・セカンドオピニオン・Reflexの3段を通した計画を承認しました。'));
+          appendPlanReviewStages(box, run.planReview);
+        } else {
+          box.appendChild(el('span', undefined, 'Reflexが計画を妥当と判定し、自動で承認しました。'));
+          box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
+        }
         planEl.appendChild(box);
       }
       return;
     }
     const box = el('div', 'plan-box');
     if (run.planStatus === 'awaitingApproval') {
-      box.appendChild(el('span', undefined, 'Orchestratorが計画を提案しました。「計画承認待ち」の列を確かめて承認してください。変更したいときはOrchestratorのチャットで伝えます。'));
-      if (run.planReview) {
+      box.appendChild(el('span', undefined, 'Orchestratorが計画を提案しました。「計画承認待ち」の列と「計画の承認待ち」の印が付いたタスクを確かめて承認してください。承認を待つのは新しいタスクと内容を変えたタスクだけで、前回承認したままのタスクは進み続けます。変更したいときはOrchestratorのチャットで伝えます。'));
+      if (run.planReview && run.planReview.orchestrator) {
+        box.appendChild(el('div', 'question-note', 'Orchestratorの承認審査は通らなかった（承認していません）。'));
+        appendPlanReviewStages(box, run.planReview);
+      } else if (run.planReview) {
         box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + run.planReview.summary));
       }
+      if (run.planHumanOnly) {
+        box.appendChild(el('div', 'question-note', 'この計画には最適化の仕様を持つタスクがあります。指標・準備・正しさのコマンドは拡張機能がsandboxの外で実行するため、人がここで承認したときだけ承認済みになります（Orchestratorの承認とReflexの自動承認は効きません）。下のコマンドの全文を確かめてから承認してください。'));
+      }
+      (run.optimizationApprovals || []).forEach(function (entry) {
+        const spec = el('div', 'optimization-spec');
+        spec.appendChild(el('div', 'question-text', entry.taskId + ' ' + entry.title + ' の最適化の仕様'));
+        entry.items.forEach(function (item) {
+          const row = el('div', 'gate-detail');
+          row.appendChild(el('strong', undefined, item.label + ': '));
+          row.appendChild(el('code', undefined, item.value));
+          spec.appendChild(row);
+        });
+        box.appendChild(spec);
+      });
       box.appendChild(button('計画を承認', 'primary', function () { send('approvePlan'); }));
     } else {
       box.appendChild(el('span', undefined, 'Orchestratorが計画を作成中です。やりたいことはOrchestratorのチャットで伝えます。'));
     }
     planEl.appendChild(box);
+  }
+
+  // approve_planの3段（自己確認・セカンドオピニオン・Reflex）の結果を1段1行で出す（Issue #2073）
+  function appendPlanReviewStages(box, review) {
+    const o = review.orchestrator;
+    box.appendChild(el('div', 'question-note', '自己確認: ' + (o.selfCheck || '（なし）')));
+    const labels = { valid: '妥当', wrong: '誤りがある', unknown: '判定不能' };
+    if (o.secondOpinion) {
+      let text = 'セカンドオピニオン: ' + labels[o.secondOpinion.verdict];
+      if (o.secondOpinion.findings.length > 0) {
+        text += '（指摘: ' + o.secondOpinion.findings.join(' / ') + '）';
+      }
+      box.appendChild(el('div', 'question-note', text));
+    } else {
+      box.appendChild(el('div', 'question-note', 'セカンドオピニオン: 未実施'));
+    }
+    box.appendChild(el('div', 'question-note', 'Reflexの判定: ' + review.summary));
   }
 
   function renderQuestion(card, q) {
@@ -1032,7 +1213,7 @@ const script = `
 
   function renderGate(card, gate) {
     const box = el('div', 'gate');
-    const title = gate.kind === 'reviewFindings' ? 'レビュー後の関門' : '「' + gate.stageLabel + '」の失敗の関門';
+    const title = gate.kind === 'reviewFindings' ? 'レビュー後の関門' : gate.kind === 'optimization' ? '最適化の関門（人だけが決着できます）' : '「' + gate.stageLabel + '」の失敗の関門';
     const status = gate.judging ? '（Reflexが判定中）' : gate.awaitingOrchestrator ? '（オーケストレーターが判断中）' : '（判断待ち）';
     box.appendChild(el('div', 'question-text', title + status));
     box.appendChild(el('div', 'gate-detail', gate.detail));
@@ -1045,6 +1226,41 @@ const script = `
         }));
       });
       box.appendChild(actions);
+    }
+    return box;
+  }
+
+  // 最適化のタスクの基準値・最良値・試行ごとの採否・指標の推移（Issue #2109）。試行の仮説と理由は
+  // 外部由来のテキストなので、textContentだけで出す
+  function renderOptimize(opt) {
+    const box = el('div', 'optimize');
+    const summary = el('div', 'optimize-summary');
+    summary.appendChild(el('span', undefined, '基準値: ' + (opt.baseline === undefined || opt.baseline === null ? '未計測' : opt.baseline)));
+    summary.appendChild(el('span', undefined, '最良値: ' + (opt.best === undefined || opt.best === null ? 'なし' : opt.best)));
+    summary.appendChild(el('span', undefined, '試行: ' + opt.trials + '回'));
+    box.appendChild(summary);
+    if (opt.trend.length > 1) {
+      const svg = svgEl('svg', { class: 'optimize-trend', viewBox: '-4 -4 208 48', role: 'img', 'aria-label': '指標の推移' });
+      svg.appendChild(svgEl('polyline', { points: opt.trend.map(function (p) { return p.x.toFixed(1) + ',' + p.y.toFixed(1); }).join(' ') }));
+      opt.trend.forEach(function (p) {
+        const dot = svgEl('circle', { class: p.kind, cx: p.x.toFixed(1), cy: p.y.toFixed(1), r: 2.5 });
+        const tip = svgEl('title');
+        tip.textContent = p.label + ': ' + p.value;
+        dot.appendChild(tip);
+        svg.appendChild(dot);
+      });
+      box.appendChild(svg);
+    }
+    if (opt.omitted > 0) { box.appendChild(el('div', 'summary', '古い試行' + opt.omitted + '件は省略')); }
+    if (opt.rows.length > 0) {
+      const list = el('ul', 'optimize-rows');
+      opt.rows.forEach(function (r) {
+        const item = el('li', r.outcome);
+        const metric = r.metric === undefined || r.metric === null ? '測れず' : r.metric;
+        item.textContent = '#' + r.trial + ' ' + r.outcomeLabel + ' (' + metric + ')' + (r.reason ? ' ' + r.reason : '') + (r.hypothesis ? ' / 仮説: ' + r.hypothesis : '');
+        list.appendChild(item);
+      });
+      box.appendChild(list);
     }
     return box;
   }
@@ -1093,6 +1309,7 @@ const script = `
     if (meta.childNodes.length > 0) { c.appendChild(meta); }
     if (card.failure) { c.appendChild(el('div', 'failure', card.failure)); }
     if (card.pauseReason) { c.appendChild(el('div', 'paused', '一時停止の理由: ' + card.pauseReason)); }
+    if (card.optimize) { c.appendChild(renderOptimize(card.optimize)); }
     const actions = el('div', 'actions');
     if (card.canReveal) { actions.appendChild(button('セッションを開く', '', function () { send('revealStage', { taskId: card.taskId }); })); }
     if (card.canStop) { actions.appendChild(button('停止', '', function () { send('stopStage', { taskId: card.taskId }); })); }
@@ -1151,11 +1368,25 @@ const script = `
       head.appendChild(el('span', 'count', String(cards.length)));
       column.appendChild(head);
       const list = el('div', 'cards');
-      if (cards.length === 0) { list.appendChild(el('div', 'empty', 'なし')); }
-      cards.forEach(function (card) { list.appendChild(renderCard(card)); });
+      if (cards.length === 0) {
+        list.appendChild(el('div', 'empty', 'なし'));
+      } else if (col[0] === 'done' && !doneExpanded) {
+        list.appendChild(button('完了' + cards.length + '件を表示する', 'done-toggle', function () { setDoneExpanded(true); }));
+      } else {
+        if (col[0] === 'done') {
+          list.appendChild(button('畳む', 'done-toggle', function () { setDoneExpanded(false); }));
+        }
+        cards.forEach(function (card) { list.appendChild(renderCard(card)); });
+      }
       column.appendChild(list);
       boardEl.appendChild(column);
     });
+  }
+
+  function setDoneExpanded(expanded) {
+    doneExpanded = expanded;
+    saveViewState();
+    if (current) { renderBoard(current); }
   }
 
   ${GRAPH_SVG_SOURCE}
@@ -1163,6 +1394,7 @@ const script = `
   function saveViewState() {
     vscode.setState({
       viewMode: viewMode,
+      doneExpanded: doneExpanded,
       selectedTask: selectedTask ? selectedTask.taskId : undefined,
       selectedTaskRunId: selectedTask ? selectedTask.runId : undefined,
       // ウィンドウを開き直したときに同じrunを出す（Issue #1775、restorePanel）

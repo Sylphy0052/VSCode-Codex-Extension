@@ -223,6 +223,11 @@ export interface TaskSessionInput {
    */
   autoHandoffAutoApprove?: boolean;
   /**
+   * 環境変数`SKILL_RETRO_DISABLE=1`を渡し、pluginのStop hook（skill使用後に振り返りを促して停止を
+   * 止める）が工程を邪魔しないようにする。工程セッションだけが`true`を渡す（Issue #2087）。
+   */
+  suppressSkillRetro?: boolean;
+  /**
    * Reflexモード（`agent.chat.reflex.enabled`）の親スイッチを、このセッションだけ上書きする
    * （Issue #1505 仕様6）。省略時はグローバル設定に従う。個別の機能のON/OFF
    * （`agent.chat.loopDoneCheck.enabled`など）と閾値はグローバル設定のまま使う。
@@ -439,6 +444,13 @@ export interface TaskSession {
    * （`memoryFreed: false`）。呼んだ後のセッションは`dispose`済みとして扱う。
    */
   releaseForPause?(): Promise<{ memoryFreed: boolean }>;
+  /**
+   * 引き継ぎで前の世代を止める（Issue #2146）。進行中のターンを中断し、CLIとその子孫の終了を
+   * 待つ。タブと会話は残す（表示の問題として分け、プロセスは止める）。`graceMs`の間に終わらず
+   * シグナルで止めたら`forced`を`true`で返す。止めるプロセスが無ければ`undefined`。
+   * claudeだけが実装する（codexのapp-serverは全スレッドで共有しており、止められない）。
+   */
+  haltProcess?(options: { graceMs: number }): Promise<{ forced: boolean } | undefined>;
   /** タブを前面に出す。閉じられていれば作り直し、それまでの会話を復元する。 */
   reveal(): void;
   /**

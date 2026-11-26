@@ -1,11 +1,8 @@
 import * as assert from 'node:assert/strict';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { createFakeClaudeSpawn, type FakeClaudeProcess } from './helpers/chat';
 import { activateExtension, type ChatTestApiLike } from './helpers/extension';
-import { readManifest } from './helpers/manifest';
-import { waitFor, waitForFileContent } from './helpers/waitFor';
+import { waitFor } from './helpers/waitFor';
 
 /**
  * Claude Code画面: 設定変更・コマンド送信・巻き戻し・入力欄モードの配線（Issue #188、親Issue #186）。
@@ -13,7 +10,7 @@ import { waitFor, waitForFileContent } from './helpers/waitFor';
  * `docs/manual-test.md` の仕分け（Issue #186）で「機械」に入ったL群のうち、コンテキスト残量と
  * 手動圧縮（L-12）・`set_model` / `set_permission_mode` の送信（L-14）・Plan modeの往復
  * （L-15）・レビューボタンの送信内容（L-24）・`rewind_files` のパラメータ（L-29）・行頭
- * `!` / `#` が拡張機能側で完結すること（L-39 / L-40）を扱う。
+ * `!` が拡張機能側で完結すること（L-39）を扱う。
  *
  * `chatClaudeHandshake.test.ts` / `chatClaudeThreadFlow.test.ts` と同じく
  * `ChatTestApi.simulateClaudeWebviewMessage` でwebviewからの発言・操作を模擬する。
@@ -490,65 +487,5 @@ suite('Claude Code画面: 設定変更・コマンド・入力欄モードの配
       terminalsBefore,
       '同じ名前のターミナルが再利用されず増えている',
     );
-  });
-
-  test('L-40: 行頭#はCLIへ送らず、確認後にCLAUDE.mdへ直接追記する', async function () {
-    this.timeout(TEST_TIMEOUT_MS);
-    const manifest = readManifest();
-    const claudeMdPath = path.join(manifest.workspaceFolder, 'CLAUDE.md');
-    if (fs.existsSync(claudeMdPath)) {
-      fs.rmSync(claudeMdPath);
-    }
-
-    try {
-      const { proc, sessionId } = await openClaudeChat();
-      const initRequestId = (
-        await waitFor(
-          () => proc.writtenLines(),
-          (lines) => lines.length > 0,
-          WAIT_OPTIONS,
-        )
-      )[0]?.['request_id'] as string;
-      proc.emitLine(initializeSuccessResponse(initRequestId));
-      const before = proc.writtenLines().length;
-
-      let content = '';
-      const originalPick = vscode.window.showQuickPick;
-      const originalWarning = vscode.window.showWarningMessage;
-      try {
-        // QuickPickの先頭候補（プロジェクト側）を選んだふりをする
-        vscode.window.showQuickPick = (async (items: unknown) => {
-          const resolved = (await items) as unknown[];
-          return resolved[0];
-        }) as typeof vscode.window.showQuickPick;
-        acceptWarnings();
-        await chat.simulateClaudeWebviewMessage(sessionId, {
-          type: 'send',
-          text: '#常にpnpmを使う',
-        });
-        // 存在ではなく内容を待つ。存在だけを待つと、作られてから書き込みが終わるまでの
-        // 間に読んで `''` を得る（Issue #541、6並列18回中2回再現）
-        content = await waitForFileContent(
-          claudeMdPath,
-          (text) => /- 常にpnpmを使う/.test(text),
-          WAIT_OPTIONS,
-        );
-      } finally {
-        vscode.window.showQuickPick = originalPick;
-        vscode.window.showWarningMessage = originalWarning;
-      }
-
-      // CLIへは一切送られていない（control_requestに専用の経路が無いため拡張機能側で完結する）
-      assert.equal(
-        proc.writtenLines().length,
-        before,
-        'CLIへ送られている（#常にpnpmを使うが発言として届いている）',
-      );
-      assert.match(content, /- 常にpnpmを使う/);
-    } finally {
-      if (fs.existsSync(claudeMdPath)) {
-        fs.rmSync(claudeMdPath);
-      }
-    }
   });
 });

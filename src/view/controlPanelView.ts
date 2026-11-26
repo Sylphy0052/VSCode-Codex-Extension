@@ -108,6 +108,13 @@ interface PanelState extends Omit<SettingsSnapshot, 'importHistory'> {
 /** アカウントの切り替えに要るもの（Issue #1921）。 */
 export interface ClaudeAccountDeps {
   store: ClaudeAccountStore;
+  /**
+   * 手動で切り替える直前に呼ぶ。切り替え前のアカウントの使用率を取り直す（Issue #1955）。
+   * 使用率は稼働中のアカウントでしか取れないので、切り替えはこの完了を待つ。
+   */
+  beforeSwitch?(): Promise<void>;
+  /** 手動で切り替えた後に呼ぶ。切り替え後のアカウントの使用率を取り直す（Issue #1955）。 */
+  onSwitched?(): Promise<void>;
 }
 
 /**
@@ -207,6 +214,13 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
 
   async refreshModelCatalog(): Promise<void> {
     await this.post();
+  }
+
+  /** 記録したアカウントの使用率を一覧へ反映する（Issue #1955）。設定は読み直さない。 */
+  async refreshClaudeAccounts(): Promise<void> {
+    // 2分ごとのポーリングから呼ばれる。設定パネル全体は組み立てず、アカウント一覧だけを送る
+    const claudeAccounts = await this.claudeAccounts?.store.list();
+    await this.view?.webview.postMessage({ type: 'claudeAccounts', claudeAccounts });
   }
 
   private async post(): Promise<void> {
@@ -778,10 +792,23 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     store: ClaudeAccountStore,
     id: string,
   ): Promise<{ ok: true } | { ok: false; error: string | undefined }> {
+    if ((await store.currentId()) !== id) {
+      // 取得できなくても切り替えは続ける
+      await this.claudeAccounts
+        ?.beforeSwitch?.()
+        .catch((e: unknown) =>
+          this.log.warn(
+            `切り替え前のアカウントの使用率を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+          ),
+        );
+    }
+    // 取得の後に自動切り替えが走っていることがあるので、稼働中のアカウントを取り直す
+    const previousId = await store.currentId();
     let result = await store.switchTo(id);
     if (!result.ok && result.confirmCurrent !== undefined) {
       const { id: currentId, name: currentName, live, plan } = result.confirmCurrent;
-      const who = plan === undefined ? describeIdentity(live) : `${describeIdentity(live)}・${plan}`;
+      const who =
+        plan === undefined ? describeIdentity(live) : `${describeIdentity(live)}・${plan}`;
       const choice = await vscode.window.showWarningMessage(
         `今ログインしているアカウント（${who}）は、稼働中として記録した「${currentName}」と同じアカウントですか？同じなら「${currentName}」に記録してから切り替えます。違う場合は取り消し、先に「${REGISTER_CURRENT_ACCOUNT_LABEL}」で登録してください。`,
         { modal: true },
@@ -800,6 +827,16 @@ export class ControlPanelViewProvider implements vscode.WebviewViewProvider {
     if (result.warning !== undefined) {
       this.log.warn(result.warning);
       void vscode.window.showWarningMessage(`アカウントは切り替えました。${result.warning}`);
+    }
+    // 計測は20秒ほどかかるので待たない。終わり次第、一覧を描き直す
+    if (previousId !== id) {
+      void this.claudeAccounts
+        ?.onSwitched?.()
+        .catch((e: unknown) =>
+          this.log.warn(
+            `切り替え後のアカウントの使用率を取得できませんでした: ${e instanceof Error ? e.message : String(e)}`,
+          ),
+        );
     }
     return { ok: true };
   }

@@ -25,6 +25,7 @@ import {
   normalizeSplitSuggestThreshold,
   normalizeOrchestratorUnresponsiveSec,
   normalizeMaxOrchestratorRespawns,
+  readTaskRunEndReviewConfig,
 } from '../../src/config';
 import { DEFAULT_DIFF_PRESENTATION_THRESHOLDS } from '../../src/secondOpinion/diffIndex';
 import {
@@ -904,6 +905,59 @@ describe('readAutoHandoffClassifierTimeoutMs（Issue #1097）', () => {
     for (const value of [4_999, 600_001, -1, Number.NaN, 'あ']) {
       __mock.setConfig('agent', { 'autoHandoff.classifierTimeoutMs': value });
       expect(readAutoHandoffClassifierTimeoutMs()).toBe(120_000);
+    }
+  });
+});
+
+describe('readTaskRunEndReviewConfig（Issue #2194）', () => {
+  beforeEach(() => {
+    __mock.reset();
+  });
+
+  it('未設定ならpackage.jsonのdefaultと同じ（有効・600秒・2回）', () => {
+    const manifest = JSON.parse(readFileSync(join(__dirname, '../../package.json'), 'utf8')) as {
+      contributes: { configuration: { properties: Record<string, { default?: unknown }> } };
+    };
+    const props = manifest.contributes.configuration.properties;
+    const expected = {
+      enabled: props['agent.taskRun.endReview.enabled']?.default,
+      replanWindowSeconds: props['agent.taskRun.endReview.replanWindowSeconds']?.default,
+      maxReopens: props['agent.taskRun.endReview.maxReopens']?.default,
+    };
+    expect(expected).toEqual({ enabled: true, replanWindowSeconds: 600, maxReopens: 2 });
+    expect(readTaskRunEndReviewConfig()).toEqual(expected);
+  });
+
+  it('設定された値を使い、0回の上限も受け付ける', () => {
+    __mock.setConfig('agent', {
+      'taskRun.endReview.enabled': false,
+      'taskRun.endReview.replanWindowSeconds': 60,
+      'taskRun.endReview.maxReopens': 0,
+    });
+    expect(readTaskRunEndReviewConfig()).toEqual({
+      enabled: false,
+      replanWindowSeconds: 60,
+      maxReopens: 0,
+    });
+  });
+
+  it('範囲外・型違いの値は既定へ戻す', () => {
+    for (const [window, reopens] of [
+      [59, -1],
+      [86_401, 11],
+      [Number.NaN, 1.5],
+      ['あ', '2'],
+    ] as const) {
+      __mock.setConfig('agent', {
+        'taskRun.endReview.enabled': 'yes',
+        'taskRun.endReview.replanWindowSeconds': window,
+        'taskRun.endReview.maxReopens': reopens,
+      });
+      expect(readTaskRunEndReviewConfig()).toEqual({
+        enabled: true,
+        replanWindowSeconds: 600,
+        maxReopens: 2,
+      });
     }
   });
 });

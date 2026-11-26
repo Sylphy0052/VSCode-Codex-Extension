@@ -160,16 +160,16 @@ export class SessionTreeProvider
     await this.setFilter('');
   }
 
-  isPinned(session: SessionSummary): boolean {
+  isPinned(session: Pick<SessionSummary, 'provider' | 'id'>): boolean {
     return this.pinnedStore.isPinned(pinKeyFor(session));
   }
 
-  async pin(session: SessionSummary): Promise<void> {
+  async pin(session: Pick<SessionSummary, 'provider' | 'id'>): Promise<void> {
     await this.pinnedStore.pin(pinKeyFor(session));
     await this.sessions.reload();
   }
 
-  async unpin(session: SessionSummary): Promise<void> {
+  async unpin(session: Pick<SessionSummary, 'provider' | 'id'>): Promise<void> {
     await this.pinnedStore.unpin(pinKeyFor(session));
     await this.sessions.reload();
   }

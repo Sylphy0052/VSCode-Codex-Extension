@@ -11,7 +11,7 @@ import type { ActivityKind } from '../activity/record';
 import { currentWorkspaceFolder, workspaceFolderPaths } from '../config';
 import type { OutputOffloadPort } from '../appserver/outputOffload';
 import { createNodeOutputOffload } from '../session/nodeOutputOffload';
-import type { FileSystemPort, SymlinkResolution } from '../session/ports';
+import type { FileSystemPort } from '../session/ports';
 import {
   APPROVAL_LEVELS,
   APPROVAL_LEVEL_LABELS,
@@ -23,7 +23,6 @@ import { DEFAULT_CHAT_SKIN, skinBodyClass, type ChatSkin } from './skin';
 import { AttachmentBox, dropRejectionReason } from '../provider/attachments';
 import { buildImageReply } from '../provider/imageRefs';
 import { FileMentionCatalog, filterFiles } from '../provider/fileMentions';
-import { buildMemoryAppendConfirmation } from '../provider/inputModes';
 import { computeDiffContents, planDiffActions } from '../util/diffRestore';
 import {
   resolveWithinWorkspace,
@@ -217,30 +216,6 @@ export async function confirmRunShellCommand(command: string): Promise<boolean> 
     '入力する',
   );
   return choice === '入力する';
-}
-
-/**
- * 行頭が `#` の入力（issue #6、design.md §14.29）をメモリへ追記してよいか確かめる。
- *
- * ファイルへの書き込みは元に戻せないため（gitで管理されていない環境もある）、
- * 追記先と内容の両方を確認させてから書く（issue #6の受入基準）。
- *
- * `symlink` は追記先のシンボリックリンク判別結果。本文の組み立ては
- * `buildMemoryAppendConfirmation`（純粋関数）に切り出してある（issue #144。実体パスを
- * 見せずに書き込みが実行されると、実際にどのファイルが書き換わるか分からないため。
- * 実体パスが特定できない場合も警告として出す）。
- */
-export async function confirmMemoryAppend(
-  content: string,
-  path: string,
-  symlink: SymlinkResolution,
-): Promise<boolean> {
-  const choice = await vscode.window.showWarningMessage(
-    buildMemoryAppendConfirmation(content, path, symlink),
-    { modal: true },
-    '追記する',
-  );
-  return choice === '追記する';
 }
 
 /** 確認ダイアログに列挙するファイル数の上限。超えた分は件数だけ示す。 */
@@ -864,8 +839,7 @@ export async function confirmRevertDiff(diff: FileDiff): Promise<boolean> {
  *
  * 確認モーダル（`confirmRevertDiff`）の前後2回、現在の内容を読み直して差分の想定と
  * 突き合わせる。1回目は確認を出す価値があるかどうかの事前チェック、2回目はTOCTOU対策
- * （ユーザーの応答待ちは不定長で、その間に内容が変わりうる。issue #144のメモリ追記と
- * 同じ考え方）。`add`の取り消しはファイルの削除（ゴミ箱へ）、それ以外は内容の書き込みで行う。
+ * （ユーザーの応答待ちは不定長で、その間に内容が変わりうる。TOCTOU）。`add`の取り消しはファイルの削除（ゴミ箱へ）、それ以外は内容の書き込みで行う。
  *
  * 内容だけでなく**場所と実体**も確認後にもう一度確かめる（Issue #1170）。応答待ちの間に
  * 親ディレクトリがワークスペース外へのsymlinkへ差し替わると、同じ絶対パス文字列が別の
@@ -950,7 +924,7 @@ export async function handleRevertDiff(
       }
     } else {
       // `add` の削除と `delete` の再作成はfdを持てない。内容（`add` は実体も）を操作の直前に
-      // もう一度確かめる（issue #144のメモリ追記と同じ考え方）
+      // もう一度確かめる（TOCTOU対策）
       if (diff.kind === 'add') {
         const identityNow = await revertPort.identify(resolved.absolutePath);
         if (
@@ -1027,13 +1001,28 @@ export async function postFileMentions(
   if (typeof query !== 'string') {
     return;
   }
+  const files = await fileMentionCandidates(mentions, cwd, query);
+  if (files === undefined) {
+    return;
+  }
+  void panel.webview.postMessage({ type: 'files', query, files });
+}
+
+/**
+ * `@` のファイル候補を絞り込んで返す（Issue #2158。Mission Controlの補完もこれを使う）。
+ * 探すフォルダが決まらなければ`undefined`。
+ */
+export async function fileMentionCandidates(
+  mentions: FileMentionCatalog,
+  cwd: string | undefined,
+  query: string,
+): Promise<string[] | undefined> {
   // 復元されたCodex画面はcwdを持たない。そのときはこのウィンドウのフォルダを充てる
   const folder = cwd ?? currentWorkspaceFolder()?.uri.fsPath;
   if (folder === undefined) {
-    return;
+    return undefined;
   }
-  const files = filterFiles(await mentions.list(folder), query, MENTION_LIMIT);
-  void panel.webview.postMessage({ type: 'files', query, files });
+  return filterFiles(await mentions.list(folder), query, MENTION_LIMIT);
 }
 
 export interface ChatShellOptions {
@@ -1284,6 +1273,9 @@ const COMPOSER_ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12.5h11"/><path d="M4.5 12.5V9.5M8 12.5V6.5M11.5 12.5V3.5"/></svg>',
   secondOpinion:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M1.8 4.2a1 1 0 0 1 1-1h6.4a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H5.4L3 11V8.8h-.2a1 1 0 0 1-1-1z"/><path d="M12.2 6.2h1a1 1 0 0 1 1 1v3.6a1 1 0 0 1-1 1H13V14l-2.4-2.2H8.2"/></svg>',
+  // 場面の台帳で再考する（Issue #2065）。チェックリストの印で「空欄を埋める」を表す
+  reconsider:
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4.5l1.2 1.2 2-2.2"/><path d="M8 4.5h5.5"/><path d="M2.5 10.5l1.2 1.2 2-2.2"/><path d="M8 10.5h5.5"/></svg>',
   // Reflexモード（issue #1455）。軽量モデルの素早い判定を稲妻で表す
   reflex:
     '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M9.2 1.5L3.8 9h4l-1 5.5L12.2 7h-4z"/></svg>',
@@ -1440,10 +1432,10 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         pressed: false,
         icon: COMPOSER_ICONS.workflowView,
       };
-    case 'sessionKanban':
+    case 'missionControl':
       return {
-        ariaLabel: 'セッションカンバンを開く',
-        title: 'このワークスペースで開いている会話を状態別に表示します',
+        ariaLabel: 'Mission Controlを開く',
+        title: '全ウィンドウの会話と回答待ちの項目をMission Controlで表示します',
         hidden: false,
         pressed: false,
         icon: COMPOSER_ICONS.kanban,
@@ -1525,6 +1517,15 @@ function composerButtonSpec(id: ComposerButtonId, ctx: ComposerButtonContext): C
         pressed: false,
         icon: COMPOSER_ICONS.secondOpinion,
       };
+    case 'reconsider':
+      return {
+        ariaLabel: '場面の台帳で再考する',
+        title:
+          '作業中のAIとは別の文脈のadvisorが、変更が働く場面を列挙し、実行記録から各場面が実測で確かめられたかを判定します。未確認の場面は作業中のAIへ差し込み、実測させます。2回目以降は前回の台帳を引き継ぎ、全場面が埋まれば「場面の台帳は埋まりました」と表示します',
+        hidden: false,
+        pressed: false,
+        icon: COMPOSER_ICONS.reconsider,
+      };
   }
 }
 
@@ -1603,7 +1604,9 @@ ${chatStyles()}
 </head>
 <body class="${densityBodyClass(options.density ?? DEFAULT_CHAT_DENSITY)} ${skinBodyClass(options.skin ?? DEFAULT_CHAT_SKIN)}${options.inputLock === true ? ' inputLocked' : ''}">
   <div id="logWrap">
-    <div id="log"></div>
+    <!-- tabindex="-1": 本文を選んだときにfocusを#logへ置く。bodyのままだとVS Codeが
+         Ctrl+Cの前に最後にfocusした入力欄へfocusを戻してしまう（Issue #2012） -->
+    <div id="log" tabindex="-1"></div>
     <div id="deferredRestore" hidden>
       <span id="deferredRestoreMessage"></span>
       <button id="loadDeferredRestore" type="button">会話を読み込む</button>
@@ -1625,6 +1628,7 @@ ${chatStyles()}
   </div>
   <div id="limitAutoResumeStatus" role="status" aria-live="polite"${options.limitAutoResumeEnabled === true ? '' : ' hidden'}>上限解除後の自動続行: ON（上限検知待ち）</div>
   <div id="autoReplyActivity" role="status" aria-live="polite" hidden></div>
+  <div id="autoHandoffWait" role="status" aria-live="polite" hidden>自動引き継ぎ: バックグラウンド処理の終了待ち（手動なら今すぐ引き継げます）</div>
   <div id="processSuspension" role="status" aria-live="polite" hidden></div>
   <details id="statusBox" open hidden>
     <summary title="実行状態・使用量の表示を開閉します"><span class="label">状態</span><span id="statusSummary"></span></summary>

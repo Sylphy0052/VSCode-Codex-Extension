@@ -41,6 +41,23 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.text).toBe('直します');
   });
 
+  it('確定した応答の推奨行を項目へ載せる。推奨行が無ければ載せない（Issue #2056）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'text', text: '推奨: model=opus / effort=xhigh (設計判断)' },
+            { type: 'text', text: '普通の文' },
+          ],
+        },
+      },
+    ]);
+    expect(state.items[0]?.profileRecommendation).toEqual({ model: 'opus', effort: 'xhigh' });
+    expect(state.items[1]?.profileRecommendation).toBeUndefined();
+  });
+
   it('1メッセージ内の複数テキストを別々の項目にする', () => {
     const state = apply([
       {
@@ -838,6 +855,41 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.text).toBe('SKILL.mdの内容');
   });
 
+  it('skillContextに起動時刻を持たせ、届き直しても最初の時刻を保つ（Issue #2173）', () => {
+    const event = {
+      type: 'user',
+      uuid: 'u1',
+      isMeta: true,
+      sourceToolUseID: 'toolu_01abc',
+      timestamp: '2026-11-26T01:02:03.000Z',
+      message: { content: [{ type: 'text', text: 'SKILL.mdの内容' }] },
+    };
+    const state = apply([event, { ...event, timestamp: '2026-11-26T09:00:00.000Z' }]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]?.skillLaunchedAt).toBe(Date.parse('2026-11-26T01:02:03.000Z'));
+  });
+
+  it('時刻の無いskillContextは受け取った時刻を持ち、通常の発言は持たない（Issue #2173）', () => {
+    const before = Date.now();
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        isMeta: true,
+        sourceToolUseID: 'toolu_01abc',
+        message: { content: [{ type: 'text', text: 'SKILL.mdの内容' }] },
+      },
+      {
+        type: 'user',
+        uuid: 'u2',
+        message: { content: [{ type: 'text', text: 'ふつうの発言' }] },
+      },
+    ]);
+    expect(state.items[0]?.skillLaunchedAt).toBeGreaterThanOrEqual(before);
+    expect(state.items[1]?.kind).toBe('userMessage');
+    expect(state.items[1]).not.toHaveProperty('skillLaunchedAt');
+  });
+
   it('slash command起動でsourceToolUseIDが無くてもskillContextにする（issue #889）', () => {
     const state = apply([
       {
@@ -921,6 +973,267 @@ describe('applyStreamEvent', () => {
       },
     ]);
     expect(state.items[0]?.kind).toBe('userMessage');
+  });
+
+  it('Skillツールの結果の直後に来たplugin skillの本文もskillContextにする（issue #1968）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'genshijin:help' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: genshijin:help' },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: { content: [{ type: 'text', text: 'リファレンスカードを表示する。\n' }] },
+      },
+    ]);
+    const skill = state.items.find((i) => i.id === 'u1');
+    expect(skill?.kind).toBe('skillContext');
+    expect(skill?.detail).toBe('genshijin:help');
+  });
+
+  it('plugin skillの本文が同じuuidで届き直しても種類・名前・起動時刻を保つ（Issue #2173）', () => {
+    const body = {
+      type: 'user',
+      uuid: 'u1',
+      isSynthetic: true,
+      message: { content: [{ type: 'text', text: 'リファレンスカードを表示する。\n' }] },
+    };
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'genshijin:help' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: genshijin:help' },
+          ],
+        },
+      },
+      { ...body, timestamp: '2026-11-26T01:02:03.000Z' },
+      { ...body, timestamp: '2026-11-26T01:05:00.000Z' },
+    ]);
+    const skills = state.items.filter((i) => i.id === 'u1');
+    expect(skills).toHaveLength(1);
+    expect(skills[0]?.kind).toBe('skillContext');
+    expect(skills[0]?.detail).toBe('genshijin:help');
+    expect(skills[0]?.skillLaunchedAt).toBe(Date.parse('2026-11-26T01:02:03.000Z'));
+  });
+
+  it('Skillツールの結果の直後でもisSyntheticが無い発言はuserMessageのまま（issue #1968）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [{ type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'x' } }],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: x' }],
+        },
+      },
+      { type: 'user', uuid: 'u1', message: { content: [{ type: 'text', text: '続けて' }] } },
+    ]);
+    expect(state.items.find((i) => i.id === 'u1')?.kind).toBe('userMessage');
+  });
+
+  it('Base directory形式の本文でもSkillツールの起動結果の名前空間付きの名前を使う（issue #1971）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'genshijin:help' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: genshijin:help' },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: 'Base directory for this skill: /home/u/.claude/plugins/genshijin/skills/help\n\n# help\n',
+            },
+          ],
+        },
+      },
+    ]);
+    const skill = state.items.find((i) => i.id === 'u1');
+    expect(skill?.kind).toBe('skillContext');
+    expect(skill?.detail).toBe('genshijin:help');
+  });
+
+  it('並列に呼んだツールの項目が挟まってもSkillの本文をskillContextにする（issue #1971）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'genshijin:help' } },
+            { type: 'tool_use', id: 't2', name: 'Bash', input: { command: 'ls' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: genshijin:help' },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'a.txt' }] },
+      },
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: { content: [{ type: 'text', text: 'リファレンスカードを表示する。\n' }] },
+      },
+    ]);
+    const skill = state.items.find((i) => i.id === 'u1');
+    expect(skill?.kind).toBe('skillContext');
+    expect(skill?.detail).toBe('genshijin:help');
+  });
+
+  it('Skillを並列に2つ呼んだら、本文を起動した順に対応させる（issue #1971）', () => {
+    const synthetic = (uuid: string, text: string) => ({
+      type: 'user',
+      uuid,
+      isSynthetic: true,
+      message: { content: [{ type: 'text', text }] },
+    });
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'a' } },
+            { type: 'tool_use', id: 't2', name: 'Skill', input: { skill: 'b' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: a' },
+            { type: 'tool_result', tool_use_id: 't2', content: 'Launching skill: b' },
+          ],
+        },
+      },
+      synthetic('u1', 'aの本文\n'),
+      synthetic('u2', 'bの本文\n'),
+      synthetic('u3', 'No response requested.'),
+    ]);
+    const kinds = ['u1', 'u2', 'u3'].map((id) => {
+      const found = state.items.find((i) => i.id === id);
+      return [found?.kind, found?.detail];
+    });
+    expect(kinds).toEqual([
+      ['skillContext', 'a'],
+      ['skillContext', 'b'],
+      ['userMessage', ''],
+    ]);
+  });
+
+  it('本文を受け取ったSkillの起動は後の合成メッセージに使い回さない（issue #1971）', () => {
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [{ type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'x' } }],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: x' }],
+        },
+      },
+      {
+        type: 'user',
+        uuid: 'u1',
+        isSynthetic: true,
+        message: { content: [{ type: 'text', text: '本文\n' }] },
+      },
+      {
+        type: 'user',
+        uuid: 'u2',
+        isSynthetic: true,
+        message: { content: [{ type: 'text', text: 'No response requested.' }] },
+      },
+    ]);
+    expect(state.items.find((i) => i.id === 'u1')?.kind).toBe('skillContext');
+    expect(state.items.find((i) => i.id === 'u2')?.kind).toBe('userMessage');
+  });
+
+  it('文字列で返る /名前 の発言を /名前 引数 として積む（issue #1968）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        isReplay: true,
+        message: {
+          content:
+            '<command-message>genshijin:help</command-message>\n<command-name>/genshijin:help</command-name>\n<command-args>極限</command-args>',
+        },
+      },
+    ]);
+    expect(state.items[0]?.kind).toBe('userMessage');
+    expect(state.items[0]?.text).toBe('/genshijin:help 極限');
+  });
+
+  it('制御タグを途中で引用しただけの文字列contentは積まない（issue #1968）', () => {
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        message: { content: '要約: <command-name>/x</command-name> を実行した' },
+      },
+    ]);
+    expect(state.items).toEqual([]);
   });
 
   it('目印が無いユーザーの発言は同じ文面でも畳まない（issue #934）', () => {

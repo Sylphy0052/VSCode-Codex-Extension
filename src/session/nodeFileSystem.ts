@@ -2,17 +2,7 @@ import * as fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import * as readline from 'node:readline';
 import { createHash } from 'node:crypto';
-import type { FileSystemPort, HeadDigest, MemoryFileSystemPort, SymlinkResolution } from './ports';
-
-/** Node.jsの例外がENOENT（対象が存在しない）かどうかを見る。 */
-function isEnoent(e: unknown): boolean {
-  return (
-    typeof e === 'object' &&
-    e !== null &&
-    'code' in e &&
-    (e as NodeJS.ErrnoException).code === 'ENOENT'
-  );
-}
+import type { FileSystemPort, HeadDigest } from './ports';
 
 /** 先頭だけ読むために全文をメモリに載せない。ロールアウトは巨大になりうる。 */
 async function readHead(filePath: string, maxLines: number): Promise<string[]> {
@@ -307,38 +297,4 @@ export const nodeFileSystem: FileSystemPort = {
   readHeadDigestUntil,
   digestHead,
   forEachLine,
-};
-
-/** `MemoryFileSystemPort` の既定実装（issue #144。`nodeFileSystem` とは意図的に分ける）。 */
-export const nodeMemoryFileSystem: MemoryFileSystemPort = {
-  async readStrict(filePath: string): Promise<string | undefined> {
-    try {
-      return await fs.readFile(filePath, 'utf8');
-    } catch (e) {
-      if (isEnoent(e)) {
-        return undefined;
-      }
-      throw e;
-    }
-  },
-
-  async resolveSymlinkTarget(filePath: string): Promise<SymlinkResolution> {
-    let stat;
-    try {
-      stat = await fs.lstat(filePath);
-    } catch {
-      // 対象自体が無い（シンボリックリンクの入口すら存在しない）。「リンクでない」で正しい。
-      return { kind: 'not-symlink' };
-    }
-    if (!stat.isSymbolicLink()) {
-      return { kind: 'not-symlink' };
-    }
-    try {
-      return { kind: 'resolved', target: await fs.realpath(filePath) };
-    } catch {
-      // リンク先が存在しない（壊れたリンク）・循環参照（ELOOP）・途中ディレクトリの権限不足
-      // （EACCES）等。「リンクでない」と混同しない（issue #144のCRITICAL指摘）。
-      return { kind: 'unresolved' };
-    }
-  },
 };

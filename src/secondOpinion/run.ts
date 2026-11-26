@@ -94,6 +94,8 @@ export interface SecondOpinionRequest {
    * 省略時は `'summary'`。
    */
   conversationBackgroundKind?: ConversationBackgroundKind | undefined;
+  /** 会話の記録から抜いた実行記録（Issue #2065）。台帳で「実測済み」を判定する材料。 */
+  executionRecords?: string | undefined;
   /**
    * 押下時点のリポジトリ全体の写しを置いた場所（bundleのルートからの相対パス。Issue #1062）。
    *
@@ -196,6 +198,7 @@ export async function runSecondOpinion(
     artifact: request.artifact,
     conversationSummary: request.conversationSummary,
     conversationBackgroundKind: request.conversationBackgroundKind,
+    executionRecords: request.executionRecords,
     afterTreeDir: request.afterTreeDir,
     afterTreeNoticeFile: request.afterTreeNoticeFile,
     diffPresentation: request.diffPresentation,

@@ -1,8 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 import type { ApprovalDecision } from '../appserver/approvals';
-import type { ChatState, PendingApproval } from '../appserver/chatState';
-import { readChatEndSummaryConfig, readNotificationsConfig, readReflexEnabled } from '../config';
+import type { ChatItem, ChatState, PendingApproval } from '../appserver/chatState';
+import type { PendingPrompt, PromptSubmission } from '../appserver/prompts';
+import type { AskUserQuestionSelections } from '../claude/askUserQuestion';
+import { toTrackedChatState, type ChatConversationTracker } from '../chat/chatConversationTracker';
+import {
+  readChatEndSummaryConfig,
+  readNotificationsConfig,
+  readReflexEnabled,
+  readSessionPurposeConfig,
+} from '../config';
 import type { HeadlessProvider } from '../loop/headlessCli';
 import type { Logger } from '../log';
 import type { SessionModelSettings } from '../sessionModelSettings';
@@ -25,6 +33,7 @@ import { planBackgroundOpen, trackChatPanel } from './backgroundPanelTabs';
 import {
   decideStopTurnAfterHandoff,
   needsAttentionAfterHandoff,
+  resolveGitBranch,
   triggerLabel,
   type HandoffTrigger,
   type OldTabKeptReason,
@@ -33,14 +42,22 @@ import { PendingHandoffChoice } from './handoffPending';
 import type { SkillSelectGate } from './skillSelectGate';
 import { buildEndSummaryMaterial, EndSummaryRunner, type EndSummaryDisplay } from './endSummary';
 import { playNotificationSound } from './notificationSound';
+import { SessionPurposeRunner } from './sessionPurpose';
+import { ALREADY_ANSWERED_MESSAGE, validateAskUserQuestionAnswers } from './pendingItem';
+import type { AttachmentBox, AttachmentInput } from '../provider/attachments';
+import type { SlashCommand } from '../provider/slashCommands';
 import type {
   SessionApprovalDetail,
   SessionHandoffDetail,
+  SessionQueuedMessage,
   SessionRecentTurn,
+  SessionSettingChange,
+  SessionSettingsDetail,
   SessionSideQuestion,
   SharedApprovalDecision,
   SharedHandoffDecision,
 } from './sessionHub';
+import { inlineText, MAX_QUEUED_TEXT_CHARS, MAX_SHARED_BRANCH_CHARS } from './sessionHub';
 import {
   decoratePanelTitle,
   deriveSessionActivityState,
@@ -62,6 +79,12 @@ export interface ChatSessionLike {
   decide(requestId: number | string, decision: ApprovalDecision): void;
   setAutoHandoff(on: boolean): void;
   setAutoHandoffAutoApprove(on: boolean): void;
+  /** 工程セッションでpluginのStop hook（skill-retro）を止める。Claudeだけが持つ。 */
+  setSuppressSkillRetro?(on: boolean): void;
+  /** AskUserQuestionへの回答（Issue #2135で統括ページからも使う）。Claudeだけが持つ。 */
+  answerAskUserQuestion?(requestId: number | string, selections: AskUserQuestionSelections): void;
+  /** `requestUserInput`/elicitationへの回答（Issue #2135で統括ページからも使う）。Codexだけが持つ。 */
+  answerPrompt?(requestId: number | string, submission: PromptSubmission): void;
 }
 
 /**
@@ -90,6 +113,8 @@ export interface BaseChatPanel {
   /** セッションを開始した作業ディレクトリ。カンバンのワークスペース絞り込みに使う。 */
   cwd: string | undefined;
   session: ChatSessionLike;
+  /** 送信前の添付。Mission Controlから画像を添えて送るときも、ここへ入れてから送る（Issue #2158）。 */
+  attachments: AttachmentBox;
   /** この画面で走らせているループ。走っていなければ待機状態のまま。 */
   loop: LoopController;
   /**
@@ -138,6 +163,13 @@ export interface BaseChatPanel {
    */
   inputLock: boolean;
   /**
+   * webviewが`ready`を送ってから、HTMLを入れ直すまでの間か（Issue #2180）。`false`の間に
+   * 入力欄へ入れたい文は`pendingComposerText`に溜め、`ready`で送る（読み込み前に送ると消える）。
+   */
+  webviewReady?: boolean;
+  /** `webviewReady`になったら入力欄へ入れる文（Issue #2180）。 */
+  pendingComposerText?: string | undefined;
+  /**
    * 自動引き継ぎを発火させないタブか（Issue #1465 分割案8b、`TaskSessionInput.disableAutoHandoff`）。
    * ロードマップ実行のOrchestratorは世代をKanbanから開き直すため、別タブへの引き継ぎを始めない。
    */
@@ -160,6 +192,12 @@ export interface BaseChatPanel {
   skillSelectGate?: SkillSelectGate;
   /** 要約エージェント（issue #1473）の実行役。初めて要約するときに作る。 */
   endSummary?: EndSummaryRunner;
+  /** セッションの目的の1文要約（Issue #2172）の実行役。初めて要約するときに作る。 */
+  sessionPurpose?: SessionPurposeRunner;
+  /** セッションの目的の1文要約（Issue #2172）。まだ無ければ`undefined`。 */
+  purpose?: string | undefined;
+  /** 目的を要約したときの作業ディレクトリのブランチ名。似た要約を見分けるのに使う。 */
+  purposeBranch?: string | undefined;
   /** `TaskSession.onApprovalResolved` のリスナー。 */
   approvalResolvedListeners: Array<(outcome: ApprovalOutcome) => void>;
   /**
@@ -191,6 +229,16 @@ export interface BaseChatPanel {
    */
   handoffKeptUserMessages?: number | undefined;
   /**
+   * 前回`fireStateChanged`で見た活動状態（Issue #2171）。ターンの終わり（idle以外→idle）を
+   * 見分けて未読の印を立てるのに使う。まだ見ていなければ`undefined`。
+   */
+  lastSeenActivity?: SessionActivityState | undefined;
+  /**
+   * 返事待ちの未読（Issue #2171）。ターンが終わったときにタブが見えていなければ立て、
+   * タブを表示したとき・Mission Controlの詳細ペインで表示したとき（`markRead`）に下げる。
+   */
+  replyUnread?: boolean | undefined;
+  /**
    * 自動引き継ぎで初回プロンプトを送り終えた引き継ぎ元の印（Issue #1790）。印が無ければ`undefined`。
    *
    * 引き継いだ後も、引き継ぎ元はバックグラウンド処理の完了通知などで自分からターンを始める
@@ -215,11 +263,30 @@ export interface BaseChatPanel {
  *
  * 要求側が件数を指定するが、共有ディレクトリへ書くのは別プロセスなので、受信側で丸める。
  * 大きな値をそのまま通すと、会話全体を1回の応答へ載せることになる。
+ *
+ * Issue #2157で、Mission Controlが範囲指定（`before`）で会話の先頭まで遡れるようにした。
+ * 1回の上限は残し、遡るときは要求側が何回かに分けて取る。
  */
-const MAX_RECENT_TURNS = 20;
+const MAX_RECENT_TURNS = 50;
 
-/** 1件の本文の上限。カードは流れを掴むためのもので、全文はタブ側で読む。 */
-const MAX_RECENT_TURN_CHARS = 600;
+/**
+ * 1件の本文の上限（Issue #2157で600字から引き上げた）。Mission Controlの詳細ペインで
+ * 会話を読むため、発言はほぼ全文を載せる。それでも上限を外さないのは、応答ファイルが
+ * 共有ディレクトリを経由するため。
+ */
+const MAX_RECENT_TURN_CHARS = 8_000;
+
+/** ツール呼び出しの出力・diffの上限（Issue #2157）。折りたたんで出す補足なので短めにとる。 */
+const MAX_RECENT_TOOL_CHARS = 2_000;
+
+/** `tool` / `diff`の見出しの上限（Issue #2157）。 */
+const MAX_RECENT_TITLE_CHARS = 500;
+
+/**
+ * 1回の応答に載せる本文の合計の上限（Issue #2157）。長い発言が続く範囲では件数を減らして
+ * 返す（要求側は返ってきた`turnStart`から続きを取る）。1件目は上限を超えても必ず載せる。
+ */
+const MAX_RECENT_PAGE_CHARS = 120_000;
 
 /**
  * 脇道の質問の回答を返すときの上限（Issue #1261）。
@@ -266,8 +333,11 @@ export type SessionControlAction =
   | { kind: 'approvalDetail' }
   /** 取り寄せた中身に対する承認・拒否（Issue #1259）。 */
   | { kind: 'approvalDecision'; approvalRequestId: string; decision: SharedApprovalDecision }
-  /** 会話の直近のやり取りを取り寄せる（Issue #1260）。カードを展開している間だけ送る。 */
-  | { kind: 'recentTurns'; limit: number }
+  /**
+   * 会話の直近のやり取りを取り寄せる（Issue #1260）。カードを展開している間だけ送る。
+   * `before`を付けると、その件数目より前を取る（Issue #2157。古いやり取りを遡る）。
+   */
+  | { kind: 'recentTurns'; limit: number; before?: number | undefined }
   /** 脇道の質問を投げる（Issue #1261）。回答を待たず、受け付けたことだけを返す。 */
   | { kind: 'sideQuestion'; text: string }
   /** 投げた脇道の質問の進み具合を取りに行く（Issue #1261）。 */
@@ -286,7 +356,71 @@ export type SessionControlAction =
       decision: SharedHandoffDecision;
       model?: string | undefined;
       effort?: string | undefined;
-    };
+    }
+  /**
+   * AskUserQuestionへの回答（Issue #2135）。`answers`は質問文→選んだラベル。
+   * 受け取った側が質問と突き合わせて確かめる。
+   */
+  | { kind: 'answerQuestion'; pendingRequestId: string; answers: Record<string, string[]> }
+  /** Codexの`requestUserInput`/elicitationへの回答（Issue #2135）。 */
+  | { kind: 'answerPrompt'; pendingRequestId: string; submission: PromptSubmission }
+  /**
+   * task runの質問への回答（Issue #2135）。会話への操作ではなく、`extension.ts`の
+   * `controlSessionAnywhere`が宛先ウィンドウのtask runへ回す。ここへ届いたら断る。
+   */
+  | { kind: 'answerTaskRunQuestion'; pendingId: string; text: string }
+  /**
+   * 画像を添えて送る（Issue #2158）。`send`へ添付を足さず別の種別にするのは、古い版の
+   * ウィンドウが知らないフィールドを落として画像なしで送らないようにするため。
+   */
+  | { kind: 'sendWithAttachments'; text: string; attachments: AttachmentInput[] }
+  /** `@`の補完に使う、会話の作業ディレクトリのファイル候補（Issue #2158）。 */
+  | { kind: 'fileCandidates'; query: string }
+  /** `/`の補完に使う、その会話で使えるスラッシュコマンド（Issue #2158）。 */
+  | { kind: 'commandCandidates' }
+  /** 送信キュー（応答中に送って待たせている指示）を取り寄せる（Issue #2158）。 */
+  | { kind: 'queuedMessages' }
+  /**
+   * 送信キューの1件を取り消す（Issue #2158）。位置や本文では、取り寄せてから押すまでに
+   * キューが進んだり同じ本文の指示が並んだりして別の指示を消すため、項目のidで照合する。
+   * 位置は補助で、idの項目が動いていてもidで見つけ直す。
+   */
+  | { kind: 'cancelQueued'; index: number; queuedId: string }
+  /** 今のmodel・effort・承認レベル・plan/fast modeを取り寄せる（Issue #2159）。 */
+  | { kind: 'sessionSettings' }
+  /**
+   * 設定を1つ変える（Issue #2159）。全承認の同意ダイアログを待つため非同期で、
+   * `controlSessionAsync`が扱う。
+   */
+  | { kind: 'changeSetting'; change: SessionSettingChange }
+  // Issue #2160: 選んだセッションへのrename・fork・pin・clear・引き継ぎ・巻き戻し。
+  // 確認（clear・巻き戻し）はMission Controlが出してから送る。受信側はダイアログを出さない
+  /** 名前を変える。`name`は`parseSessionName`で確かめた値。 */
+  | { kind: 'rename'; name: string }
+  /** 会話全体を分岐して新しいタブで開く（宛先のウィンドウに開く）。 */
+  | { kind: 'fork' }
+  /**
+   * 履歴のピン留め / 解除。印は全ウィンドウ共通の`globalState`にあり会話に属さないため、
+   * `extension.ts`が要求元のウィンドウで済ませる。ここへ届いたら断る。
+   */
+  | { kind: 'pin' }
+  | { kind: 'unpin' }
+  /**
+   * 返事待ちの未読を既読にする（Issue #2171）。Mission Controlが詳細ペインでその会話を
+   * 表示したときに送る。会話を持つウィンドウで下げ、共有ファイル経由で全ウィンドウへ伝わる。
+   */
+  | { kind: 'markRead' }
+  /** 会話を捨てて同じフォルダで新しい会話を始める（`/clear`相当）。 */
+  | { kind: 'clear' }
+  /** 新しいセッションへの引き継ぎを始める（コマンドの「引き継ぎ」と同じ手動の契機）。 */
+  | { kind: 'handoff' }
+  /**
+   * 巻き戻しで戻るファイルを確かめる（Claudeだけ）。`messageId`は人の発言の固定のid
+   * （`SessionRecentTurn.id`）。位置や本文では、選ぶまでに会話が進むと別の発言を指すため。
+   */
+  | { kind: 'rewindPreview'; messageId: string }
+  /** ファイルを指定した発言の直前まで戻す（Claudeだけ。会話の履歴には触れない）。 */
+  | { kind: 'rewind'; messageId: string };
 
 /** 操作の結果。`error`は統括ページにそのまま出すため、人に読める文にする。 */
 export interface SessionControlResult {
@@ -298,11 +432,34 @@ export interface SessionControlResult {
   turns?: SessionRecentTurn[] | undefined;
   /** `turns`を作った時刻（Issue #1260）。 */
   capturedAt?: number | undefined;
+  /** `turns`の先頭が会話の何件目か（0始まり）と、会話全体の件数（Issue #2157）。 */
+  turnStart?: number | undefined;
+  turnTotal?: number | undefined;
   /** `kind === 'sideQuestion'` / `'sideQuestionResult'`のときだけ入る（Issue #1261）。 */
   sideQuestion?: SessionSideQuestion | undefined;
   /** `kind === 'handoffDetail'`のときだけ入る、保留中の引き継ぎ確認（Issue #1280）。 */
   handoff?: SessionHandoffDetail | undefined;
+  /** `kind === 'fileCandidates'`のときだけ入る、作業ディレクトリからの相対パス（Issue #2158）。 */
+  files?: string[] | undefined;
+  /** `kind === 'commandCandidates'`のときだけ入る（Issue #2158）。 */
+  commands?: SlashCommand[] | undefined;
+  /** `kind === 'queuedMessages'`のときだけ入る（Issue #2158）。 */
+  queued?: SessionQueuedMessage[] | undefined;
+  /** `kind === 'sessionSettings'` / `'changeSetting'`のときだけ入る（Issue #2159）。 */
+  settings?: SessionSettingsDetail | undefined;
+  /** `kind === 'rewindPreview'`のときだけ入る、戻すと変わるファイル（Issue #2160）。 */
+  rewindFiles?: string[] | undefined;
 }
+
+/** Mission Controlからの操作のうち、待ちを伴うため`controlSessionAsync`が扱うもの（Issue #2160）。 */
+const ASYNC_SESSION_OPS: ReadonlySet<SessionControlAction['kind']> = new Set([
+  'rename',
+  'fork',
+  'clear',
+  'handoff',
+  'rewindPreview',
+  'rewind',
+]);
 
 /**
  * 投げた脇道の質問1件の状態（Issue #1261）。
@@ -344,6 +501,53 @@ export function abortAsRejection(signal: AbortSignal): Promise<never> {
   });
 }
 
+/**
+ * 設定の変更を、今の設定と候補に照らして断る（Issue #2159）。通せるなら`undefined`。
+ *
+ * model・effortは画面（別ウィンドウのこともある）から届いた値なので、候補に無いものは捨てる。
+ * effortは変更後のmodelで選べる値か既定（空文字）だけを通す。
+ */
+export function rejectSettingChange(
+  current: SessionSettingsDetail,
+  change: SessionSettingChange,
+): string | undefined {
+  switch (change.setting) {
+    case 'model':
+      return change.value === current.model || current.models.some((m) => m.slug === change.value)
+        ? undefined
+        : `${change.value} はこのセッションで選べるmodelにありません`;
+    case 'effort': {
+      const efforts = current.models.find((m) => m.slug === current.model)?.efforts ?? [];
+      return change.value === '' || efforts.includes(change.value)
+        ? undefined
+        : `今のmodelでは effort=${change.value} を選べません`;
+    }
+    case 'approvalLevel':
+      return current.approvalScope === 'task'
+        ? 'タスクの設定で起動したセッションの承認レベルは変えられません（Codex全体の設定を変えても効きません）'
+        : undefined;
+    case 'planMode':
+      return undefined;
+    case 'fastMode':
+      return current.fastMode === undefined ? 'このセッションではfast modeを使えません' : undefined;
+  }
+}
+
+/** 送信キューの1件を運ぶ形にする（Issue #2158）。本文は上限で切り詰め、画像は枚数だけ。 */
+function toQueuedView(
+  id: string,
+  text: string,
+  attachments: readonly unknown[],
+): SessionQueuedMessage {
+  const truncated = text.length > MAX_QUEUED_TEXT_CHARS;
+  return {
+    id,
+    text: truncated ? text.slice(0, MAX_QUEUED_TEXT_CHARS) : text,
+    truncated,
+    attachments: attachments.length,
+  };
+}
+
 function toSideQuestionView(run: SideQuestionRun): SessionSideQuestion {
   return {
     id: run.id,
@@ -362,17 +566,69 @@ function toSideQuestionView(run: SideQuestionRun): SessionSideQuestion {
  * （`describeFileChanges`がカンマ区切りで作る）から引けるため、両方を見る。
  */
 function describePendingApprovals(
-  state: Pick<ChatState, 'approvals' | 'items'>,
+  state: Pick<ChatState, 'approvals' | 'items' | 'prompts'>,
 ): SessionApprovalDetail[] {
-  return state.approvals.map((approval) => ({
+  const approvals = state.approvals.map((approval): SessionApprovalDetail => ({
     requestId: String(approval.requestId),
     kind: approval.kind,
     title: approval.title,
     detail: approval.detail,
     paths: readApprovalPaths(state, approval),
-    // 選択式の問い合わせは4値（accept/acceptForSession/decline/cancel）では答えられない
+    // 選択式の問い合わせは4値（accept/acceptForSession/decline/cancel）では答えられない。
+    // `decidable`は承認・拒否のボタンを出してよいかの意味のまま残す（古い版の統括ページが
+    // `true`を見て「承認」を出すと、答えの無い拒否が送られるため）。回答は`answer`で示す
     decidable: approval.kind !== 'askUserQuestion',
+    answer: approval.kind === 'askUserQuestion' ? 'choices' : 'decision',
+    questions:
+      approval.kind === 'askUserQuestion'
+        ? (approval.questions ?? []).map((q) => ({
+            question: q.question,
+            header: q.header,
+            options: q.options.map((o) => ({ label: o.label, description: o.description })),
+            multiSelect: q.multiSelect,
+          }))
+        : undefined,
   }));
+  // Codexの問い合わせ（Issue #2135）。伏せ字の値は共有ディレクトリを通さない
+  const prompts = state.prompts.map((prompt): SessionApprovalDetail => ({
+    requestId: String(prompt.requestId),
+    kind: 'codexPrompt',
+    title: prompt.title,
+    detail: [prompt.source === '' ? '' : `出どころ: ${prompt.source}`, prompt.message]
+      .concat(prompt.url === undefined ? [] : [`URL: ${prompt.url}`])
+      .filter((line) => line !== '')
+      .join('\n'),
+    paths: [],
+    decidable: false,
+    answer: 'text',
+    fields: prompt.fields.map((f) => ({
+      id: f.id,
+      label: f.label,
+      description: f.description,
+      options: f.options.map((o) => ({ value: o.value, label: o.label })),
+      multiple: f.multiple,
+      allowOther: f.allowOther,
+      required: f.required,
+    })),
+    answerBlockedReason: promptAnswerBlockedReason(prompt),
+  }));
+  return [...approvals, ...prompts];
+}
+
+/**
+ * 統括ページから答えさせない問い合わせの理由（Issue #2135）。答えてよければ`undefined`。
+ *
+ * 伏せ字の欄の値を要求ファイル（共有ディレクトリ）へ書かせない。真偽値・数値の欄は
+ * 統括ページに入力部品が無いため、タブ側で答えさせる。
+ */
+function promptAnswerBlockedReason(prompt: PendingPrompt): string | undefined {
+  if (prompt.fields.some((f) => f.secret)) {
+    return '伏せ字の入力欄があるため、会話のタブ側で答えてください';
+  }
+  if (prompt.fields.some((f) => f.input !== 'text')) {
+    return '数値・真偽値の入力欄があるため、会話のタブ側で答えてください';
+  }
+  return undefined;
 }
 
 function readApprovalPaths(state: Pick<ChatState, 'items'>, approval: PendingApproval): string[] {
@@ -408,33 +664,127 @@ export function readRecentTurns(
   state: Pick<ChatState, 'items'>,
   limit: number,
 ): SessionRecentTurn[] {
+  return readTurnPage(state, limit).turns;
+}
+
+/** `readTurnPage`の結果（Issue #2157）。 */
+export interface TurnPage {
+  turns: SessionRecentTurn[];
+  /** `turns[0]`が会話の何件目か（0始まり）。 */
+  start: number;
+  /** 会話全体の件数。 */
+  total: number;
+}
+
+/** ツール呼び出しとして載せる項目の種類と、見出しの前置き（Issue #2157）。 */
+const TOOL_TURN_PREFIX: Readonly<Record<string, string>> = {
+  commandExecution: '$ ',
+  mcpToolCall: 'ツール: ',
+  fileRead: '読み取り: ',
+  webSearch: '検索: ',
+};
+
+function capText(text: string, max: number): { text: string; truncated: boolean } {
+  // 切り詰めは末尾ではなく先頭を残す。発言の書き出しの方が何の話か判りやすい
+  return text.length > max
+    ? { text: text.slice(0, max), truncated: true }
+    : { text, truncated: false };
+}
+
+/**
+ * やり取りとして載せる項目か（Issue #2157）。位置（`turnStart`）はこれが真の項目だけで数える。
+ * 長い会話で毎回全件をたどるため、本文の複製を作らずに判定する。
+ */
+function isTurnItem(item: ChatItem): boolean {
+  if (item.kind === 'userMessage' || item.kind === 'agentMessage') {
+    return /\S/u.test(item.text);
+  }
+  if (item.kind === 'fileChange') {
+    return item.diffs.length > 0;
+  }
+  return TOOL_TURN_PREFIX[item.kind] !== undefined;
+}
+
+/** 会話の項目1件を、やり取り1件へ変える（Issue #2157）。載せない項目は`undefined`。 */
+function toRecentTurn(item: ChatItem): SessionRecentTurn | undefined {
+  if (!isTurnItem(item)) {
+    return undefined;
+  }
+  if (item.kind === 'userMessage' || item.kind === 'agentMessage') {
+    const text = item.text.trim();
+    return {
+      role: item.kind === 'userMessage' ? 'user' : 'agent',
+      ...capText(text, MAX_RECENT_TURN_CHARS),
+      // 巻き戻しの起点の指定に使う（Issue #2160）。会話の画面の巻き戻しボタンと同じ値
+      ...(item.kind === 'userMessage' && item.id !== '' ? { id: item.id } : {}),
+    };
+  }
+  if (item.kind === 'fileChange') {
+    const title = item.diffs
+      .map(
+        (diff) =>
+          `${diff.kind} ${diff.movePath === undefined ? diff.path : `${diff.path} → ${diff.movePath}`}`,
+      )
+      .join(', ');
+    const body = item.diffs.map((diff) => diff.diff).join('\n');
+    return {
+      role: 'diff',
+      ...capText(body, MAX_RECENT_TOOL_CHARS),
+      title: capText(title, MAX_RECENT_TITLE_CHARS).text,
+    };
+  }
+  const prefix = TOOL_TURN_PREFIX[item.kind] ?? '';
+  const output = capText(item.text, MAX_RECENT_TOOL_CHARS);
+  return {
+    role: 'tool',
+    text: output.text,
+    // 退避した出力（issue #1325）は`text`が末尾のプレビューだけなので、続きがあるものとして扱う
+    truncated: output.truncated || item.truncated === true || item.outputOffloaded === true,
+    title: capText(`${prefix}${item.detail}`, MAX_RECENT_TITLE_CHARS).text,
+  };
+}
+
+/**
+ * 会話のやり取りを範囲指定で取る（Issue #2157）。
+ *
+ * `before`（0始まり・含まない）より前の`limit`件を返す。`before`を省くと末尾から取る。
+ * 件数は`MAX_RECENT_TURNS`、本文の合計は`MAX_RECENT_PAGE_CHARS`で頭打ちにする。
+ * 要求側は返ってきた`start`を次の`before`にして先頭まで遡る。
+ */
+export function readTurnPage(
+  state: Pick<ChatState, 'items'>,
+  limit: number,
+  before?: number,
+): TurnPage {
   // NaN・Infinityは丸めを素通りして件数の比較を常に偽にする（1件も返らない）。
   // 呼び出し側が形だけ確かめて渡すため、ここで使える値へ倒しておく
   const count = Number.isFinite(limit)
     ? Math.min(Math.max(Math.trunc(limit), 1), MAX_RECENT_TURNS)
     : 1;
+  // 位置を数えるため、載せる項目は全件たどる（変換は範囲に入った分だけ）
+  const eligible = state.items.filter(isTurnItem);
+  const total = eligible.length;
+  const end =
+    before !== undefined && Number.isFinite(before)
+      ? Math.min(Math.max(Math.trunc(before), 0), total)
+      : total;
   const turns: SessionRecentTurn[] = [];
-  // 末尾から必要な分だけ遡る。長い会話で全件を走査しない
-  for (let i = state.items.length - 1; i >= 0 && turns.length < count; i -= 1) {
-    const item = state.items[i];
-    if (item === undefined) {
-      continue;
+  let chars = 0;
+  let start = end;
+  while (start > 0 && turns.length < count) {
+    const turn = toRecentTurn(eligible[start - 1] as ChatItem);
+    if (turn === undefined) {
+      break;
     }
-    const role =
-      item.kind === 'userMessage' ? 'user' : item.kind === 'agentMessage' ? 'agent' : undefined;
-    if (role === undefined || item.text.trim() === '') {
-      continue;
+    const size = turn.text.length + (turn.title?.length ?? 0);
+    if (turns.length > 0 && chars + size > MAX_RECENT_PAGE_CHARS) {
+      break;
     }
-    const text = item.text.trim();
-    const truncated = text.length > MAX_RECENT_TURN_CHARS;
-    turns.push({
-      role,
-      // 切り詰めは末尾ではなく先頭を残す。発言の書き出しの方が何の話か判りやすい
-      text: truncated ? text.slice(0, MAX_RECENT_TURN_CHARS) : text,
-      truncated,
-    });
+    chars += size;
+    turns.push(turn);
+    start -= 1;
   }
-  return turns.reverse();
+  return { turns: turns.reverse(), start, total };
 }
 
 /**
@@ -499,6 +849,14 @@ export interface ManagedChatSession {
    * Attention Indexが「引き継いだはずのタブが残っている」項目を作るのに使う。
    */
   handoffKept: OldTabKeptReason | undefined;
+  /** オーケストレータ配下の子セッションか（Issue #2171。返事待ちに出さない）。 */
+  taskManaged?: boolean | undefined;
+  /** 返事待ちのまま、まだ人が見ていないか（Issue #2171）。 */
+  replyUnread?: boolean | undefined;
+  /** セッションの目的の1文要約（Issue #2172）。まだ無ければ`undefined`。 */
+  purpose?: string | undefined;
+  /** 目的を要約したときのブランチ名（Issue #2172）。取れなければ`undefined`。 */
+  branch?: string | undefined;
 }
 
 /**
@@ -525,6 +883,20 @@ const LOCKED_TAB_MESSAGE_TYPES: ReadonlySet<string> = new Set([
   'prompt',
   'answerAskUserQuestion',
 ]);
+
+/**
+ * 入力欄を閉じたタブ（Issue #1465 分割案6b）でも、統括ページから通す操作（Issue #2135）。
+ * 開くことと、承認・質問への応答（とその中身の取り寄せ）だけ。
+ */
+const LOCKED_TAB_HUB_ACTIONS: ReadonlySet<SessionControlAction['kind']> = new Set([
+  'open',
+  'approvalDetail',
+  'approvalDecision',
+  'answerQuestion',
+  'answerPrompt',
+  // 見るだけ。変更（`changeSetting`）は断り、応答の`editable`でも変えられないと伝える（Issue #2159）
+  'sessionSettings',
+] as const);
 
 /** 入力欄を閉じたタブへの操作を断るときの案内。 */
 export const INPUT_LOCKED_MESSAGE =
@@ -657,14 +1029,51 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         activity: this.activityStateOf(entry),
         loop: { running: entry.loop.running, paused: entry.loop.isPaused },
         handoffKept: entry.handoffKept,
+        taskManaged: entry.taskManaged,
+        replyUnread: entry.replyUnread === true,
+        purpose: entry.purpose,
+        branch: entry.purposeBranch,
       });
     }
     return sessions;
   }
 
+  /**
+   * 返事待ちの未読を下げる（Issue #2171）。Mission Controlの詳細ペインで表示したときに
+   * `markRead`の操作から、タブを表示したときに`attachPanel`から呼ぶ。変わったら一覧を数え直させる。
+   */
+  protected markReplyRead(entry: TPanel): void {
+    if (entry.replyUnread !== true) {
+      return;
+    }
+    entry.replyUnread = false;
+    this.panelsChanged.fire();
+  }
+
+  /**
+   * ターンの終わり（idle以外→idle）を見て、返事待ちの未読を立てる（Issue #2171）。
+   * タブが見えていれば人が見ているので立てない。次のターンが始まったら下げる（返事待ちでなくなる）。
+   * オーケストレータ配下と引き継ぎ元として残ったタブは返事待ちに出さないので立てない。
+   */
+  private trackReplyUnread(entry: TPanel): void {
+    const activity = this.activityStateOf(entry);
+    const previous = entry.lastSeenActivity;
+    entry.lastSeenActivity = activity;
+    if (activity !== 'idle') {
+      entry.replyUnread = false;
+      return;
+    }
+    if (previous === undefined || previous === 'idle') {
+      return;
+    }
+    entry.replyUnread =
+      !entry.taskManaged && entry.handoffKept === undefined && entry.panel?.visible !== true;
+  }
+
   /** サブクラスの`postState`から呼ぶ。webviewへ送るのと同じ内容を進捗画面へも配る。 */
   protected fireStateChanged(entry: TPanel, state: ChatState): void {
     this.clearHandoffKeptIfReused(entry, state);
+    this.trackReplyUnread(entry);
     // お気に入り（Issue #1366）はスレッドIDが未確定の間`null`（メニュー非表示）、
     // 確定したタイミングで実値を送りたいので、下の早期returnより前に置く
     this.postFavorite(entry);
@@ -785,6 +1194,14 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
    * `dispatchMessage`へ渡す。画面で隠すだけだと、古いwebviewや細工したメッセージで送れてしまう。
    */
   private receiveWebviewMessage(entry: TPanel, message: unknown): void {
+    if (
+      typeof message === 'object' &&
+      message !== null &&
+      (message as Record<string, unknown>)['type'] === 'ready'
+    ) {
+      entry.webviewReady = true;
+      this.flushPendingComposerText(entry);
+    }
     if (!entry.inputLock) {
       this.dispatchMessage(entry, message);
       return;
@@ -817,6 +1234,9 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
     if (input.autoHandoffAutoApprove === true) {
       entry.session.setAutoHandoffAutoApprove(true);
+    }
+    if (input.suppressSkillRetro === true) {
+      entry.session.setSuppressSkillRetro?.(true);
     }
     entry.reflexOverride = input.reflex;
     entry.handoffDelegate = input.handoffDelegate;
@@ -1021,6 +1441,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     }
     panel.title = entry.title;
     panel.webview.options = { enableScripts: true };
+    entry.webviewReady = false;
     panel.webview.html = this.renderPanelHtml(entry, panel);
     const onMessage = panel.webview.onDidReceiveMessage((message: unknown) =>
       this.receiveWebviewMessage(entry, message),
@@ -1028,6 +1449,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     const onViewState = panel.onDidChangeViewState(() => {
       if (panel.visible) {
         entry.lastKnownViewColumn = panel.viewColumn;
+        // タブを表示したら返事待ちを既読にする（Issue #2171）
+        this.markReplyRead(entry);
       }
       if (panel.active) {
         this.active = entry;
@@ -1228,6 +1651,46 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   }
 
   /**
+   * Mission Controlから会話を閉じる（Issue #2149の1）。実行中のターンを止めてから、タブを
+   * 閉じたときと同じ`teardown`を通す。確認は呼び出し側（Mission Control）が済ませている。
+   *
+   * `teardown`だけではCodexのターンは止まらない（app-serverは共有で、会話を閉じても
+   * `turn/interrupt`を送らない）。止める処理は`stopTurnBeforeClose`がproviderごとに持つ。
+   *
+   * タスクの会話（オーケストレータ・ワークフローが管理）と入力欄を閉じたタブは閉じさせない。
+   * 管理側が会話の続きを待っているため、外から止めると工程が宙に浮く。
+   */
+  async closeSession(threadId: string): Promise<SessionControlResult> {
+    const entry = this.panels.get(threadId);
+    if (entry === undefined || entry.disposed) {
+      return { ok: false, error: 'この会話は既に閉じられています' };
+    }
+    if (entry.taskManaged || entry.inputLock) {
+      return {
+        ok: false,
+        error: 'タスクの会話は閉じられません（管理しているタスク側で止めてください）',
+      };
+    }
+    await this.stopTurnBeforeClose(entry);
+    this.teardown(entry);
+    return { ok: true };
+  }
+
+  /**
+   * `closeSession`が`teardown`の前に呼ぶ、実行中のターンを止める処理。既定は何もしない
+   * （Claude Codeは`teardown`の`session.dispose()`がCLIのプロセスを止める）。
+   */
+  protected async stopTurnBeforeClose(_entry: TPanel): Promise<void> {
+    // 既定は何もしない
+  }
+
+  /** 会話がこのウィンドウで開いているか。 */
+  hasOpenSession(threadId: string): boolean {
+    const entry = this.panels.get(threadId);
+    return entry !== undefined && !entry.disposed;
+  }
+
+  /**
    * セッション統括ページ（`sessionKanbanView.ts`）からの操作（Issue #1258）。
    *
    * 自ウィンドウのカードからも、別ウィンドウから要求ファイルで届いた分
@@ -1251,7 +1714,9 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       return { ok: false, error: 'この会話は既に閉じられています' };
     }
     // 入力欄を閉じたタブ（Issue #1465 分割案6b）は、統括ページからも開くことしか許さない
-    if (entry.inputLock && action.kind !== 'open') {
+    // ただし承認・質問への応答は、タブ側（`LOCKED_TAB_MESSAGE_TYPES`）と同じく通す。捨てると
+    // ロードマップ実行のセッションが止まったままになる（Issue #2135）
+    if (entry.inputLock && !LOCKED_TAB_HUB_ACTIONS.has(action.kind)) {
       return { ok: false, error: INPUT_LOCKED_MESSAGE };
     }
     switch (action.kind) {
@@ -1300,12 +1765,16 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       }
       case 'approvalDetail':
         return { ok: true, approvals: describePendingApprovals(entry.session.getState()) };
-      case 'recentTurns':
+      case 'recentTurns': {
+        const page = readTurnPage(entry.session.getState(), action.limit, action.before);
         return {
           ok: true,
-          turns: readRecentTurns(entry.session.getState(), action.limit),
+          turns: page.turns,
           capturedAt: Date.now(),
+          turnStart: page.start,
+          turnTotal: page.total,
         };
+      }
       case 'approvalDecision': {
         const state = entry.session.getState();
         // 取り寄せてから押すまでの間に、タブ側やTUIで解決されていることがある。
@@ -1316,12 +1785,19 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         if (approval === undefined) {
           return { ok: false, error: 'この承認要求は既に解決されています' };
         }
-        if (approval.kind === 'askUserQuestion') {
-          return { ok: false, error: 'この問い合わせは会話のタブ側で答えてください' };
+        // AskUserQuestionは拒否だけを通す（承認では選んだ答えを運べない）。答えは`answerQuestion`で送る
+        if (approval.kind === 'askUserQuestion' && action.decision !== 'decline') {
+          return { ok: false, error: '選択肢を選んで回答してください' };
         }
         this.resolveApproval(entry, approval.requestId, action.decision);
         return { ok: true };
       }
+      case 'answerQuestion':
+        return this.answerQuestionFromHub(entry, action.pendingRequestId, action.answers);
+      case 'answerPrompt':
+        return this.answerPromptFromHub(entry, action.pendingRequestId, action.submission);
+      case 'answerTaskRunQuestion':
+        return { ok: false, error: 'task runの質問は会話への操作として扱えません' };
       case 'handoffDetail': {
         const handoff = entry.pendingHandoff?.detail();
         return handoff === undefined
@@ -1339,7 +1815,377 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
             : { model: action.model, effort: action.effort ?? '' };
         return pending.decide(action.handoffRequestId, action.decision, settings);
       }
+      case 'sendWithAttachments':
+        return this.sendWithAttachmentsFromHub(entry, action.text, action.attachments);
+      case 'queuedMessages':
+        return {
+          ok: true,
+          queued: entry.session
+            .getState()
+            .queued.map((q) => toQueuedView(q.id ?? '', q.text, q.attachments)),
+        };
+      case 'cancelQueued': {
+        // 取り寄せてから押すまでにキューが進んでいても、idで同じ項目を探す。見つからなければ断る
+        const list = entry.session.getState().queued;
+        const hinted = list[action.index];
+        const at =
+          hinted !== undefined && hinted.id === action.queuedId
+            ? action.index
+            : list.findIndex((q) => q.id === action.queuedId);
+        if (action.queuedId === '' || at < 0) {
+          return { ok: false, error: 'この指示は既に送られたか、取り消されています' };
+        }
+        this.dispatchMessage(entry, { type: 'cancelQueued', index: at });
+        return { ok: true };
+      }
+      case 'fileCandidates':
+      case 'commandCandidates':
+        // 候補の取り寄せは非同期（ファイルの走査・CLIへの問い合わせ）。`controlSessionAsync`が扱う
+        return { ok: false, error: 'この操作は候補の取り寄せ口から呼んでください' };
+      case 'sessionSettings':
+        return { ok: true, settings: this.sessionSettingsOf(entry) };
+      case 'changeSetting':
+        // 全承認の同意ダイアログを待つため非同期。`controlSessionAsync`が扱う
+        return { ok: false, error: 'この操作は設定変更の口から呼んでください' };
+      case 'pin':
+      case 'unpin':
+        // 履歴の印は会話に属さない。`extension.ts`が要求元のウィンドウで済ませる
+        return { ok: false, error: 'ピン留めは会話への操作として扱えません' };
+      case 'markRead':
+        this.markReplyRead(entry);
+        return { ok: true };
+      case 'rename':
+      case 'fork':
+      case 'clear':
+      case 'handoff':
+      case 'rewindPreview':
+      case 'rewind':
+        // 保存・分岐・CLIへの問い合わせを待つため非同期。`controlSessionAsync`が扱う
+        return { ok: false, error: 'この操作はセッション操作の口から呼んでください' };
     }
+  }
+
+  /**
+   * `controlSession`の非同期版（Issue #2158、#2159）。候補の取り寄せ（`fileCandidates` /
+   * `commandCandidates`）と設定の変更（`changeSetting`）をここで扱い、ほかは`controlSession`へ回す。
+   */
+  async controlSessionAsync(
+    threadId: string,
+    action: SessionControlAction,
+  ): Promise<SessionControlResult> {
+    if (
+      action.kind !== 'fileCandidates' &&
+      action.kind !== 'commandCandidates' &&
+      action.kind !== 'changeSetting' &&
+      !ASYNC_SESSION_OPS.has(action.kind)
+    ) {
+      return this.controlSession(threadId, action);
+    }
+    const entry = this.panels.get(threadId);
+    if (entry === undefined || entry.disposed) {
+      return { ok: false, error: 'この会話は既に閉じられています' };
+    }
+    if (entry.inputLock) {
+      return { ok: false, error: INPUT_LOCKED_MESSAGE };
+    }
+    if (action.kind === 'changeSetting') {
+      return this.changeSettingFromHub(entry, action.change);
+    }
+    if (ASYNC_SESSION_OPS.has(action.kind)) {
+      try {
+        return await this.sessionOpFromHub(entry, action);
+      } catch (e: unknown) {
+        return {
+          ok: false,
+          error: `操作に失敗しました: ${e instanceof Error ? e.message : String(e)}`,
+        };
+      }
+    }
+    try {
+      if (action.kind === 'fileCandidates') {
+        return { ok: true, files: await this.listFileCandidates(entry, action.query) };
+      }
+      return { ok: true, commands: await this.listSlashCommands(entry) };
+    } catch (e: unknown) {
+      return { ok: false, error: `候補を取り寄せられませんでした: ${String(e)}` };
+    }
+  }
+
+  /**
+   * Mission Controlからの設定変更（Issue #2159）。model・effortは今の候補にある値だけを通し、
+   * 適用はタブの設定行と同じ経路（各サブクラスの`applySessionSetting`）へ回す。
+   * 応答には変更後の設定を載せる（取り消し・作業中で変わらなかったことも画面が読み取れる）。
+   */
+  private async changeSettingFromHub(
+    entry: TPanel,
+    change: SessionSettingChange,
+  ): Promise<SessionControlResult> {
+    const before = this.sessionSettingsOf(entry);
+    const rejected = rejectSettingChange(before, change);
+    if (rejected !== undefined) {
+      return { ok: false, error: rejected, settings: before };
+    }
+    try {
+      const error = await this.applySessionSetting(entry, change);
+      const settings = this.sessionSettingsOf(entry);
+      return error === undefined ? { ok: true, settings } : { ok: false, error, settings };
+    } catch (e: unknown) {
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+        settings: this.sessionSettingsOf(entry),
+      };
+    }
+  }
+
+  /**
+   * Mission Controlで選んだセッションへのrename・fork・clear・引き継ぎ・巻き戻し（Issue #2160）。
+   *
+   * 確認（clear・巻き戻し）は要求元のMission Controlが出し済み。受信側のウィンドウにダイアログを
+   * 出すと、別ウィンドウから操作した人には見えないまま止まるため、ここでは出さずに結果を返す。
+   */
+  private async sessionOpFromHub(
+    entry: TPanel,
+    action: SessionControlAction,
+  ): Promise<SessionControlResult> {
+    const done = (error: string | undefined): SessionControlResult =>
+      error === undefined ? { ok: true } : { ok: false, error };
+    switch (action.kind) {
+      case 'rename':
+        return done(await this.renameEntry(entry, action.name));
+      case 'fork':
+        return done(await this.forkEntry(entry));
+      case 'clear':
+        return done(await this.clearFromHub(entry));
+      case 'handoff':
+        return done(this.startHandoffFromHub(entry));
+      case 'rewindPreview':
+      case 'rewind': {
+        // 起点は人の発言の固定のidで指す。今の会話に無いidは、取り寄せた後に会話が
+        // 作り直された（clear等）か別の会話のidなので、近い発言へ倒さずに断る
+        const found = entry.session
+          .getState()
+          .items.some((item) => item.kind === 'userMessage' && item.id === action.messageId);
+        if (!found) {
+          return {
+            ok: false,
+            error: 'この発言は会話に見つかりませんでした（会話が変わった可能性があります）',
+          };
+        }
+        if (action.kind === 'rewindPreview') {
+          const preview = await this.previewRewind(entry, action.messageId);
+          if ('error' in preview) {
+            this.rewindPreviews.delete(entry);
+            return { ok: false, error: preview.error };
+          }
+          this.rewindPreviews.set(entry, { messageId: action.messageId, files: preview.files });
+          return { ok: true, rewindFiles: preview.files };
+        }
+        return done(await this.rewindFromHub(entry, action.messageId));
+      }
+      default:
+        return { ok: false, error: 'この操作は扱えません' };
+    }
+  }
+
+  /**
+   * Mission Controlで確かめた巻き戻しの内容（Issue #2160）。entryごとに最後の1件だけ持つ。
+   * 確かめてから押すまでに会話が進むと戻るファイルが増えるため、押したときに見せた一覧と
+   * 突き合わせる。
+   */
+  private readonly rewindPreviews = new WeakMap<
+    TPanel,
+    { messageId: string; files: readonly string[] }
+  >();
+
+  /**
+   * Mission Controlからの巻き戻しの適用（Issue #2160）。確かめた発言・ファイルと今の状態が
+   * 食い違うときは戻さずに断る（人が見ていないファイルまで戻さないように）。
+   */
+  private async rewindFromHub(entry: TPanel, messageId: string): Promise<string | undefined> {
+    const confirmed = this.rewindPreviews.get(entry);
+    if (confirmed?.messageId !== messageId) {
+      return '戻るファイルを確かめてから巻き戻してください';
+    }
+    if (entry.session.getState().busy) {
+      return '実行中の会話は戻せません。中断してから戻してください';
+    }
+    const current = await this.previewRewind(entry, messageId);
+    if ('error' in current) {
+      this.rewindPreviews.delete(entry);
+      return current.error;
+    }
+    const before = [...confirmed.files].sort();
+    const after = [...current.files].sort();
+    if (before.length !== after.length || before.some((file, i) => file !== after[i])) {
+      this.rewindPreviews.set(entry, { messageId, files: current.files });
+      return '確かめた後に戻るファイルが変わりました。確かめ直してください';
+    }
+    if (current.files.length === 0) {
+      return '戻すファイルの変更はありません';
+    }
+    // 確かめた後に会話が動き出していないか、問い合わせを待った後にもう一度見る
+    if (entry.session.getState().busy) {
+      return '実行中の会話は戻せません。中断してから戻してください';
+    }
+    this.rewindPreviews.delete(entry);
+    return this.applyRewind(entry, messageId);
+  }
+
+  /** 名前を変える（Issue #2160）。値は確かめ済み。変えられなかったときは理由の文を返す。 */
+  protected abstract renameEntry(entry: TPanel, name: string): Promise<string | undefined>;
+
+  /** 会話全体を分岐して新しいタブで開く（Issue #2160）。 */
+  protected abstract forkEntry(entry: TPanel): Promise<string | undefined>;
+
+  /** 確認なしでクリアする（Issue #2160。確認は要求元が出し済み）。 */
+  protected abstract clearFromHub(entry: TPanel): Promise<string | undefined>;
+
+  /** 手動の引き継ぎを始める（Issue #2160）。完了は待たない。始められなければ理由の文を返す。 */
+  protected abstract startHandoffFromHub(entry: TPanel): string | undefined;
+
+  /** 巻き戻しで戻るファイル（Issue #2160）。既定は扱えない（Claudeだけが上書きする）。 */
+  protected previewRewind(
+    _entry: TPanel,
+    _messageId: string,
+  ): Promise<{ files: string[] } | { error: string }> {
+    return Promise.resolve({ error: '巻き戻しはClaudeのセッションだけで使えます' });
+  }
+
+  /** ファイルを発言の直前まで戻す（Issue #2160）。既定は扱えない（Claudeだけが上書きする）。 */
+  protected applyRewind(_entry: TPanel, _messageId: string): Promise<string | undefined> {
+    return Promise.resolve('巻き戻しはClaudeのセッションだけで使えます');
+  }
+
+  /** 今のmodel・effort・承認レベル・plan/fast mode（Issue #2159）。 */
+  protected abstract sessionSettingsOf(entry: TPanel): SessionSettingsDetail;
+
+  /**
+   * 設定を1つ変える（Issue #2159）。値の形と候補は呼び出し側が確かめ済み。
+   * 変えられなかったときは理由の文を返す。
+   */
+  protected abstract applySessionSetting(
+    entry: TPanel,
+    change: SessionSettingChange,
+  ): Promise<string | undefined>;
+
+  /** `@`の候補（チャットタブの入力欄と同じ絞り込み。Issue #2158）。 */
+  protected abstract listFileCandidates(entry: TPanel, query: string): Promise<string[]>;
+
+  /** `/`の候補（チャットタブの入力欄と同じ一覧。Issue #2158）。 */
+  protected abstract listSlashCommands(entry: TPanel): Promise<SlashCommand[]>;
+
+  /**
+   * Mission Controlから画像を添えて送る（Issue #2158）。
+   *
+   * タブの入力欄と同じく、添付箱（`entry.attachments`）へ入れてから`send`を流す（空のときだけ）。1枚でも
+   * 受け付けられなければ、入れた分を戻して何も送らない。擬似コマンドなど添付を使わない送信で
+   * 箱に残った分も戻す（残すと、次にタブから送った発言へ黙って付いてしまう）。
+   */
+  private sendWithAttachmentsFromHub(
+    entry: TPanel,
+    text: string,
+    inputs: readonly AttachmentInput[],
+  ): SessionControlResult {
+    // タブで付けて未送信の画像があると、送信で一緒に取り出され、枚数・合計の上限も合算される。
+    // 利用者の意図しない画像を送らないよう、混ぜずに断る
+    if (entry.attachments.list.length > 0) {
+      return {
+        ok: false,
+        error: 'この会話のタブに未送信の画像があります（タブで送るか外してから送ってください）',
+      };
+    }
+    const added: string[] = [];
+    const rollback = (): void => {
+      for (const id of added) {
+        entry.attachments.remove(id);
+      }
+    };
+    for (const input of inputs) {
+      const result = entry.attachments.add(input.name, input.dataUrl);
+      if ('reason' in result) {
+        rollback();
+        return { ok: false, error: `${input.name}: ${result.reason}` };
+      }
+      added.push(result.attachment.id);
+    }
+    // 送る処理は添付箱から同期に取り出す（`take`より前に待ちが無い）。ここで残っていれば使われていない
+    this.dispatchMessage(entry, { type: 'send', text });
+    const left = new Set(entry.attachments.list.map((a) => a.id));
+    if (added.some((id) => left.has(id))) {
+      rollback();
+      return { ok: false, error: 'この指示には画像を添えられません（画像を外して送ってください）' };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * 統括ページからのAskUserQuestionへの回答（Issue #2135）。チャットタブの選択UIと同じ
+   * `answerAskUserQuestion`を呼ぶ。
+   *
+   * 既にタブ側・他のウィンドウで答えられていれば、セッションの承認一覧から消えている。
+   * そのときは送らずに「既に回答済み」を返す（二重に送らない）。
+   */
+  private answerQuestionFromHub(
+    entry: TPanel,
+    pendingRequestId: string,
+    answers: Record<string, string[]>,
+  ): SessionControlResult {
+    const approval = entry.session
+      .getState()
+      .approvals.find(
+        (a) => a.kind === 'askUserQuestion' && String(a.requestId) === pendingRequestId,
+      );
+    if (approval === undefined) {
+      return { ok: false, error: ALREADY_ANSWERED_MESSAGE };
+    }
+    const answer = entry.session.answerAskUserQuestion;
+    if (answer === undefined) {
+      return { ok: false, error: 'この会話は質問への回答を受け付けません' };
+    }
+    const selections = validateAskUserQuestionAnswers(approval.questions ?? [], answers);
+    if (typeof selections === 'string') {
+      return { ok: false, error: selections };
+    }
+    answer.call(entry.session, approval.requestId, selections);
+    return { ok: true };
+  }
+
+  /**
+   * 統括ページからのCodexの問い合わせへの回答（Issue #2135）。チャットタブのフォームと同じ
+   * `answerPrompt`を呼ぶ。制約に反する回答はセッション側が差し戻し、問い合わせを残す。
+   */
+  private answerPromptFromHub(
+    entry: TPanel,
+    pendingRequestId: string,
+    submission: PromptSubmission,
+  ): SessionControlResult {
+    const findPrompt = (): PendingPrompt | undefined =>
+      entry.session.getState().prompts.find((p) => String(p.requestId) === pendingRequestId);
+    const prompt = findPrompt();
+    if (prompt === undefined) {
+      return { ok: false, error: ALREADY_ANSWERED_MESSAGE };
+    }
+    const answer = entry.session.answerPrompt;
+    if (answer === undefined) {
+      return { ok: false, error: 'この会話は問い合わせへの回答を受け付けません' };
+    }
+    // 断る・取り消すは値を運ばないため、欄の種類によらず通す
+    const blocked = submission.action === 'submit' ? promptAnswerBlockedReason(prompt) : undefined;
+    if (blocked !== undefined) {
+      return { ok: false, error: blocked };
+    }
+    answer.call(entry.session, prompt.requestId, submission);
+    // 差し戻されたら問い合わせは残り、欄ごとの理由が付く
+    const after = findPrompt();
+    if (after !== undefined) {
+      const reasons = Object.values(after.errors);
+      return {
+        ok: false,
+        error: reasons.length > 0 ? reasons.join(' / ') : '回答を受け付けられませんでした',
+      };
+    }
+    return { ok: true };
   }
 
   /**
@@ -1449,6 +2295,33 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
   ): Promise<string>;
 
   /**
+   * `id`の会話の入力欄へ`text`を入れる（送信しない。Issue #2180のTodoからの起動）。
+   * 開いた直後でwebviewがまだ読み込み中なら、`ready`が届いてから入れる。会話が無い・入力欄を
+   * 閉じたタブなら`false`。
+   */
+  insertComposerDraft(id: string, text: string): boolean {
+    const entry = this.panels.get(id);
+    if (entry === undefined || entry.panel === undefined || entry.inputLock) {
+      return false;
+    }
+    entry.pendingComposerText =
+      entry.pendingComposerText === undefined ? text : `${entry.pendingComposerText}\n${text}`;
+    if (entry.webviewReady === true) {
+      this.flushPendingComposerText(entry);
+    }
+    return true;
+  }
+
+  private flushPendingComposerText(entry: TPanel): void {
+    const text = entry.pendingComposerText;
+    if (text === undefined || entry.panel === undefined) {
+      return;
+    }
+    entry.pendingComposerText = undefined;
+    void entry.panel.webview.postMessage({ type: 'insertComposerText', text });
+  }
+
+  /**
    * エディタの選択範囲（issue #292）を送る先。最後にアクティブだった画面を返す
    * （`this.active`。名前変更・クリアと同じ対象）。開いているタブが無ければ`undefined`。
    *
@@ -1548,6 +2421,29 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
 
   setAgentReportedRecorder(recorder: AgentReportedRecorder): void {
     this.agentReported = recorder;
+  }
+
+  /**
+   * 通常チャットの会話を区切って振り返りへ渡す口（Issue #2123）。渡されていなければ追わない。
+   * Codex・Claudeの両画面で同じ追跡器を共有する（鍵はタブのエントリ）。
+   */
+  private conversationTracker: ChatConversationTracker | undefined;
+
+  setConversationTracker(tracker: ChatConversationTracker): void {
+    this.conversationTracker = tracker;
+  }
+
+  /**
+   * 状態が変わるたびに呼ぶ（`onSessionChange`）。ターンの開始・終了から会話の区切りを追う。
+   * 渡すのは件数・真偽値・区分・コストだけで、会話本文と編集したファイルのパスは渡さない。
+   */
+  protected trackConversation(entry: TPanel, state: ChatState): void {
+    this.conversationTracker?.observe(entry, {
+      engine: this.favoriteProvider,
+      cwd: entry.cwd,
+      taskManaged: entry.taskManaged,
+      state: toTrackedChatState(state),
+    });
   }
 
   /**
@@ -1691,6 +2587,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       entry.postTimer = undefined;
     }
     entry.loop.stop('manual');
+    // 会話の区切り（Issue #2123）。無入力で既に区切った分は追跡器が二重に渡さない
+    this.conversationTracker?.end(entry);
     // 引き継ぎの確認待ちのままタブを閉じた分を中止する（Issue #1280）。放っておくと
     // 誰も答えない確認を`chooseHandoffModelSettings`が待ち続ける
     entry.pendingHandoff?.cancelForTeardown();
@@ -1698,6 +2596,7 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     entry.skillSelectGate?.abortAll();
     // 要約エージェント（issue #1473）の実行中に閉じたら、要約のプロセスも止める
     entry.endSummary?.dispose();
+    entry.sessionPurpose?.dispose();
     entry.session.dispose();
     entry.panel?.dispose();
     entry.panel = undefined;
@@ -1750,6 +2649,51 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       logWarn: (message) => log.warn(message),
       logInfo: (message) => log.info(message),
     });
+  }
+
+  /**
+   * セッションの目的の1文要約（Issue #2172）の発火判定。ターン完了時に呼ぶ。
+   *
+   * 無効のときは何も起動しない。ループ・ワークフロー（タスク管理下のセッション）・自動返信の
+   * 実行中は、発話が人のものではないため要約しない。呼び直すかどうか（発話が増えたか・回数の
+   * 上限）は`SessionPurposeRunner`が判定する。要約ができたら一覧を数え直させる。
+   */
+  protected maybeSessionPurpose(
+    entry: TPanel,
+    state: ChatState,
+    host: HeadlessProvider,
+    executableFor: (provider: HeadlessProvider) => string,
+    log: Logger,
+  ): void {
+    const settings = readSessionPurposeConfig();
+    if (!settings.enabled || entry.taskManaged || entry.loop.running || state.autoReply) {
+      return;
+    }
+    entry.sessionPurpose ??= new SessionPurposeRunner();
+    entry.sessionPurpose.maybeStart({
+      settings,
+      host,
+      executableFor,
+      items: state.items,
+      onPurpose: (purpose) => {
+        void this.resolvePurposeBranch(entry.cwd).then((branch) => {
+          if (entry.disposed) {
+            return;
+          }
+          entry.purpose = purpose;
+          // ブランチ名はgitが制御文字を拒むが、双方向制御文字は通るため同じ処理で1行へ畳む
+          entry.purposeBranch = inlineText(branch, MAX_SHARED_BRANCH_CHARS);
+          this.panelsChanged.fire();
+        });
+      },
+      logWarn: (message) => log.warn(message),
+      logInfo: (message) => log.info(message),
+    });
+  }
+
+  /** 目的の要約に添えるブランチ名を取る（Issue #2172）。テストで差し替える。 */
+  protected resolvePurposeBranch(cwd: string | undefined): Promise<string | undefined> {
+    return resolveGitBranch(cwd);
   }
 
   /**

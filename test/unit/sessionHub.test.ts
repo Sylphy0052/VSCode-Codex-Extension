@@ -14,11 +14,18 @@ import {
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChatItem } from '../../src/appserver/chatState';
 import type { Logger } from '../../src/log';
+import { readTurnPage } from '../../src/view/chatManagerBase';
+import { parseAction } from '../../src/view/sessionControlMessage';
 import {
+  collectSkillUses,
   generateWindowId,
+  MAX_SHARED_SKILLS,
   isSharedApprovalDecision,
   isSharedHandoffDecision,
+  MAX_SHARED_PURPOSE_CHARS,
+  parseSharedSkills,
   SessionHubReader,
   SessionHubRequestPort,
   SessionHubRequestWatcher,
@@ -163,6 +170,63 @@ describe('補助関数', () => {
     }
     expect(isSharedHandoffDecision('abort')).toBe(false);
     expect(isSharedHandoffDecision(1)).toBe(false);
+  });
+
+  it('collectSkillUsesは起動時刻を持つskillContextだけを古い順に集める（Issue #2173）', () => {
+    const items = [
+      { kind: 'skillContext', detail: 'first', skillLaunchedAt: 1 },
+      { kind: 'skillContext', detail: 'reinjected' },
+      { kind: 'userMessage', detail: '', skillLaunchedAt: 2 },
+      { kind: 'skillContext', detail: '', skillLaunchedAt: 3 },
+      { kind: 'skillContext', detail: 'second', skillLaunchedAt: 4 },
+    ];
+    expect(collectSkillUses(items)).toEqual([
+      { name: 'first', at: 1 },
+      { name: 'second', at: 4 },
+    ]);
+    expect(collectSkillUses([])).toBeUndefined();
+  });
+
+  it('collectSkillUsesは新しい方からMAX_SHARED_SKILLS件に絞る（Issue #2173）', () => {
+    const items = Array.from({ length: MAX_SHARED_SKILLS + 5 }, (_, i) => ({
+      kind: 'skillContext',
+      detail: `s${String(i)}`,
+      skillLaunchedAt: i,
+    }));
+    const uses = collectSkillUses(items) ?? [];
+    expect(uses).toHaveLength(MAX_SHARED_SKILLS);
+    expect(uses[0]?.name).toBe('s5');
+    expect(uses.at(-1)?.name).toBe(`s${String(MAX_SHARED_SKILLS + 4)}`);
+  });
+
+  it('parseSharedSkillsは時刻が0以下や未来のものを落とす（Issue #2173）', () => {
+    const now = Date.parse('2026-11-26T12:00:00.000Z');
+    expect(
+      parseSharedSkills(
+        [
+          { name: 'zero', at: 0 },
+          { name: 'past', at: now - 1_000 },
+          { name: 'soon', at: now + 30_000 },
+          { name: 'future', at: now + 3_600_000 },
+        ],
+        now,
+      ),
+    ).toEqual([
+      { name: 'past', at: now - 1_000 },
+      { name: 'soon', at: now + 30_000 },
+    ]);
+  });
+
+  it('parseSharedSkillsは新しい方から有効な要素をMAX_SHARED_SKILLS件集めて止める（Issue #2173）', () => {
+    const valid = Array.from({ length: MAX_SHARED_SKILLS + 10 }, (_, i) => ({
+      name: `s${String(i)}`,
+      at: i + 1,
+    }));
+    // 末尾の壊れた要素は数えず、その手前から上限まで集める
+    const skills = parseSharedSkills([...valid, 'junk', { name: 1, at: 2 }], 1_000) ?? [];
+    expect(skills).toHaveLength(MAX_SHARED_SKILLS);
+    expect(skills[0]?.name).toBe('s10');
+    expect(skills.at(-1)?.name).toBe(`s${String(MAX_SHARED_SKILLS + 9)}`);
   });
 });
 
@@ -366,6 +430,95 @@ describe('SessionHubReader', () => {
     expect(sessions.map((s) => s.threadId)).toEqual(['ok-with-loop', 'bad-loop', 'no-cwd']);
     expect(sessions[0]?.loop).toEqual({ running: true, paused: true });
     expect(sessions[1]?.loop).toBeUndefined();
+  });
+
+  it('返事待ちの印（taskManaged・handoffKept・unread）はtrueだけを通す（Issue #2171）', async () => {
+    const { reader, internals } = makeReader();
+    const other = randomUUID();
+    await putSessionFile(
+      other,
+      fileBody(other, [
+        session('marked', { taskManaged: true, handoffKept: true, unread: true }),
+        session('junk', { taskManaged: 'yes', handoffKept: 1, unread: 'true' } as never),
+      ]),
+    );
+    await internals.reconcileAll();
+    const sessions = reader.getOthers()[0]?.sessions ?? [];
+    expect(sessions[0]).toMatchObject({ taskManaged: true, handoffKept: true, unread: true });
+    expect(sessions[1]?.taskManaged).toBeUndefined();
+    expect(sessions[1]?.handoffKept).toBeUndefined();
+    expect(sessions[1]?.unread).toBeUndefined();
+  });
+
+  it('目的の要約とブランチ名は1行へ畳んで長さを切り、文字列以外は落とす（Issue #2172）', async () => {
+    const { reader, internals } = makeReader();
+    const other = randomUUID();
+    await putSessionFile(
+      other,
+      fileBody(other, [
+        session('ok', { purpose: `行1\n行2${'あ'.repeat(200)}`, branch: 'feature/1/x' }),
+        session('junk', { purpose: 1, branch: '  ' } as never),
+      ]),
+    );
+    await internals.reconcileAll();
+    const sessions = reader.getOthers()[0]?.sessions ?? [];
+    expect(sessions[0]?.purpose?.startsWith('行1 行2')).toBe(true);
+    expect(sessions[0]?.purpose?.length).toBe(MAX_SHARED_PURPOSE_CHARS);
+    expect(sessions[0]?.branch).toBe('feature/1/x');
+    expect(sessions[1]?.purpose).toBeUndefined();
+    expect(sessions[1]?.branch).toBeUndefined();
+  });
+
+  it('目的の要約とブランチ名から行区切り・C1制御文字・双方向制御文字・不可視文字を除く（Issue #2172）', async () => {
+    const { reader, internals } = makeReader();
+    const other = randomUUID();
+    const lineSep = String.fromCodePoint(0x2028);
+    const paraSep = String.fromCodePoint(0x2029);
+    const nel = String.fromCodePoint(0x85);
+    const rlo = String.fromCodePoint(0x202e);
+    const zwsp = String.fromCodePoint(0x200b);
+    await putSessionFile(
+      other,
+      fileBody(other, [
+        session('ok', {
+          purpose: `A${lineSep}B${nel}C${rlo}D${zwsp}E`,
+          branch: `x${paraSep}y${rlo}z`,
+        }),
+      ]),
+    );
+    await internals.reconcileAll();
+    const s = reader.getOthers()[0]?.sessions[0];
+    expect(s?.purpose).toBe('A B CDE');
+    expect(s?.branch).toBe('x yz');
+  });
+
+  it('起動したskillは要素ごとに確かめ、名前を1行へ均す（Issue #2173）', async () => {
+    const { reader, internals } = makeReader();
+    const other = randomUUID();
+    const rlo = String.fromCodePoint(0x202e);
+    await putSessionFile(
+      other,
+      fileBody(other, [
+        session('ok', {
+          skills: [
+            { name: `a${rlo}b\nc`, at: 10 },
+            { name: 1, at: 20 },
+            { name: 'x', at: -1 },
+            { name: 'y', at: 9e15 },
+            'junk',
+            { name: 'z', at: 30 },
+          ] as never,
+        }),
+        session('junk', { skills: 'nope' as never }),
+      ]),
+    );
+    await internals.reconcileAll();
+    const sessions = reader.getOthers()[0]?.sessions ?? [];
+    expect(sessions[0]?.skills).toEqual([
+      { name: 'ab c', at: 10 },
+      { name: 'z', at: 30 },
+    ]);
+    expect(sessions[1]?.skills).toBeUndefined();
   });
 
   it('stale（mtimeまたはupdatedAtが45秒超）のウィンドウは除外する', async () => {
@@ -631,6 +784,18 @@ describe('SessionHubRequestWatcher', () => {
     expect(reply.ok).toBe(true);
     expect(reply.payload).toEqual({ capturedAt: 1, turns: [] });
     expect(log.info).toHaveBeenCalledWith(expect.stringContaining('sendの要求を受け付けました'));
+  });
+
+  it('名前の変更と巻き戻しの要求は名前と発言のidを渡す（Issue #2160）', async () => {
+    const handler = vi.fn((): SessionHubRequestOutcome => ({ ok: true }));
+    const rename = await putRequest(target, { kind: 'rename', name: '新しい名前' });
+    const rewind = await putRequest(target, { kind: 'rewind', messageId: 'u-1' });
+    makeWatcher(handler).start();
+    await until(() => exists(replyPath(rewind.requestId)));
+    await until(() => exists(replyPath(rename.requestId)));
+    const reqs = handler.mock.calls.map((c) => (c as unknown as [SessionHubRequest])[0]);
+    expect(reqs.find((r) => r.kind === 'rename')).toMatchObject({ name: '新しい名前' });
+    expect(reqs.find((r) => r.kind === 'rewind')).toMatchObject({ messageId: 'u-1' });
   });
 
   it('start後に置かれた要求もfs.watchで拾い、同期ハンドラの結果も返せる', async () => {
@@ -930,6 +1095,42 @@ describe('SessionHubRequestPort', () => {
     expect(sq?.error).toHaveLength(2000);
   });
 
+  it('巻き戻しで戻るファイルを応答から読む（Issue #2160）', async () => {
+    respondWith(target, (requestId) =>
+      JSON.stringify({ requestId, ok: true, payload: { rewindFiles: [] } }),
+    );
+    const empty = await makePort().request(target, {
+      kind: 'rewindPreview',
+      provider: 'claude',
+      threadId: 't',
+      messageId: 'u-1',
+    });
+    expect(empty.payload).toEqual({ rewindFiles: [] });
+  });
+
+  it('直近のやり取りは人の発言のidだけを形を確かめて読む（Issue #2160）', async () => {
+    respondWith(target, (requestId) =>
+      JSON.stringify({
+        requestId,
+        ok: true,
+        payload: {
+          capturedAt: 1,
+          turns: [
+            { role: 'user', text: 'a', truncated: false, id: 'u-1' },
+            { role: 'agent', text: 'b', truncated: false, id: 'x' },
+            { role: 'user', text: 'c', truncated: false, id: 'bad\nid' },
+          ],
+        },
+      }),
+    );
+    const turns = await makePort().request(target, {
+      kind: 'recentTurns',
+      provider: 'claude',
+      threadId: 't',
+    });
+    expect(turns.payload?.turns?.map((t) => t.id)).toEqual(['u-1', undefined, undefined]);
+  });
+
   it('脇道の質問の応答は不正なstatusならpayloadごと捨てる', async () => {
     respondWith(target, (requestId) =>
       JSON.stringify({
@@ -953,11 +1154,11 @@ describe('SessionHubRequestPort', () => {
       'str',
       { role: 'system', text: 'x' },
       { role: 'user', text: 5 },
-      { role: 'user', text: 'u'.repeat(2500) },
+      { role: 'user', text: 'u'.repeat(10_500) },
       { role: 'agent', text: 'short', truncated: true },
       { role: 'agent', text: 'plain' },
     ];
-    for (let i = 0; i < 50; i += 1) {
+    for (let i = 0; i < 70; i += 1) {
       entries.push({ role: 'user', text: `n${i}` });
     }
     respondWith(target, (requestId) =>
@@ -970,11 +1171,59 @@ describe('SessionHubRequestPort', () => {
       limit: 10,
     });
     const turns = reply.payload?.turns ?? [];
-    expect(turns).toHaveLength(40);
-    expect(turns[0]).toEqual({ role: 'user', text: 'u'.repeat(2000), truncated: true });
+    expect(turns).toHaveLength(60);
+    expect(turns[0]).toEqual({ role: 'user', text: 'u'.repeat(10_000), truncated: true });
     expect(turns[1]).toEqual({ role: 'agent', text: 'short', truncated: true });
     expect(turns[2]).toEqual({ role: 'agent', text: 'plain', truncated: false });
     expect(reply.payload?.capturedAt).toBe(123);
+  });
+
+  it('ツール呼び出し・diffと範囲を読む（Issue #2157）', async () => {
+    const turns = [
+      { role: 'user', text: 'q' },
+      { role: 'tool', text: 'out', title: '$ ls', truncated: false },
+      { role: 'diff', text: '+a', title: 'update a.ts', truncated: false },
+    ];
+    respondWith(target, (requestId) =>
+      JSON.stringify({ requestId, ok: true, payload: { turns, turnStart: 7, turnTotal: 10 } }),
+    );
+    const reply = await makePort().request(target, {
+      kind: 'recentTurns',
+      provider: 'codex',
+      threadId: 't',
+      limit: 3,
+      before: 10,
+    });
+    expect(reply.payload?.turns?.map((t) => [t.role, t.title])).toEqual([
+      ['user', undefined],
+      ['tool', '$ ls'],
+      ['diff', 'update a.ts'],
+    ]);
+    expect([reply.payload?.turnStart, reply.payload?.turnTotal]).toEqual([7, 10]);
+  });
+
+  it('要素を落とした応答では範囲を捨てる（Issue #2157）', async () => {
+    const turns = [
+      { role: 'user', text: 'q' },
+      { role: 'tool', text: 'out', title: '$ ls', truncated: false },
+      { role: 'diff', text: '+a', title: 'update a.ts', truncated: false },
+    ];
+    respondWith(target, (requestId) =>
+      JSON.stringify({
+        requestId,
+        ok: true,
+        payload: { turns: [...turns, { role: 'system', text: 'x' }], turnStart: 6, turnTotal: 10 },
+      }),
+    );
+    const broken = await makePort().request(target, {
+      kind: 'recentTurns',
+      provider: 'codex',
+      threadId: 't',
+      limit: 4,
+    });
+    expect(broken.payload?.turns).toHaveLength(3);
+    expect(broken.payload?.turnStart).toBeUndefined();
+    expect(broken.payload?.turnTotal).toBeUndefined();
   });
 
   it('turnsのcapturedAtが数値でなければ省く', async () => {
@@ -1138,5 +1387,86 @@ describe('SessionHubRequestPort', () => {
     });
     expect(reply).toMatchObject({ ok: false, error: 'denied' });
     expect(reply.payload).toBeUndefined();
+  });
+});
+
+describe('会話を範囲指定で遡る（Issue #2157）', () => {
+  it('他ウィンドウの会話も、session-hub越しにbeforeを辿って先頭まで届く（ツール・diff・長文混じり）', async () => {
+    expect(parseAction({ action: 'recentTurns', limit: 50, before: 80 })).toEqual({
+      kind: 'recentTurns',
+      limit: 50,
+      before: 80,
+    });
+    const items: ChatItem[] = [];
+    for (let i = 0; i < 160; i += 1) {
+      const base = { id: `i${i}`, detail: 'ls', status: undefined, turnId: undefined, diffs: [] };
+      if (i % 5 === 0) {
+        items.push({ ...base, kind: 'reasoning', text: '考え中' } as ChatItem);
+      } else if (i % 7 === 0) {
+        items.push({
+          ...base,
+          kind: 'fileChange',
+          text: '',
+          diffs: [{ path: `a${i}.ts`, kind: 'update', movePath: undefined, diff: `+${i}` }],
+        } as ChatItem);
+      } else if (i % 11 === 0) {
+        items.push({ ...base, kind: 'commandExecution', text: `out${i}` } as ChatItem);
+      } else {
+        // 長文（8,000字超）を混ぜて1回分の本文の上限（120,000字）に掛ける
+        const text = i % 3 === 0 ? `m${i} ${'x'.repeat(9_000)}` : `m${i}`;
+        items.push({
+          ...base,
+          kind: i % 2 === 0 ? 'userMessage' : 'agentMessage',
+          text,
+        } as ChatItem);
+      }
+    }
+    const target = randomUUID();
+    track(
+      new SessionHubRequestWatcher(
+        root,
+        target,
+        (req) => {
+          const page = readTurnPage({ items }, req.limit ?? 1, req.before);
+          return {
+            ok: true,
+            payload: { turns: page.turns, turnStart: page.start, turnTotal: page.total },
+          };
+        },
+        makeLog(),
+      ),
+    ).start();
+    const port = new SessionHubRequestPort(root, randomUUID(), makeLog());
+    const pages: Array<[number | undefined, number]> = [];
+    let before: number | undefined;
+    const all: string[] = [];
+    let total: number | undefined;
+    for (let n = 0; n < 20; n += 1) {
+      const reply = await port.request(target, {
+        kind: 'recentTurns',
+        provider: 'codex',
+        threadId: 't',
+        limit: 50,
+        before,
+      });
+      expect(reply.ok).toBe(true);
+      const start = reply.payload?.turnStart;
+      total = reply.payload?.turnTotal;
+      const got = reply.payload?.turns ?? [];
+      pages.push([start, got.length]);
+      all.unshift(...got.map((t) => `${t.role}:${(t.title ?? t.text).slice(0, 8)}`));
+      expect(start).toBeDefined();
+      if (start === 0) {
+        break;
+      }
+      before = start;
+    }
+    const expected = readTurnPage({ items }, 1).total;
+    expect(total).toBe(expected);
+    expect(expected).toBeGreaterThan(100);
+    expect(all).toHaveLength(expected);
+    expect(all[0]).toMatch(/^agent:m1/);
+    // 長文で件数が減ったページがある
+    expect(pages.some(([, len]) => len < 50)).toBe(true);
   });
 });

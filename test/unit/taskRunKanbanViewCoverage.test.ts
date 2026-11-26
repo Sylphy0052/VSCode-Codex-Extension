@@ -61,6 +61,7 @@ function card(taskId: string, overrides: Partial<TaskRunKanbanCard> = {}): TaskR
     lastGateDecision: undefined,
     closedReason: undefined,
     reviewRounds: undefined,
+    optimize: undefined,
     ...overrides,
   };
 }
@@ -84,6 +85,8 @@ function kanbanRun(runId: string, cards: TaskRunKanbanCard[] = []): TaskRunKanba
     engine: 'codex',
     maxParallel: 2,
     planStatus: 'approved',
+    optimizationApprovals: [],
+    planHumanOnly: false,
     planReview: undefined,
     haltedByUser: false,
     finished: false,
@@ -94,6 +97,7 @@ function kanbanRun(runId: string, cards: TaskRunKanbanCard[] = []): TaskRunKanba
     orchestratorAutoHandoffs: undefined,
     columns: columnsOf({ implement: cards }),
     roadmap: undefined,
+    goal: undefined,
   };
 }
 
@@ -564,7 +568,9 @@ describe('TaskRunKanbanViewManager', () => {
     it('approvePlan: controllerへ渡し、拒否されたら警告する', async () => {
       h = open();
       send(h, { type: 'approvePlan', runId: 'run-1' });
-      await vi.waitFor(() => expect(h?.controller.approvePlan).toHaveBeenCalledWith('run-1'));
+      await vi.waitFor(() =>
+        expect(h?.controller.approvePlan).toHaveBeenCalledWith('run-1', undefined, 'human'),
+      );
       await settle();
       expect(__mock.messages.warnings).toEqual([]);
       h.controller.approvePlan?.mockResolvedValue(NG);
@@ -948,6 +954,53 @@ describe('TaskRunKanbanViewManager', () => {
       await settle();
       expect(__mock.messages.warnings).toEqual([]);
       expect(h.controller.stopStage).not.toHaveBeenCalled();
+    });
+
+    // Mission Controlからのタスク単位の操作（Issue #2162）
+    const retryable = {
+      runs: [],
+      run: kanbanRun('run-1', [card('T1', { canRetry: true }), card('T2')]),
+    };
+
+    it('retryTaskStage: やり直せる工程だけ、確認してから呼ぶ', async () => {
+      h = open({ board: retryable });
+      __mock.showWarningMessageAnswer = undefined;
+      await expect(h.view.retryTaskStage('run-1', 'T1')).resolves.toBe('取りやめました');
+      expect(h.controller.retryStage).not.toHaveBeenCalled();
+      expect(__mock.messages.warnings[0]).toContain('T1の工程をやり直しますか');
+      __mock.showWarningMessageAnswer = 'やり直す';
+      await expect(h.view.retryTaskStage('run-1', 'T1')).resolves.toBeUndefined();
+      expect(h.controller.retryStage).toHaveBeenCalledWith('run-1', 'T1');
+    });
+
+    it('retryTaskStage: やり直せない工程・無いタスク・別runは確認も出さない', async () => {
+      h = open({ board: retryable });
+      await expect(h.view.retryTaskStage('run-1', 'T2')).resolves.toBe(
+        'やり直せる工程ではありません',
+      );
+      await expect(h.view.retryTaskStage('run-1', 'T9')).resolves.toBe(
+        'やり直せる工程ではありません',
+      );
+      await expect(h.view.retryTaskStage('run-other', 'T1')).resolves.toBe(
+        'やり直せる工程ではありません',
+      );
+      expect(__mock.messages.warnings).toEqual([]);
+      expect(h.controller.retryStage).not.toHaveBeenCalled();
+    });
+
+    it('stopTaskStage: 確認してから止め、無いタスクは確認も出さない', async () => {
+      h = open({ board: stoppable });
+      await expect(h.view.stopTaskStage('run-1', 'T9')).resolves.toBe(
+        '止められる工程ではありません',
+      );
+      await expect(h.view.stopTaskStage('run-1', 'T2')).resolves.toBe(
+        '止められる工程ではありません',
+      );
+      expect(__mock.messages.warnings).toEqual([]);
+      __mock.showWarningMessageAnswer = '停止する';
+      h.controller.stopStage?.mockResolvedValue(NG);
+      await expect(h.view.stopTaskStage('run-1', 'T1')).resolves.toBe('失敗した');
+      expect(h.controller.stopStage).toHaveBeenCalledWith('run-1', 'T1');
     });
 
     it('stopStage: 拒否されたら警告する', async () => {

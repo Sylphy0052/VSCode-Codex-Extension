@@ -353,6 +353,14 @@ export class SettingsProvider {
 
   private pendingModelRefresh: Promise<void> | undefined;
 
+  /** modelの候補（Mission Controlの起動オプション。Issue #2149の2）。未取得なら取りに行く。 */
+  async modelCandidates(provider: 'codex' | 'claude'): Promise<readonly ModelInfo[]> {
+    if ((provider === 'codex' ? this.models : this.claudeModels).length === 0) {
+      await this.refreshModels();
+    }
+    return provider === 'codex' ? this.models : this.claudeModels;
+  }
+
   /** モデル候補だけを再取得する。同時要求はまとめ、失敗時は直前の一覧を保つ。 */
   refreshModels(): Promise<void> {
     if (this.pendingModelRefresh !== undefined) {

@@ -106,11 +106,51 @@ export function toSkillCandidates(
   return candidates;
 }
 
+const USE_WHEN_MARKER = /(Use when|Do not use):/giu;
+
+/**
+ * 判定へ渡す説明文を選ぶ。「Use when:」「Do not use:」節があれば先に入れ、残りの字数で先頭から補う。
+ * 節が無ければそのまま返す（呼び出し側が先頭200字で切る）。結果は`DESCRIPTION_MAX_LENGTH`字以内。
+ */
+function pickDescriptionForJudge(description: string): string {
+  const matches = [...description.matchAll(USE_WHEN_MARKER)];
+  const first = matches[0];
+  if (first === undefined) {
+    return description;
+  }
+  const sections: { label: string; text: string }[] = [];
+  matches.forEach((m, i) => {
+    const label = (m[1] ?? '').toLowerCase();
+    if (sections.some((s) => s.label === label)) {
+      return;
+    }
+    const end = matches[i + 1]?.index ?? description.length;
+    sections.push({ label, text: description.slice(m.index, end).trim() });
+  });
+  // Use whenを優先し、Do not useを後ろから詰める。
+  sections.sort((a, b) => Number(b.label === 'use when') - Number(a.label === 'use when'));
+  const parts: string[] = [];
+  let remaining = DESCRIPTION_MAX_LENGTH;
+  for (const section of sections) {
+    if (remaining <= 0) {
+      break;
+    }
+    const piece = section.text.slice(0, remaining);
+    parts.push(piece);
+    remaining -= piece.length + 1;
+  }
+  const head = description.slice(0, first.index).trim();
+  if (head !== '' && remaining > 0) {
+    parts.unshift(head.slice(0, remaining));
+  }
+  return parts.join(' ').slice(0, DESCRIPTION_MAX_LENGTH);
+}
+
 export function buildSkillSelectState(text: string, candidates: readonly SkillCandidate[]): string {
   const request = text.length > REQUEST_MAX_LENGTH ? `${text.slice(0, REQUEST_MAX_LENGTH)}…` : text;
   const lines = candidates.map((c) => {
     const description = sanitizeInlineText(
-      c.description.replace(/\s+/gu, ' ').trim(),
+      pickDescriptionForJudge(c.description.replace(/\s+/gu, ' ').trim()),
       DESCRIPTION_MAX_LENGTH,
     );
     return `- ${c.name}: ${description === '' ? '（説明なし）' : description}`;
@@ -132,6 +172,8 @@ export async function selectSkill(
   }
   const answers = await judge(deps, {
     caller: 'skill選択',
+    // 人の発言の送信を止めて待たせる判定のため、背景処理より先に実行枠を取る（Issue #2005）
+    priority: 'human',
     situation: [
       'AIエージェントに利用者の依頼を渡す前に、依頼に合うskill（エージェントが読み込む手順書）を選びたい。',
       '読み込ませたskillの手順にエージェントは従うため、依頼の内容に明らかに合うものだけを選ぶ。',

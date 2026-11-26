@@ -18,6 +18,7 @@ import {
   getTask,
   isReopenedWithoutProgress,
   isTaskDone,
+  isTaskPlanApproved,
   listTasks,
   type OrchestratedTask,
   type TaskRun,
@@ -58,9 +59,12 @@ export function unmetTaskDependencies(run: TaskRun, task: OrchestratedTask): str
   });
 }
 
-/** 計画が承認済みで、run全体が動いている。 */
-function isRunAccepting(run: TaskRun): boolean {
-  return run.planStatus === 'approved' && run.finishedAt === undefined && !run.haltedByUser;
+/**
+ * タスクが計画の承認済みで、run全体が動いている。計画の出し直しで承認待ちに戻っても、
+ * 前回承認した内容のまま残るタスクは進める（Issue #2028）。
+ */
+function isTaskAccepting(run: TaskRun, task: OrchestratedTask): boolean {
+  return isTaskPlanApproved(run, task) && run.finishedAt === undefined && !run.haltedByUser;
 }
 
 /**
@@ -86,14 +90,12 @@ export interface StageRef {
 
 /**
  * Orchestratorに設定（Model/Effortと指示）を決めてもらう工程。始められる状態で、まだ設定を
- * 受け付けていないものを着手順（計画の並び）に返す。run全体の停止中と計画の承認前は空にする。
+ * 受け付けていないものを着手順（計画の並び）に返す。run全体の停止中と、計画を承認していない
+ * タスクは除く。
  */
 export function listStagesAwaitingDecision(run: TaskRun): StageRef[] {
-  if (!isRunAccepting(run)) {
-    return [];
-  }
   return listTasks(run)
-    .filter((task) => isStageStartable(run, task))
+    .filter((task) => isTaskAccepting(run, task) && isStageStartable(run, task))
     .flatMap((task) => {
       const stage = currentStage(task);
       return stage !== undefined && task.stages[stage].pendingDecision === undefined
@@ -102,13 +104,28 @@ export function listStagesAwaitingDecision(run: TaskRun): StageRef[] {
     });
 }
 
+/**
+ * 判断待ちの工程のうち、Orchestratorへ知らせるもの（Issue #2030）。並列上限の空き枠の分だけを
+ * 着手順に返す。空き枠は、並列上限から動いているセッション・設定を受け付けて待っている工程・
+ * 再開待ちの工程を引いた数。N件の判断待ちを一斉に知らせると、推奨値の算出（分類器）もN件並列で
+ * 走るため。
+ *
+ * - 設定を受け付けた「mergeとcleanup」はmergeの鍵で別に待つので、枠から引かない（鍵待ちで
+ *   他の工程の通知を遅らせない）
+ * - 同じフォルダの全runを合わせた上限（`folderSlots`、Issue #1562）は使わない。Runnerが持つ値で
+ *   ここからは見えないため。フォルダ上限で詰まっても、件数は並列上限までに収まる
+ */
+export function listStagesToAnnounce(run: TaskRun): StageRef[] {
+  const queued = listQueuedStages(run).filter((ref) => ref.stage !== 'mergeCleanup').length;
+  const slots =
+    run.maxParallel - countActiveStageSessions(run) - queued - listResumingStages(run).length;
+  return listStagesAwaitingDecision(run).slice(0, Math.max(0, slots));
+}
+
 /** 設定を受け付け、並列枠（とmergeの鍵）の空きを待っている工程。着手順に返す。 */
 export function listQueuedStages(run: TaskRun): StageRef[] {
-  if (!isRunAccepting(run)) {
-    return [];
-  }
   return listTasks(run)
-    .filter((task) => isStageStartable(run, task))
+    .filter((task) => isTaskAccepting(run, task) && isStageStartable(run, task))
     .flatMap((task) => {
       const stage = currentStage(task);
       return stage !== undefined && task.stages[stage].pendingDecision !== undefined
@@ -123,15 +140,16 @@ export function listQueuedStages(run: TaskRun): StageRef[] {
  * 止まっていても開き直す（新しい工程は人の「再開」まで始めない）。
  */
 export function listResumingStages(run: TaskRun): StageRef[] {
-  if (run.planStatus !== 'approved' || run.finishedAt !== undefined) {
+  if (run.finishedAt !== undefined) {
     return [];
   }
   return listTasks(run).flatMap((task) => {
     const stage = currentStage(task);
     return stage !== undefined &&
+      isTaskPlanApproved(run, task) &&
       task.stages[stage].status === 'running' &&
       task.pause?.phase === 'resuming' &&
-      (task.pause.reload === true || isRunAccepting(run)) &&
+      (task.pause.reload === true || isTaskAccepting(run, task)) &&
       task.attention === 'none'
       ? [{ taskId: task.taskId, stage }]
       : [];
@@ -213,7 +231,7 @@ export function decideStageStart(
   if (task === undefined) {
     return reject('unknownTask');
   }
-  if (run.planStatus !== 'approved') {
+  if (!isTaskPlanApproved(run, task)) {
     return reject('planNotApproved');
   }
   if (run.finishedAt !== undefined) {
@@ -285,6 +303,9 @@ export type TaskRunAssessment =
  * 失敗・停止で止まったタスク。
  */
 export function assessTaskRun(run: TaskRun): TaskRunAssessment {
+  if (run.planStatus === 'awaitingApproval') {
+    return assessWhileAwaitingApproval(run);
+  }
   if (run.planStatus !== 'approved') {
     return { kind: 'planPending', planStatus: run.planStatus };
   }
@@ -306,17 +327,44 @@ export function assessTaskRun(run: TaskRun): TaskRunAssessment {
   });
 }
 
-function stageRefKey(ref: StageRef): string {
+/**
+ * 計画の承認待ちのrunを判定する（Issue #2028）。未完了の承認済みタスクが無ければ`planPending`。
+ * あれば、それらだけで進み具合を判定し、要対応・失敗などで止まったものがあれば`stalled`で
+ * 知らせる。承認済みタスクが未承認タスクの完了待ち（依存）だけで止まっているときは、承認で
+ * 動き出すので`planPending`にする。
+ */
+function assessWhileAwaitingApproval(run: TaskRun): TaskRunAssessment {
+  const pending: TaskRunAssessment = { kind: 'planPending', planStatus: 'awaitingApproval' };
+  const tasks = listTasks(run).filter((task) => !isTaskDone(task) && isTaskPlanApproved(run, task));
+  if (tasks.length === 0) {
+    return pending;
+  }
+  const assessment = assessRunProgress({
+    allDone: false,
+    anyProgressingWithoutUser: tasks.some((task) => isProgressingWithoutUser(run, task)),
+    haltedByUser: run.haltedByUser,
+    hasRunnable: !run.haltedByUser && tasks.some((task) => isStageStartable(run, task)),
+    blockers: () => tasks.filter((task) => task.attention !== 'none').map((task) => task.taskId),
+  });
+  // 一時停止中は従来どおり承認待ちとして見せる（承認の催促を一時停止の表示で隠さない）
+  if (assessment.kind === 'haltedByUser') {
+    return pending;
+  }
+  return assessment.kind === 'stalled' && assessment.blockers.length === 0 ? pending : assessment;
+}
+
+export function stageRefKey(ref: StageRef): string {
   return `${ref.taskId}:${ref.stage}`;
 }
 
 /**
- * 状態の更新で新たにOrchestratorの判断を待つようになった工程。Controllerはこれを
- * Orchestratorへイベントとして送る。
+ * 状態の更新で新たにOrchestratorへ知らせる対象（`listStagesToAnnounce`）に入った工程。
+ * Controllerはこれを Orchestratorへイベントとして送る。工程が終わって枠が空くと次の工程が対象に
+ * 入るので、後続もこの差分で知らせる。
  */
 export function newlyAwaitingDecision(before: TaskRun, after: TaskRun): StageRef[] {
-  const beforeKeys = listStagesAwaitingDecision(before).map(stageRefKey);
-  const afterRefs = listStagesAwaitingDecision(after);
+  const beforeKeys = listStagesToAnnounce(before).map(stageRefKey);
+  const afterRefs = listStagesToAnnounce(after);
   const appeared = new Set(newlyAppeared(beforeKeys, afterRefs.map(stageRefKey)));
   return afterRefs.filter((ref) => appeared.has(stageRefKey(ref)));
 }

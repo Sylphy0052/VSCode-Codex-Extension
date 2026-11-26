@@ -20,7 +20,7 @@ export const COMPOSER_BUTTON_IDS = [
   'workflowMenu',
   'teamWorkflow',
   'workflowView',
-  'sessionKanban',
+  'missionControl',
   'forgeHub',
   'orchestratorMode',
   'openProgress',
@@ -30,11 +30,15 @@ export const COMPOSER_BUTTON_IDS = [
   'autoReplyToggle',
   'handoffPresetPicker',
   'secondOpinion',
+  'reconsider',
 ] as const;
 
 export type ComposerButtonId = (typeof COMPOSER_BUTTON_IDS)[number];
 
 const COMPOSER_BUTTON_ID_SET: ReadonlySet<string> = new Set(COMPOSER_BUTTON_IDS);
+
+/** 旧統括ページのボタンのID。設定に残っていれば`missionControl`として扱う。 */
+const LEGACY_SESSION_KANBAN_ID = 'sessionKanban';
 
 /** IDが有効なボタンIDかどうか。 */
 export function isComposerButtonId(value: unknown): value is ComposerButtonId {
@@ -86,7 +90,12 @@ export function normalizeComposerButtons(value: unknown): ComposerButtonsResult 
     return { buttons: DEFAULT_COMPOSER_BUTTONS };
   }
 
-  const unknownIds = value.filter((v) => !isComposerButtonId(v));
+  // 旧統括ページのボタン（`sessionKanban`）はMission Control（Issue #2138）へ置き換えた。
+  // 旧名を書いたままの設定を既定へ丸めないよう、新しいIDへ読み替える
+  const values: unknown[] = value.map((v: unknown) =>
+    v === LEGACY_SESSION_KANBAN_ID ? 'missionControl' : v,
+  );
+  const unknownIds = values.filter((v) => !isComposerButtonId(v));
   if (unknownIds.length > 0) {
     return {
       buttons: DEFAULT_COMPOSER_BUTTONS,
@@ -94,7 +103,7 @@ export function normalizeComposerButtons(value: unknown): ComposerButtonsResult 
     };
   }
 
-  const ids = value as ComposerButtonId[];
+  const ids = values as ComposerButtonId[];
   const uniqueIds = new Set(ids);
   if (uniqueIds.size !== ids.length) {
     return {

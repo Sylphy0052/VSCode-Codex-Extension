@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import {
   SANDBOX_BASH_GUARD_CALLBACK_ID,
@@ -318,6 +319,60 @@ describe('sandboxBashGuardReason', () => {
 
   it('単引用符の中にしかない置換記号は置換の案内にしない', () => {
     expect(sandboxBashGuardReason(`gh pr create --body '$(x)'`)).toBeUndefined();
+  });
+});
+
+describe('sandboxBashGuardReason: 設定で足したパターン（Issue #2133）', () => {
+  const script = `${homedir()}/.claude/skills/compute-server/scripts/cs.py`;
+  const extra = [`python3 ${script} *`];
+
+  it('ssh・scp・rsyncは固定の一覧に入り、連結すると拒否する', () => {
+    expect(sandboxBashGuardReason('ssh b90 nvidia-smi')).toBeUndefined();
+    expect(sandboxBashGuardReason('cd a && scp x b90:/tmp/')).toContain('scpがsandboxの外で走る');
+    expect(sandboxBashGuardReason('rsync -a x b90:y | tail')).toContain('rsync');
+  });
+
+  it('設定が無ければ、足したパターンの形は判定しない（既定の挙動を変えない）', () => {
+    expect(sandboxBashGuardReason(`cd a && python3 ${script} pick`)).toBeUndefined();
+  });
+
+  it('単独で絶対パスのまま打てば通す', () => {
+    expect(sandboxBashGuardReason(`python3 ${script} pick`, extra)).toBeUndefined();
+  });
+
+  it('連結・リダイレクト・前置きは拒否し、絶対パスの形で打ち直させる', () => {
+    const chained = sandboxBashGuardReason(`cd a && python3 ${script} pick`, extra);
+    expect(chained).toContain(`python3 ${script}がsandboxの外で走る`);
+    expect(chained).toContain(`打ち直す: python3 ${script} pick`);
+    expect(sandboxBashGuardReason(`python3 ${script} status > o.txt`, extra)).toContain('打ち直す');
+    expect(sandboxBashGuardReason(`timeout 60 python3 ${script} pick`, extra)).toContain(
+      '打ち直す',
+    );
+  });
+
+  it('~/で書いたパスは一致しないので、絶対パスへ直して打ち直させる', () => {
+    const reason = sandboxBashGuardReason(
+      'python3 ~/.claude/skills/compute-server/scripts/cs.py pick',
+      extra,
+    );
+    expect(reason).toContain(`打ち直す: python3 ${script} pick`);
+    expect(reason).toContain('~/で始まるパスは展開されず一致しない');
+  });
+
+  it('同じ先頭の語でも別のスクリプトは判定しない', () => {
+    expect(sandboxBashGuardReason('cd a && python3 other.py', extra)).toBeUndefined();
+  });
+
+  it('answerSandboxBashGuardにも同じ値が届く', () => {
+    const payload = {
+      callback_id: SANDBOX_BASH_GUARD_CALLBACK_ID,
+      input: { tool_name: 'Bash', tool_input: { command: `cd a && python3 ${script} pick` } },
+    };
+    expect(answerSandboxBashGuard(payload)).toEqual({});
+    expect(answerSandboxBashGuard(payload, extra)).toHaveProperty(
+      'hookSpecificOutput.permissionDecision',
+      'deny',
+    );
   });
 });
 

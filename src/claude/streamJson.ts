@@ -9,12 +9,14 @@ import {
   NO_TODOS,
   modelWindowOf,
   rebaseContextUsage,
+  releaseHeld,
   type BackgroundTerminalItem,
   type ChatItem,
   type ChatState,
 } from '../appserver/chatState';
 import { readClaudeResultImages } from '../provider/imageRefs';
 import { parseAutocompactReport } from './autocompactText';
+import { extractProfileRecommendation } from './profileRecommendation';
 import {
   applyFileChangeResult,
   claudeSearchResults,
@@ -24,6 +26,7 @@ import {
   isSkillContextEntry,
   normalizeTodos,
   skillContextName,
+  slashCommandMessageText,
   TODO_WRITE_TOOL,
   toolUseResultOf,
 } from './transcript';
@@ -46,6 +49,7 @@ export const initialClaudeState: ChatState = {
   streamingMessageId: undefined,
   completedBlockOffset: undefined,
   queued: [],
+  held: [],
   items: [],
   approvals: [],
   // Claude Codeにはツールからの問い合わせにあたる制御要求が無い（Codexのみ）
@@ -112,9 +116,16 @@ function applySystem(state: ChatState, event: Record<string, unknown>): ChatStat
     return state;
   }
   const sessionId = str(event['session_id']);
+  // `model`はCLIが別名を解決した完全なID（Issue #2016）。`effort`は`--effort`を渡しても
+  // nullのため読まず、前に取れた値を残す
+  const initModel = str(event['model']);
   return {
     ...state,
     threadId: sessionId === '' ? state.threadId : sessionId,
+    observedModel:
+      initModel === ''
+        ? state.observedModel
+        : { model: initModel, effort: state.observedModel?.effort, source: 'systemInit' },
     // initはターン開始時に届く。resultで解除する
     busy: true,
     turnFailed: false,
@@ -161,6 +172,7 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
         turnId: undefined,
         diffs: [],
         searchResults: [],
+        profileRecommendation: extractProfileRecommendation(text),
       });
       // `/autocompact` はモデル呼び出しを経由しない `<synthetic>` 応答として、固定書式の
       // テキストで窓サイズを返す（issue #201、design.md §14.37。`autocompactText.ts` 参照）。
@@ -276,11 +288,22 @@ function applyAssistant(state: ChatState, event: Record<string, unknown>): ChatS
  * このイベントに付く目印はセッション履歴側と違い、`isSynthetic: true` だけで `isMeta` も
  * `sourceToolUseID` も付かない（実測、issue #934）。他の合成メッセージ
  * （`<local-command-caveat>`・cross-session-message等）と混同しないよう
- * `isSkillContextEntry` で絞り込み、通常のuserMessageと区別してfold対象
- * （`skillContext`、chatScript.tsのFOLD_KINDS）にする。
+ * `isSkillContextEntry` で絞り込み、通常のuserMessageと区別して `skillContext` にする
+ * （会話には描画しない。chatScript.tsのHIDDEN_KINDS、issue #1968）。
+ *
+ * plugin skillの本文は `Base directory for this skill:` で始まらないため、Skillツールの
+ * 結果（`Launching skill: <名前>`）の直後に来た合成メッセージも本文として扱う（issue #1968）。
+ *
+ * `/<名前>` で送った発言は、`content` が配列でなく制御タグだけの文字列で返る
+ * （CLI 2.1.296で実測、issue #1968）。履歴の読み直しと同じく `/名前 引数` に組み立て直す。
+ * 文字列の `content` は圧縮後の要約でも届くため、slash commandのときだけ受ける。
  */
-function applyUser(state: ChatState, event: Record<string, unknown>): ChatState {
-  const content = list(rec(event['message'])?.['content']);
+function applyUser(received: ChatState, event: Record<string, unknown>): ChatState {
+  // 応答中に送った指示をCLIが取り込んだ（Issue #2022）。送ったときのuuidでエコーが返る
+  const state = event['isReplay'] === true ? releaseHeld(received, str(event['uuid'])) : received;
+  const rawContent = rec(event['message'])?.['content'];
+  const slashText = typeof rawContent === 'string' ? slashCommandMessageText(rawContent) : '';
+  const content = slashText !== '' ? [{ type: 'text', text: slashText }] : list(rawContent);
   const toolResultCount = content.filter((part) => str(part['type']) === 'tool_result').length;
 
   let items = state.items;
@@ -335,14 +358,27 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
     .map((part) => str(part['text']))
     .join('');
   const images = readClaudeResultImages(content, '送った画像');
-  const isSkillContext = isSkillContextEntry(event, text);
+  const id = str(event['uuid']) || `user-${items.length}`;
+  // 同じ本文が同じuuidで届き直したら、最初に決めた種類と名前を保つ。届き直した本文は
+  // 受け取り済みの本文として数えられ、`launchedSkillName` が空や別の名前を返すため
+  const delivered = items.find((i) => i.id === id && i.kind === 'skillContext');
+  const launchedSkill =
+    delivered !== undefined
+      ? delivered.detail
+      : event['isSynthetic'] === true
+        ? launchedSkillName(items)
+        : '';
+  const isSkillContext =
+    delivered !== undefined || isSkillContextEntry(event, text) || launchedSkill !== '';
   if (text !== '' || images.length > 0) {
     items = upsert(items, {
-      id: str(event['uuid']) || `user-${items.length}`,
+      ...(isSkillContext ? { skillLaunchedAt: skillLaunchTime(items, id, event) } : {}),
+      id,
       kind: isSkillContext ? 'skillContext' : 'userMessage',
       text,
-      // 畳んだ見出しでもどのskillが動いたかは判るようにする（issue #889）
-      detail: isSkillContext ? skillContextName(text) : '',
+      // どのskillが動いたかを項目に残す（issue #889）。本文の `Base directory` から取る名前には
+      // plugin skillの名前空間（`<plugin>:`）が付かないため、Skillツールの起動結果を優先する（issue #1971）
+      detail: isSkillContext ? launchedSkill || skillContextName(text) : '',
       status: undefined,
       turnId: undefined,
       diffs: [],
@@ -352,6 +388,63 @@ function applyUser(state: ChatState, event: Record<string, unknown>): ChatState 
   }
 
   return items === state.items ? state : { ...state, items };
+}
+
+/**
+ * skillを起動した時刻（ms、Issue #2173）。同じ項目が届き直したら最初の時刻を保つ。イベントに
+ * `timestamp`（ISO 8601）があればそれを、無ければ受け取った時刻を使う。
+ */
+function skillLaunchTime(
+  items: readonly ChatItem[],
+  id: string,
+  event: Record<string, unknown>,
+): number {
+  const existing = items.find((i) => i.id === id)?.skillLaunchedAt;
+  if (existing !== undefined) {
+    return existing;
+  }
+  const stamped = Date.parse(str(event['timestamp']));
+  return Number.isFinite(stamped) ? stamped : Date.now();
+}
+
+/** Skillツールの結果に返る文面（実測、issue #1968）。 */
+const SKILL_LAUNCH_PREFIX = 'Launching skill:';
+
+/** 発言・応答の項目。Skillの起動結果を遡って探すのはここまで（それより前は別の呼び出し）。 */
+const LAUNCH_SEARCH_STOP_KINDS = new Set(['userMessage', 'agentMessage', 'reasoning']);
+
+/**
+ * まだ本文を受け取っていないSkillツールの起動結果のうち、最も古いもののskill名
+ * （issue #1968）。無ければ空文字。
+ *
+ * 他のツールと並列に呼ぶと、Skillの項目と本文の間に他のツールの項目が挟まる（issue #1971）。
+ * 発言・応答に当たるまで遡り、その間の起動結果と本文（`skillContext`）を数える。本文は
+ * 起動した順に1件ずつ届くため、起動のうち先頭から本文の件数分は受け取り済みとみなす。
+ * 割り込みの通知など他の合成メッセージは、受け取り待ちの起動が無い限り巻き込まない。
+ */
+function launchedSkillName(items: readonly ChatItem[]): string {
+  /** 遡った順（新しい順）の起動結果のskill名。 */
+  const launches: string[] = [];
+  let bodies = 0;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const item = items[i];
+    if (item === undefined || LAUNCH_SEARCH_STOP_KINDS.has(item.kind)) {
+      break;
+    }
+    if (item.kind === 'skillContext') {
+      bodies += 1;
+      continue;
+    }
+    // 見出しは `describeTool` の `Skill: <名前>`。他のMCPツールの出力が同じ文面で始まっても拾わない
+    if (
+      item.kind === 'mcpToolCall' &&
+      item.detail.startsWith('Skill') &&
+      item.text.startsWith(SKILL_LAUNCH_PREFIX)
+    ) {
+      launches.push(item.text.slice(SKILL_LAUNCH_PREFIX.length).trim());
+    }
+  }
+  return launches[launches.length - 1 - bodies] ?? '';
 }
 
 /** `--include-partial-messages` のデルタ。同じブロックへ書き足していく。 */
@@ -364,8 +457,26 @@ function applyPartial(state: ChatState, event: Record<string, unknown>): ChatSta
 
   // 断片の通知は message.id を持たない。ここで覚えて完成メッセージと同じ項目に積む
   if (type === 'message_start') {
-    const id = str(rec(inner['message'])?.['id']);
-    return { ...state, streamingMessageId: id === '' ? undefined : id };
+    const message = rec(inner['message']);
+    const id = str(message?.['id']);
+    // `message.model`はAPIが応答したmodel（Issue #2016）。出力の前に届く。subagentの
+    // 応答と、CLIが合成したメッセージ（`<synthetic>`）は会話のmodelではないので使わない
+    const model = str(message?.['model']);
+    const isMainModel =
+      model !== '' && model !== '<synthetic>' && str(event['parent_tool_use_id']) === '';
+    return {
+      ...state,
+      streamingMessageId: id === '' ? undefined : id,
+      ...(isMainModel
+        ? {
+            observedModel: {
+              model,
+              effort: state.observedModel?.effort,
+              source: 'messageStart' as const,
+            },
+          }
+        : {}),
+    };
   }
 
   if (type === 'content_block_start') {
@@ -499,15 +610,18 @@ function applyResult(state: ChatState, event: Record<string, unknown>): ChatStat
           cachedInputTokens: cachedInputTokensOf(usage),
           outputTokens: num(usage['output_tokens']),
         };
+  // 取り込み待ちの指示が残っていれば、CLIはそれを次のターンとして続けて処理する
+  // （Issue #2022）。応答中のままにし、待ち行列の次の指示を先に送らせない
+  const continuing = state.held.length > 0;
   return {
     ...state,
     items: settleUnansweredCommands(state.items),
-    busy: false,
+    busy: continuing,
     turnFailed: failed,
     turnResultText: str(event['result']),
     turnTokens,
     // ターンの結果が確定した（issue #939）。Codexの `turn/completed` に対応する
-    turnCompletionSeq: state.turnCompletionSeq + 1,
+    turnCompletionSeq: continuing ? state.turnCompletionSeq : state.turnCompletionSeq + 1,
   };
 }
 

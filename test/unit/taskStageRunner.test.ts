@@ -25,7 +25,7 @@ import type {
 } from '../../src/orchestrator/taskSession';
 import { REPORT_STAGE_RESULT_TOOL } from '../../src/orchestrator/taskStagePrompts';
 import { TaskStageRunner, type TaskStageRunnerDeps } from '../../src/orchestrator/taskStageRunner';
-import { FIXTURE_NOW, makeRun, makeTask } from '../helpers/taskRunFixture';
+import { FIXTURE_NOW, makeRun, makeTask, resolvedRetryGate } from '../helpers/taskRunFixture';
 
 /**
  * `TaskStageRunner`の工程の実行・状態遷移・エラー処理（Issue #1854）。依存（`TaskStageRunnerDeps`）は
@@ -80,6 +80,8 @@ class FakeSession {
   reflex: boolean | undefined;
   process: { pid: number; shared: boolean } | undefined;
   releaseForPause: (() => Promise<{ memoryFreed: boolean }>) | undefined;
+  haltProcess:
+    ((options: { graceMs: number }) => Promise<{ forced: boolean } | undefined>) | undefined;
 
   runLoop = vi.fn((plan: LoopPlan) => {
     this.plans.push(plan);
@@ -184,11 +186,13 @@ function build(initial: readonly TaskRun[], options: HarnessOptions = {}) {
   const openCodex = vi.fn(openImpl);
   const channels: Channel[] = [];
   const mcpServer = {
-    registerTools: vi.fn(async (connectionId: string, _tools: unknown, call: ToolCall) => {
-      const token = `tok-${String(channels.length + 1)}`;
-      channels.push({ connectionId, call, token });
-      return { url: `http://mcp.local/${token}`, token };
-    }),
+    registerTools: vi.fn(
+      async (connectionId: string, _tools: unknown, call: ToolCall, _usageLabel?: unknown) => {
+        const token = `tok-${String(channels.length + 1)}`;
+        channels.push({ connectionId, call, token });
+        return { url: `http://mcp.local/${token}`, token };
+      },
+    ),
     unregister: vi.fn(),
   };
   const git = { run: vi.fn(async (_args: readonly string[], _cwd: string) => OK_GIT) };
@@ -402,6 +406,23 @@ describe('TaskStageRunner.pump 工程の開始', () => {
     expect(plan).toMatchObject({ maxIterations: MAX_ITERATIONS, backgroundWaitLimitMs: 1_800_000 });
     expect(plan?.continuePrompt.startsWith('続けて。')).toBe(true);
     expect(t.onRunChanged).toHaveBeenCalled();
+    // ツール利用の計測の見出しに工程名とtaskIdを渡す（Issue #2188）
+    expect(t.mcpServer.registerTools.mock.calls[0]?.[3]).toEqual({
+      runId: 'run-1',
+      connection: 'stage-issuePlan:T1',
+    });
+  });
+
+  it('同じ工程の過去の失敗があれば、開始時のプロンプトへ前回までの失敗として載せる', async () => {
+    const prior = {
+      ...resolvedRetryGate('old1', 'issuePlan', 'reflex'),
+      detail: '型エラーで落ちた',
+    };
+    const t = build([makeRun([queuedTask('T1', 'issuePlan', { gates: [prior] })])]);
+    await t.runner.pump('run-1');
+    const prompt = t.session().plans[0]?.initialPrompt ?? '';
+    expect(prompt).toContain('前回までの失敗');
+    expect(prompt).toContain('型エラーで落ちた');
   });
 
   it('同じタスクの工程を二重に始めない', async () => {
@@ -916,6 +937,9 @@ describe('TaskStageRunner 工程の報告', () => {
     ]);
     await flush();
     expect(t.task().review).toMatchObject({ passed: false, remainingFindings: ['指摘A'] });
+    // Issue #2192: doneの報告のsummaryを保存し、台帳を読めない報告も完了として「台帳なし」にする
+    expect(t.task().stageSummaries?.review).toBe('レビューした');
+    expect(t.task().review?.ledger).toEqual({ kind: 'none' });
     expect(t.task().gates?.[0]).toMatchObject({ kind: 'reviewFindings', status: 'awaitingUser' });
   });
 
@@ -1481,6 +1505,112 @@ describe('TaskStageRunner 引き継ぎ', () => {
     expect(await reportDone(t)).toMatchObject({ isError: false });
   });
 
+  describe('前の世代のセッションを工程の終わりに閉じる（Issue #2183）', () => {
+    it('報告で工程が終わると、今のセッションと一緒に前の世代もすべて閉じる', async () => {
+      const t = await started();
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(await delegateOf(t, 1)(HANDOFF)).toBe(true);
+      expect(t.sessions).toHaveLength(3);
+      // 閉じた前の世代が終了を通知しても、後片付けをやり直さない
+      t.session(0).dispose.mockImplementation(() => t.session(0).emitFinished('manual'));
+      expect(await reportDone(t)).toMatchObject({ isError: false });
+      t.session(2).emitState(false);
+      await flush();
+      expect(t.session(2).dispose).toHaveBeenCalledTimes(1);
+      expect(t.session(0).dispose).toHaveBeenCalledTimes(1);
+      expect(t.session(1).dispose).toHaveBeenCalledTimes(1);
+      await flush();
+      expect(t.session(2).dispose).toHaveBeenCalledTimes(1);
+      expect(t.task().stages.issuePlan.status).toBe('done');
+    });
+
+    it('工程を止めたら前の世代は閉じ、今のタブは残す', async () => {
+      const t = await started();
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(await t.runner.stopStage('run-1', 'T1')).toBe(true);
+      expect(t.session(0).dispose).toHaveBeenCalledTimes(1);
+      expect(t.session(1).dispose).not.toHaveBeenCalled();
+    });
+
+    it('拡張機能の終了でも前の世代を閉じ、1件が失敗しても残りの後片付けを続ける', async () => {
+      const t = await started();
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(await delegateOf(t, 1)(HANDOFF)).toBe(true);
+      t.session(0).dispose.mockImplementation(() => {
+        throw new Error('閉じられない');
+      });
+      t.runner.dispose();
+      expect(t.session(1).dispose).toHaveBeenCalledTimes(1);
+      expect(t.session(2).dispose).toHaveBeenCalledTimes(1);
+      expect(t.warnings.some((w) => w.includes('前の世代のセッションを閉じられませんでした'))).toBe(
+        true,
+      );
+    });
+  });
+
+  describe('前の世代のプロセスを止める', () => {
+    const haltOn =
+      (halt: FakeSession['haltProcess']) =>
+      (s: FakeSession, index: number): void => {
+        if (index === 0) {
+          s.haltProcess = halt;
+        }
+      };
+
+    it('新しい世代が最初の指示を受け取る前に、前の世代のプロセスを止める', async () => {
+      const halt = vi.fn(async () => ({ forced: false }));
+      const t = await started({ sessionSetup: haltOn(halt) });
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(halt).toHaveBeenCalledTimes(1);
+      expect(halt).toHaveBeenCalledWith({ graceMs: 5_000 });
+      const haltOrder = halt.mock.invocationCallOrder[0] ?? 0;
+      const runLoopOrder = t.session(1).runLoop.mock.invocationCallOrder[0] ?? 0;
+      expect(haltOrder).toBeLessThan(runLoopOrder);
+      // 正常に終わったら強制終了の記録は残さない
+      expect(t.warnings).toEqual([]);
+      expect(t.session(0).note).toHaveBeenCalledTimes(1);
+    });
+
+    it('終わらず強制終了したら警告と旧タブの記録へ残す', async () => {
+      const t = await started({ sessionSetup: haltOn(async () => ({ forced: true })) });
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(t.warnings.some((w) => w.includes('強制終了'))).toBe(true);
+      expect(t.session(0).note).toHaveBeenCalledTimes(2);
+      expect(t.session(1).runLoop).toHaveBeenCalledTimes(1);
+    });
+
+    it('止められなくても警告して引き継ぎは続ける', async () => {
+      const t = await started({
+        sessionSetup: haltOn(async () => {
+          throw new Error('止められない');
+        }),
+      });
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(t.warnings.some((w) => w.includes('止められませんでした'))).toBe(true);
+      expect(t.session(1).runLoop).toHaveBeenCalledTimes(1);
+    });
+
+    it('止める処理が返らなくても上限で打ち切って引き継ぎを続ける', async () => {
+      vi.useFakeTimers();
+      try {
+        const t = await started({ sessionSetup: haltOn(() => new Promise(() => undefined)) });
+        const handedOff = delegateOf(t)(HANDOFF);
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(await handedOff).toBe(true);
+        expect(t.warnings.some((w) => w.includes('待ちきれませんでした'))).toBe(true);
+        expect(t.session(1).runLoop).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('止める口が無い（codex）なら何もせず引き継ぐ', async () => {
+      const t = await started();
+      expect(await delegateOf(t)(HANDOFF)).toBe(true);
+      expect(t.warnings).toEqual([]);
+    });
+  });
+
   it('引き継ぎ先のModel・Effortが空なら元のセッションの設定を使う', async () => {
     const t = await started();
     await delegateOf(t)({ ...HANDOFF, model: '' });
@@ -1678,5 +1808,196 @@ describe('TaskStageRunner.dispose', () => {
     expect(t.session().dispose).toHaveBeenCalledTimes(1);
     expect(t.mcpServer.unregister).toHaveBeenCalledWith('tok-1');
     expect(t.runner.listStageProcesses()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 最適化のループ（Issue #2111）
+// ---------------------------------------------------------------------------
+
+describe('TaskStageRunner 最適化タスクのimplement (Issue #2111)', () => {
+  const OPT_SPEC = {
+    metricSource: 'wallTime',
+    metricCommand: 'bench',
+    direction: 'minimize',
+    minImprovement: { kind: 'absolute', value: 1 },
+    significanceLevel: 0.05,
+    correctnessCommand: 'test',
+    allowedPaths: ['src'],
+    budget: { maxTrials: 3, maxMinutes: 10 },
+    measurementRuns: 5,
+  } as unknown as NonNullable<OrchestratedTask['optimization']>;
+
+  it('deps.optimizeLoop無しなら、ループを通さずにセッションを始めず、止めて関門を開く', async () => {
+    const t = build([
+      makeRun([queuedTask('T1', 'implement', { optimization: OPT_SPEC, ...WORKTREE_TASK })]),
+    ]);
+    await t.runner.pump('run-1');
+    await flush();
+    expect(t.openClaude).not.toHaveBeenCalled();
+    expect(t.sessions).toHaveLength(0);
+    expect(t.task().gates?.[0]).toMatchObject({ kind: 'stageFailed', status: 'awaitingUser' });
+    expect(t.task().gates?.[0]?.detail).toContain('最適化のループを使えない');
+  });
+
+  it('基準値を測れなければ、試行もPRのセッションも始めずbaselineFailedの関門(人だけが決着)を開く', async () => {
+    const runLoop = vi.fn(async (_args: { task: OrchestratedTask }) => ({
+      kind: 'baselineFailed' as const,
+      detail: '基準値の準備に失敗した: npm ci',
+      state: {
+        phase: 'baseline' as const,
+        trials: 0,
+        elapsedMs: 0,
+        plateau: 0,
+        rebuilt: false,
+        inconclusiveStreak: 0,
+      },
+    }));
+    const optimizeLoop = {
+      runLoop,
+      restoreWorkTree: vi.fn(),
+      ledgerSummaryForPrompt: vi.fn(),
+      checkPullRequestTree: vi.fn(),
+      remeasureAfterReview: vi.fn(),
+      checkMerge: vi.fn(),
+      cleanup: vi.fn(),
+    };
+    const t = build(
+      [makeRun([queuedTask('T1', 'implement', { optimization: OPT_SPEC, ...WORKTREE_TASK })])],
+      { deps: { optimizeLoop } as unknown as Partial<TaskStageRunnerDeps> },
+    );
+    await t.runner.pump('run-1');
+    await flush();
+    expect(runLoop).toHaveBeenCalledTimes(1);
+    expect(t.openClaude).not.toHaveBeenCalled();
+    expect(t.task().gates?.[0]).toMatchObject({
+      kind: 'optimization',
+      optimizeReason: 'baselineFailed',
+      status: 'awaitingUser',
+    });
+    expect(t.task().stages.implement.status).toBe('halted');
+  });
+
+  function optimizeHost(over: Record<string, unknown> = {}) {
+    return {
+      runLoop: vi.fn(),
+      restoreWorkTree: vi.fn(),
+      ledgerSummaryForPrompt: vi.fn(),
+      checkPullRequestTree: vi.fn(),
+      remeasureAfterReview: vi.fn(),
+      checkMerge: vi.fn(),
+      cleanup: vi.fn(),
+      ...over,
+    };
+  }
+
+  it('review後に測り直して有意に悪化していれば、worsenedAfterReviewの関門(人だけが決着)を開く', async () => {
+    const optimizeLoop = optimizeHost({
+      remeasureAfterReview: vi.fn(async () => ({
+        worsened: true,
+        detail: '最良より有意に悪化した',
+        measuredTree: 'tree1',
+      })),
+    });
+    const t = build(
+      [makeRun([queuedTask('T1', 'review', { optimization: OPT_SPEC, ...WORKTREE_TASK })])],
+      { deps: { optimizeLoop } as unknown as Partial<TaskStageRunnerDeps> },
+    );
+    await t.runner.pump('run-1');
+    const outcome = await callTool(t, REPORT_STAGE_RESULT_TOOL, {
+      ...refArgs(t),
+      outcome: 'done',
+      summary: 'レビューした',
+      reviewSummary: '問題なし',
+      reviewPassed: true,
+      remainingFindings: [],
+    });
+    expect(outcome).toMatchObject({ isError: false });
+    await flush();
+    expect(optimizeLoop.remeasureAfterReview).toHaveBeenCalledTimes(1);
+    expect(t.task().gates?.find((g) => g.kind === 'optimization')).toMatchObject({
+      optimizeReason: 'worsenedAfterReview',
+      status: 'awaitingUser',
+    });
+  });
+
+  it.each([
+    [{ match: false, detail: 'PRのHEADの木が最良の候補の木と一致しない' }, 'treeMismatch'],
+    [{ match: true, detail: '一致した' }, undefined],
+  ] as const)(
+    'implement(PRを書くセッション)の完了で、PRのHEADの木を最良と照合する: %o',
+    async (checked, reason) => {
+      const optimizeLoop = optimizeHost({
+        checkPullRequestTree: vi.fn(async () => checked),
+        ledgerSummaryForPrompt: vi.fn(async () => '台帳の要約'),
+        restoreWorkTree: vi.fn(async () => undefined),
+      });
+      const t = build(
+        [
+          makeRun([
+            queuedTask('T1', 'implement', {
+              optimization: OPT_SPEC,
+              optimizeLoop: {
+                phase: 'pr',
+                trials: 3,
+                elapsedMs: 0,
+                plateau: 0,
+                rebuilt: false,
+                inconclusiveStreak: 0,
+                baseline: { metric: 100, commit: 'a'.repeat(40) },
+                best: { metric: 80, commit: 'b'.repeat(40), ref: 'r', trial: 2 },
+              },
+              ...WORKTREE_TASK,
+            }),
+          ]),
+        ],
+        { deps: { optimizeLoop } as unknown as Partial<TaskStageRunnerDeps> },
+      );
+      t.observation.findPullRequest.mockResolvedValue({
+        number: 5,
+        url: 'https://example.com/pull/5',
+      } as never);
+      await t.runner.pump('run-1');
+      await flush();
+      expect(t.openClaude).toHaveBeenCalledTimes(1);
+      const outcome = await callTool(t, REPORT_STAGE_RESULT_TOOL, {
+        ...refArgs(t),
+        outcome: 'done',
+        summary: 'PRを作った',
+        pullRequestNumber: 5,
+        pullRequestUrl: 'https://example.com/pull/5',
+      });
+      expect(outcome).toMatchObject({ isError: false });
+      await flush();
+      expect(optimizeLoop.checkPullRequestTree).toHaveBeenCalledTimes(1);
+      const gate = t.task().gates?.find((g) => g.kind === 'optimization');
+      if (reason === undefined) {
+        expect(gate).toBeUndefined();
+      } else {
+        expect(gate).toMatchObject({ optimizeReason: reason, status: 'awaitingUser' });
+      }
+    },
+  );
+
+  it('review後に測り直して悪化していなければ関門を開かない', async () => {
+    const optimizeLoop = optimizeHost({
+      remeasureAfterReview: vi.fn(async () => ({ worsened: false, detail: '同等' })),
+    });
+    const t = build(
+      [makeRun([queuedTask('T1', 'review', { optimization: OPT_SPEC, ...WORKTREE_TASK })])],
+      { deps: { optimizeLoop } as unknown as Partial<TaskStageRunnerDeps> },
+    );
+    await t.runner.pump('run-1');
+    await callTool(t, REPORT_STAGE_RESULT_TOOL, {
+      ...refArgs(t),
+      outcome: 'done',
+      summary: 'レビューした',
+      reviewSummary: '問題なし',
+      reviewPassed: true,
+      remainingFindings: [],
+    });
+    await flush();
+    expect(optimizeLoop.remeasureAfterReview).toHaveBeenCalledTimes(1);
+    expect(t.task().gates).toBeUndefined();
   });
 });

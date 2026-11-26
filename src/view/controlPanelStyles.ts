@@ -558,7 +558,7 @@ ${sharedStyles()}
     gap: 4px;
     padding: 6px 8px;
     border: 1px solid var(--vscode-widget-border, var(--vscode-descriptionForeground));
-    border-radius: 4px;
+    border-radius: var(--agent-radius-md);
   }
   .savedAccount-current { border-color: var(--vscode-charts-green); }
   .savedAccount-name { font-weight: 600; overflow-wrap: anywhere; }

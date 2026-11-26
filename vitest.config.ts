@@ -31,6 +31,9 @@ export default defineConfig({
       // lines 74.17%）で、statements・functions・linesは70へ戻り、branchesだけ67へ引き上げた。
       // sandbox系・endSummary等のテスト追加後の実測（statements 75.14% / branches 69.2% /
       // functions 74.56% / lines 75.6%）で全指標が#455の下限を超えたため、70/68/70/70へ戻した。
+      // #1979: CIがFormatで止まっていた間にbranchesが66.53%へ下がった。下限は据え置き、
+      // accountStore等のテスト追加で実測（statements 74.72% / branches 69.04% /
+      // functions 73.77% / lines 75.23%）へ戻した。
       thresholds: {
         statements: 70,
         branches: 68,

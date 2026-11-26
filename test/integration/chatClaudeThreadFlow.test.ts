@@ -235,7 +235,7 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
     // で担保する
   });
 
-  test('C-13b: 割り込みの手段が無いため待ち行列に積み、ターン完了後に順に送る。「今すぐ送る」は中断してから送る', async function () {
+  test('C-13b: 応答中の送信は待ち行列に積み、ターン完了後に順に送る。「今すぐ送る」は中断せずに差し込む', async function () {
     this.timeout(TEST_TIMEOUT_MS);
     const { proc, sessionId } = await openClaudeChat();
     const initRequestId = (
@@ -267,9 +267,8 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
       WAIT_OPTIONS,
     );
 
-    // 応答中（busy）に送った指示は、Claude側に割り込みの手段が無いため待ち行列へ積まれる
-    // （design.md §9.7「Claude Code: 割り込みに相当する制御が見つかっていない」）。
-    // Codex（`turn/steer`）と違い、CLIへは一切送られない。
+    // 応答中（busy）に入力欄から送った指示は待ち行列へ積まれ、CLIへは送られない
+    // （design.md §9.7）。
     await chat.simulateClaudeWebviewMessage(sessionId, { type: 'send', text: '2件目' });
     await chat.simulateClaudeWebviewMessage(sessionId, { type: 'send', text: '3件目' });
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -288,39 +287,24 @@ suite('Claude Code画面: プロトコルの状態遷移と配線（Issue #188�
     );
     assert.deepEqual(userTexts(), ['最初の指示', '2件目']);
 
-    // 「今すぐ送る」はCodexの`turn/steer`と違い、応答を中断してから送る
-    // （design.md §9.7「Claude Codeは従来どおり中断してから送る」）。
+    // 「今すぐ送る」は応答中でも中断せずに書き込む（Issue #2020。design.md §9.7）。
+    // CLIは応答中に届いた発言を走っているターンへ取り込むため、interruptは要らない
     await chat.simulateClaudeWebviewMessage(sessionId, { type: 'flushQueue' });
-    await waitFor(
-      () =>
-        proc
-          .writtenLines()
-          .some(
-            (l) =>
-              l['type'] === 'control_request' &&
-              (l['request'] as { subtype?: string } | undefined)?.subtype === 'interrupt',
-          ),
-      (found) => found,
-      WAIT_OPTIONS,
-    );
     await waitFor(
       () => userTexts().length,
       (n) => n === 3,
       WAIT_OPTIONS,
     );
     assert.deepEqual(userTexts(), ['最初の指示', '2件目', '3件目']);
-
-    // interruptが「3件目」の送信より前に書かれている（中断してから送る、の順序確認）
-    const lines = proc.writtenLines();
-    const interruptIndex = lines.findIndex(
-      (l) =>
-        l['type'] === 'control_request' &&
-        (l['request'] as { subtype?: string } | undefined)?.subtype === 'interrupt',
-    );
-    const lastUserIndex = lines.map((l) => l['type']).lastIndexOf('user');
     assert.ok(
-      interruptIndex >= 0 && interruptIndex < lastUserIndex,
-      'interruptより先に3件目が送られている',
+      !proc
+        .writtenLines()
+        .some(
+          (l) =>
+            l['type'] === 'control_request' &&
+            (l['request'] as { subtype?: string } | undefined)?.subtype === 'interrupt',
+        ),
+      '「今すぐ送る」でinterruptが送られている',
     );
   });
 });

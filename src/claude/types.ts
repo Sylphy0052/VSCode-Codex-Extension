@@ -57,6 +57,11 @@ export interface ClaudeConfig {
    * コマンドを実行前に拒否するPreToolUse hookを`initialize`で登録する（`sandboxBashGuard.ts`）。
    */
   sandboxBashGuard?: boolean;
+  /**
+   * 設定（`agent.claude.sandbox.extraExcludedCommands`）で足した除外パターン（Issue #2133）。
+   * sandboxの`excludedCommands`と同じ値をPreToolUse hookの判定へも渡す。
+   */
+  sandboxExtraExcludedCommands?: readonly string[];
 }
 
 export const emptyClaudeConfig: ClaudeConfig = {

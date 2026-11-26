@@ -1,4 +1,6 @@
+import { parseOptimizationSpec, type OptimizationSpec } from './optimizeSpec';
 import { stripControlCharsPreservingNewlines } from './sanitize';
+import { FINISHED_RUN_REFUSAL, type FinishedRunReplan } from './taskRunEndReview';
 import {
   allocateTaskIds,
   getTask,
@@ -18,12 +20,12 @@ import { findCycleGroups } from './workflow';
  * 拒否し、理由をOrchestratorへ返す。状態へ置くのは`proposeTaskPlan`。
  */
 
-export const MAX_PLAN_TASKS = 30;
+// タスク数には上限を置かない（以前の30件の上限は廃止した）。依存先の数も、重複を拒否し
+// 計画内のキーだけを許すため、計画のタスク数で自然に抑えられる
 export const MAX_PLAN_TITLE_LENGTH = 200;
 export const MAX_PLAN_SUMMARY_LENGTH = 2000;
 export const MAX_PLAN_CRITERIA = 20;
 export const MAX_PLAN_CRITERION_LENGTH = 500;
-const MAX_PLAN_DEPENDENCIES = MAX_PLAN_TASKS;
 
 /** 計画の中でタスクを指すキー。既存のタスクは`T<n>`、新しいタスクは任意の仮キー。 */
 const PLAN_KEY = /^[A-Za-z0-9_-]{1,32}$/;
@@ -42,6 +44,8 @@ export interface PlanTaskInput {
    * ロードマップから作る初期計画だけが付ける（`propose_plan`の引数からは読まない）。
    */
   completedInRoadmap?: true;
+  /** 最適化の仕様（Issue #2106）。検証済み。承認は人だけが行う。 */
+  optimization?: OptimizationSpec;
 }
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; message: string };
@@ -122,11 +126,7 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
     acceptanceCriteria.push(criterion.value);
   }
   const depsRaw = raw.dependsOn ?? [];
-  if (
-    !Array.isArray(depsRaw) ||
-    depsRaw.length > MAX_PLAN_DEPENDENCIES ||
-    depsRaw.some((d) => typeof d !== 'string' || !PLAN_KEY.test(d))
-  ) {
+  if (!Array.isArray(depsRaw) || depsRaw.some((d) => typeof d !== 'string' || !PLAN_KEY.test(d))) {
     return fail(`${at}.dependsOnは計画内のidの配列で指定する`);
   }
   const dependsOn = depsRaw as string[];
@@ -143,6 +143,14 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
   ) {
     return fail(`${at}.existingIssueNumberは1以上の整数で指定する`);
   }
+  let optimization: OptimizationSpec | undefined;
+  if (raw.optimization !== undefined) {
+    const spec = parseOptimizationSpec(raw.optimization, `${at}.optimization`);
+    if (!spec.ok) {
+      return spec;
+    }
+    optimization = spec.value;
+  }
   return {
     ok: true,
     value: {
@@ -152,6 +160,7 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
       acceptanceCriteria,
       dependsOn,
       existingIssueNumber: issue,
+      ...(optimization === undefined ? {} : { optimization }),
     },
   };
 }
@@ -159,8 +168,8 @@ function parseTask(raw: unknown, index: number): Parsed<PlanTaskInput> {
 /** `propose_plan`の引数の形式を検証する。長さ・件数の超過は切り詰めずに拒否し、書き直させる。 */
 export function parsePlanArgs(raw: unknown): Parsed<PlanTaskInput[]> {
   const tasksRaw = isRecord(raw) ? raw.tasks : undefined;
-  if (!Array.isArray(tasksRaw) || tasksRaw.length === 0 || tasksRaw.length > MAX_PLAN_TASKS) {
-    return fail(`tasksは1〜${String(MAX_PLAN_TASKS)}件の配列で指定する`);
+  if (!Array.isArray(tasksRaw) || tasksRaw.length === 0) {
+    return fail('tasksは1件以上の配列で指定する');
   }
   const tasks: PlanTaskInput[] = [];
   for (const [i, item] of tasksRaw.entries()) {
@@ -186,19 +195,31 @@ export interface ResolvedTaskPlan {
  *
  * - `T<n>`の形のキーは既存のタスクだけを指せる（Controllerが採番する番号を名乗らせない）
  * - 依存先は計画内のキーだけ。循環は循環するキーの組を挙げて拒否する
- * - 着手済みのタスクは計画から外せず、既存のIssue番号も変えられない（Issue #1679。承認前の計画変更で
- *   worktree・PRを持つタスクを消させない）。未着手のタスクの削除と新しいタスクの追加は通す
+ * - 着手済みのタスクとロードマップで完了済みのタスクは、提案が省いても現在の内容のまま計画に残す
+ *   （`withCarriedTasks`。Issue #1623・#2027）。承認前の計画変更でworktree・PRを持つタスクを
+ *   消させない（Issue #1679）。内容を変えるときだけ`taskId`付きで送らせる
+ * - 着手済みのタスクの既存のIssue番号は変えられない（Issue #1679）
+ * - 未着手のタスクは、省くと計画から外れる。新しいタスクの追加は通す
  * - 既存のIssue番号は計画内で重複させない
- * - ロードマップで完了済みのタスクは、提案が省いても計画に残す（`withCarriedCompletedTasks`）
+ * - 終わったrunは、終了レビューからの再計画（`finishedRunReplan`が`ok`。Issue #2194）のときだけ受け付け、
+ *   新しいタスクを1件以上求める（足すタスクが無いと、承認した途端に終わり直して再開の回数だけ減る）
  */
 export function resolveTaskPlan(
   run: TaskRun,
   proposed: readonly PlanTaskInput[],
+  finishedRunReplan?: FinishedRunReplan,
 ): Parsed<ResolvedTaskPlan> {
   if (run.finishedAt !== undefined) {
-    return fail('このrunは終わっている');
+    if (finishedRunReplan?.ok !== true) {
+      return fail(finishedRunReplan?.reason ?? FINISHED_RUN_REFUSAL);
+    }
+    if (!proposed.some((t) => getTask(run, t.id) === undefined)) {
+      return fail(
+        '終わったrunの再計画には、新しいタスクを1件以上入れる（既存のタスクだけの計画では再開しない）',
+      );
+    }
   }
-  const tasks = withCarriedCompletedTasks(run, proposed);
+  const tasks = withCarriedTasks(run, proposed);
   const keys = new Set(tasks.map((t) => t.id));
   if (keys.size !== tasks.length) {
     return fail('idが重複している');
@@ -247,6 +268,7 @@ export function resolveTaskPlan(
     dependsOn: t.dependsOn.map(toTaskId),
     existingIssueNumber: t.existingIssueNumber,
     ...(t.completedInRoadmap === true ? { completedInRoadmap: true } : {}),
+    ...(t.optimization === undefined ? {} : { optimization: t.optimization }),
   }));
   if (drafts.some((d) => !isValidTaskId(d.taskId))) {
     return fail('taskIdを採番できなかった');
@@ -255,8 +277,9 @@ export function resolveTaskPlan(
 }
 
 /**
- * 着手済みのタスクを計画から外す・既存のIssue番号を変える提案を見つけ、拒否の理由を返す
- * （Issue #1679）。Issue番号の変更は同じ`taskId`のままタスクを作り直すため、削除と同じ扱いにする。
+ * 着手済みのタスクの既存のIssue番号を変える提案を見つけ、拒否の理由を返す（Issue #1679）。
+ * Issue番号の変更は同じ`taskId`のままタスクを作り直すため、削除と同じ扱いにする。省いた着手済みの
+ * タスクは`withCarriedTasks`が戻すので、ここで外される場合は扱わない。
  */
 function findStartedTaskChange(
   run: TaskRun,
@@ -268,10 +291,7 @@ function findStartedTaskChange(
       continue;
     }
     const next = byKey.get(task.taskId);
-    if (next === undefined) {
-      return `${task.taskId}は着手済みのため計画から外せない。外せるのは未着手のタスクだけ`;
-    }
-    if (next.existingIssueNumber !== task.existingIssueNumber) {
+    if (next !== undefined && next.existingIssueNumber !== task.existingIssueNumber) {
       return `${task.taskId}は着手済みのため既存のIssue番号を変えられない`;
     }
   }
@@ -279,25 +299,64 @@ function findStartedTaskChange(
 }
 
 /**
- * ロードマップで完了済みの子Issueのタスク（Issue #1623）のうち、提案が省いたものを計画の先頭へ
- * 戻す。Orchestratorに毎回送り直させず、`dependsOn`から`taskId`で指せるようにするため。
- * 完了済みのタスクは計画から外せない。依存は持たせない（完了済みのため着手の判断に使わない）。
+ * 提案が省いた、計画から外せないタスクを現在の内容のまま戻す。Orchestratorに毎回送り直させず、
+ * 新しいタスクの`dependsOn`から`taskId`で指せるようにするため。対象は次の2つ。
+ *
+ * - ロードマップで完了済みの子Issueのタスク（Issue #1623）。依存は持たせない（完了済みのため
+ *   着手の判断に使わない）
+ * - 着手済みのタスク（Issue #2027）。依存は現在の値を保ち、今回の提案で外れたタスクへの依存だけ
+ *   落とす（外したのはOrchestratorの判断で、送り直しを求めるより着手を止めないほうを採る）
+ *
+ * 戻す位置は現在の`taskOrder`での位置に合わせる。`taskOrder`は着手順に効くため、出し直しで
+ * 着手済みタスクの次工程の順番を変えない。
  */
-function withCarriedCompletedTasks(
+function withCarriedTasks(
   run: TaskRun,
   proposed: readonly PlanTaskInput[],
 ): readonly PlanTaskInput[] {
   const proposedKeys = new Set(proposed.map((t) => t.id));
-  const carried = listTasks(run)
-    .filter((t) => t.completedInRoadmap === true && !proposedKeys.has(t.taskId))
-    .map((t): PlanTaskInput => ({
+  const carriedTasks = listTasks(run).filter(
+    (t) => (t.completedInRoadmap === true || hasStarted(t)) && !proposedKeys.has(t.taskId),
+  );
+  if (carriedTasks.length === 0) {
+    return proposed;
+  }
+  const keys = new Set([...proposedKeys, ...carriedTasks.map((t) => t.taskId)]);
+  const carried = carriedTasks.map((t): PlanTaskInput => {
+    const isCompleted = t.completedInRoadmap === true;
+    return {
       id: t.taskId,
       title: t.title,
       summary: t.summary,
       acceptanceCriteria: t.acceptanceCriteria,
-      dependsOn: [],
+      dependsOn: isCompleted ? [] : t.dependsOn.filter((dep) => keys.has(dep)),
       existingIssueNumber: t.existingIssueNumber,
-      completedInRoadmap: true,
-    }));
-  return carried.length === 0 ? proposed : [...carried, ...proposed];
+      ...(isCompleted ? { completedInRoadmap: true } : {}),
+      ...(t.optimization === undefined ? {} : { optimization: t.optimization }),
+    };
+  });
+  return mergeByCurrentOrder(run, proposed, carried);
+}
+
+/**
+ * 戻すタスクを、現在の`taskOrder`で自分より後ろにある最初の既存タスクの直前へ差し込む。
+ * 後ろに既存タスクが無ければ末尾へ置く。提案内の並びは変えない。
+ */
+function mergeByCurrentOrder(
+  run: TaskRun,
+  proposed: readonly PlanTaskInput[],
+  carried: readonly PlanTaskInput[],
+): PlanTaskInput[] {
+  const position = new Map(run.taskOrder.map((taskId, i) => [taskId, i]));
+  const result = [...proposed];
+  for (const task of carried) {
+    const own = position.get(task.id) ?? Number.POSITIVE_INFINITY;
+    const at = result.findIndex((t) => (position.get(t.id) ?? -1) > own);
+    if (at === -1) {
+      result.push(task);
+    } else {
+      result.splice(at, 0, task);
+    }
+  }
+  return result;
 }

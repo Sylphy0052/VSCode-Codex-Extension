@@ -1,12 +1,16 @@
+import { applyOptimizeGateResolution } from './optimizeLoop';
 import type { RoadmapAskArgs } from './roadmapQuestionMcp';
-import { STAGE_LABELS } from './taskStagePrompts';
+import { tallyPrunedGates } from './runMetrics';
+import { normalizeFailureCause, previousStageFailures, STAGE_LABELS } from './taskStagePrompts';
 import {
   closeTaskWithoutMerge,
   currentStage,
   getTask,
+  haltStage,
   isTaskDone,
   joinSummaries,
   resetStageForRetry,
+  type OptimizeGateReason,
   type OrchestratedTask,
   type StageDecider,
   type StageGate,
@@ -54,9 +58,26 @@ export const GATE_OPTION_CLOSE = 'mergeせずに完了にする';
 const ALLOWED_CHOICES: Record<StageGateKind, readonly StageGateChoice[]> = {
   reviewFindings: ['sendBack', 'proceed'],
   stageFailed: ['retry', 'close'],
+  // 最適化の関門（Issue #2106）。人だけが決着できる
+  optimization: ['proceed', 'sendBack', 'close'],
 };
 
-export function isGateChoiceAllowed(kind: StageGateKind, choice: StageGateChoice): boolean {
+/** 最適化の関門は人だけが決着できる。`resolve_gate`で拒むときの理由（Issue #2106）。 */
+export const HUMAN_ONLY_GATE_MESSAGE =
+  '最適化の関門は人だけが決着できる。Orchestratorは決着させられないので、ユーザーがKanbanで決めるのを待つ（本文で確かめない）';
+
+/**
+ * 関門がその決着を受け付けるか。最適化の関門は、基準値の計測失敗のとき`proceed`が測り直しを意味し、
+ * `sendBack`（最良の候補の木へ戻す）は選べない（Issue #2106）。
+ */
+export function isGateChoiceAllowed(
+  kind: StageGateKind,
+  choice: StageGateChoice,
+  optimizeReason?: OptimizeGateReason,
+): boolean {
+  if (kind === 'optimization' && optimizeReason === 'baselineFailed' && choice === 'sendBack') {
+    return false;
+  }
   return ALLOWED_CHOICES[kind].includes(choice);
 }
 
@@ -122,17 +143,18 @@ export function findStageGate(run: TaskRun, taskId: string, gateId: string): Sta
  * 自動のやり直しに数える関門は最後まで残す。先に捨てると`countAutoRetries`が減り、
  * 上限（`MAX_AUTO_RETRIES`）に達した工程がまた自動でやり直せてしまう（Issue #1733）。
  */
-function trimGates(gates: readonly StageGate[]): StageGate[] {
+function trimGates(gates: readonly StageGate[]): { kept: StageGate[]; pruned: StageGate[] } {
   const result = [...gates];
+  const pruned: StageGate[] = [];
   while (result.length > MAX_GATES_PER_TASK) {
     const uncounted = result.findIndex((gate) => !isOpen(gate) && !isAutoRetry(gate));
     const index = uncounted >= 0 ? uncounted : result.findIndex((gate) => !isOpen(gate));
     if (index < 0) {
       break;
     }
-    result.splice(index, 1);
+    pruned.push(...result.splice(index, 1));
   }
-  return result;
+  return { kept: result, pruned };
 }
 
 function withTaskUpdate(run: TaskRun, next: OrchestratedTask): TaskRun {
@@ -190,6 +212,27 @@ function limitReached(
 }
 
 /**
+ * 同じ工程の直前の失敗（今の関門を除く）と原因が同じか。同じなら自動のやり直しを選ばせず、
+ * オーケストレーターの判断（方式を変える指示、計画の出し直し）へ回す。
+ */
+export function isRepeatedFailure(task: OrchestratedTask, gate: StageGate): boolean {
+  if (gate.kind !== 'stageFailed') {
+    return false;
+  }
+  const prior = (task.gates ?? []).filter(
+    (g) => g.kind === 'stageFailed' && g.stage === gate.stage && g.gateId !== gate.gateId,
+  );
+  const last = prior.at(-1);
+  return (
+    last !== undefined && normalizeFailureCause(last.detail) === normalizeFailureCause(gate.detail)
+  );
+}
+
+/** 同じ原因の失敗でReflexの判定を飛ばすときの要約。 */
+export const REPEATED_FAILURE_SUMMARY =
+  '前回と同じ原因で失敗した。自動のやり直しにせず、方式を変える指示か計画の出し直しを判断する';
+
+/**
  * 回答者判定でオーケストレーターが決めてよいとされたとき、オーケストレーターが選べる範囲の補足
  * （Issue #1771）。判断の材料とオーケストレーターへの通知に使う。制約が無ければ`undefined`。
  */
@@ -213,7 +256,7 @@ export function orchestratorGateScope(task: OrchestratedTask, gate: StageGate): 
 export function openStageGate(
   run: TaskRun,
   taskId: string,
-  input: { gateId: string; kind: StageGateKind; detail: string },
+  input: { gateId: string; kind: Exclude<StageGateKind, 'optimization'>; detail: string },
   now: Date,
 ): TaskRun {
   const task = getTask(run, taskId);
@@ -243,9 +286,56 @@ export function openStageGate(
     openedAt: at,
   };
   // 判断待ちで開くのは`stageFailed`だけ。その注意は止めたときの要対応・失敗のまま
+  // 刈る前に決着者別の件数を指標へ足す（Issue #2081）。刈った後では数え落とす
+  const { kept, pruned } = trimGates([...(task.gates ?? []), gate]);
   return withTaskUpdate(run, {
     ...task,
-    gates: trimGates([...(task.gates ?? []), gate]),
+    gates: kept,
+    ...(pruned.length === 0 ? {} : { metricsTally: tallyPrunedGates(task, pruned) }),
+    updatedAt: at,
+  });
+}
+
+/**
+ * 最適化の関門を開く（Issue #2106）。最適化の仕様を持つタスクの現在の工程に、人の判断待ち
+ * （`awaitingUser`）で開く。`judging`を通さないので、Reflexの判定にかからない。決着していない関門が
+ * 既にあれば何もしない。立てる契機（基準値の計測失敗・PRの木の不一致・review後の悪化・merge前の
+ * 計測失敗）は呼び出し側（#2111）が決める。
+ */
+export function openOptimizeGate(
+  run: TaskRun,
+  taskId: string,
+  input: { gateId: string; reason: OptimizeGateReason; detail: string },
+  now: Date,
+): TaskRun {
+  const task = getTask(run, taskId);
+  const stage = task === undefined ? undefined : currentStage(task);
+  if (
+    task === undefined ||
+    stage === undefined ||
+    task.optimization === undefined ||
+    findOpenGate(task) !== undefined
+  ) {
+    return run;
+  }
+  const at = now.toISOString();
+  const gate: StageGate = {
+    gateId: input.gateId,
+    kind: 'optimization',
+    stage,
+    status: 'awaitingUser',
+    detail: input.detail,
+    optimizeReason: input.reason,
+    reflexSummary: undefined,
+    resolution: undefined,
+    openedAt: at,
+  };
+  const { kept, pruned } = trimGates([...(task.gates ?? []), gate]);
+  return withTaskUpdate(run, {
+    ...task,
+    gates: kept,
+    ...(pruned.length === 0 ? {} : { metricsTally: tallyPrunedGates(task, pruned) }),
+    attention: task.attention === 'none' ? 'awaitingUser' : task.attention,
     updatedAt: at,
   });
 }
@@ -317,6 +407,88 @@ export function markGateAwaitingOrchestrator(
   );
 }
 
+/**
+ * 最適化の関門を、工程を止めてから開く（Issue #2111）。工程のセッションが動いている（`running`）
+ * ときは止めずに関門だけ開く（merge直前の計測の失敗。mergeは承認経路が拒み続ける）。
+ */
+export function openOptimizeGateHalting(
+  run: TaskRun,
+  taskId: string,
+  input: { gateId: string; reason: OptimizeGateReason; detail: string },
+  now: Date,
+): TaskRun {
+  const task = getTask(run, taskId);
+  const stage = task === undefined ? undefined : currentStage(task);
+  if (task === undefined || stage === undefined || task.optimization === undefined) {
+    return run;
+  }
+  const halted =
+    task.stages[stage].status === 'running'
+      ? run
+      : haltStage(run, taskId, 'awaitingUser', input.detail, now);
+  return openOptimizeGate(halted, taskId, input, now);
+}
+
+/**
+ * 最適化の関門の決着（Issue #2111）。ループの状態を`applyOptimizeGateResolution`で進め、
+ * 止めた工程を未着手へ戻す。`sendBack`は「実装とPR作成」から（作業ツリーを最良の木へ戻して）
+ * やり直す。`close`は止まった工程だけを、mergeせずに完了にする。
+ */
+function resolveOptimizeGate(
+  run: TaskRun,
+  closed: OrchestratedTask,
+  gate: StageGate,
+  resolution: { choice: StageGateChoice; closeReason?: string | undefined },
+  status: OrchestratedTask['stages'][TaskStage]['status'],
+  now: Date,
+): OrchestratedTask | undefined {
+  const applied =
+    closed.optimizeLoop === undefined || gate.optimizeReason === undefined
+      ? undefined
+      : applyOptimizeGateResolution(closed.optimizeLoop, gate.optimizeReason, resolution.choice);
+  const base: OrchestratedTask = {
+    ...closed,
+    ...(applied === undefined ? {} : { optimizeLoop: applied.state }),
+  };
+  if (resolution.choice === 'close') {
+    return status === 'halted'
+      ? getTask(
+          closeTaskWithoutMerge(
+            withTaskUpdate(run, base),
+            closed.taskId,
+            { reason: resolution.closeReason ?? '', by: 'user' },
+            now,
+          ),
+          closed.taskId,
+        )
+      : undefined;
+  }
+  if (status !== 'halted') {
+    return { ...base, attention: base.attention === 'awaitingUser' ? 'none' : base.attention };
+  }
+  if (resolution.choice === 'sendBack') {
+    const reset = {
+      status: 'notStarted' as const,
+      pendingDecision: undefined,
+      completedAt: undefined,
+    };
+    return {
+      ...base,
+      stages: {
+        ...base.stages,
+        implement: { ...base.stages.implement, ...reset },
+        review: { ...base.stages.review, ...reset },
+        mergeCleanup: { ...base.stages.mergeCleanup, ...reset },
+      },
+      attention: 'none',
+      failure: undefined,
+      haltCause: undefined,
+      updatedAt: now.toISOString(),
+    };
+  }
+  return getTask(resetStageForRetry(withTaskUpdate(run, base), closed.taskId, now), closed.taskId);
+}
+
 /** 「実装とPR作成」と「レビュー」を未着手へ戻す（差し戻し）。 */
 function sendBackToImplement(task: OrchestratedTask): OrchestratedTask {
   const reset = {
@@ -368,6 +540,9 @@ export function resolveStageGate(
     if (resolution.by === 'reflex' && gate.status !== 'judging') {
       return undefined;
     }
+    if (gate.kind === 'optimization' && resolution.by !== 'user') {
+      return undefined;
+    }
     if (
       resolution.choice === 'close' &&
       (resolution.by === 'reflex' || (resolution.closeReason ?? '').trim() === '')
@@ -381,7 +556,7 @@ export function resolveStageGate(
     ) {
       return undefined;
     }
-    if (!isGateChoiceAllowed(gate.kind, resolution.choice)) {
+    if (!isGateChoiceAllowed(gate.kind, resolution.choice, gate.optimizeReason)) {
       return undefined;
     }
     if (
@@ -403,6 +578,9 @@ export function resolveStageGate(
       return undefined;
     }
     const status = task.stages[stage].status;
+    if (gate.kind === 'optimization') {
+      return resolveOptimizeGate(run, closed, gate, resolution, status, now);
+    }
     if (gate.kind === 'reviewFindings') {
       // 関門を開いた後に再読み込みで「mergeとcleanup」が止まった（PRが閉じられた等）場合も決着させる
       if (stage !== 'mergeCleanup' || (status !== 'notStarted' && status !== 'halted')) {
@@ -524,6 +702,7 @@ export function buildGateQuestion(task: OrchestratedTask, gate: StageGate): Gate
     };
   }
   const retries = countAutoRetries(task, gate.stage);
+  const past = previousStageFailures(task, gate.stage, gate.gateId);
   return {
     question: `${task.taskId}の「${STAGE_LABELS[gate.stage]}」が止まった。次にどうするか。`,
     reason:
@@ -531,7 +710,12 @@ export function buildGateQuestion(task: OrchestratedTask, gate: StageGate): Gate
       `（上限${String(MAX_AUTO_RETRIES)}回）。一時的な失敗ならやり直し、同じ原因で繰り返しそうならユーザーに上げる。`,
     options: [GATE_OPTION_RETRY, GATE_OPTION_ASK_USER],
     recommended: undefined,
-    evidence: `止まった理由: ${gate.detail}`,
+    evidence: [
+      `止まった理由: ${gate.detail}`,
+      ...(past.length > 0
+        ? [`この工程の過去の失敗:\n${past.map((f) => `- ${f}`).join('\n')}`]
+        : []),
+    ].join('\n'),
   };
 }
 

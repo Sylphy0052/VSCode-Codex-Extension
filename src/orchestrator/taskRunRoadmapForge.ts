@@ -1,8 +1,10 @@
 import {
+  fetchIssue,
   fetchIssueBody,
   nodeForgeFileSystem,
   updateIssue,
   type CliCommandRunner,
+  type FetchedIssue,
   type ForgeHost,
 } from './forge';
 import {
@@ -137,6 +139,31 @@ export function createTaskRunRoadmapPort(ports: {
           return { kind: 'failed', message: outcome.message };
       }
     },
+  };
+}
+
+export type IssueReadOutcome =
+  { kind: 'read'; issue: FetchedIssue } | { kind: 'failed'; message: string };
+
+/** runのリポジトリ（originのforge）から番号でIssueを読む口（`get_issue`、Issue #2037）。 */
+export type IssueReader = (workspaceRoot: string, issueNumber: number) => Promise<IssueReadOutcome>;
+
+export function createIssueReader(ports: {
+  git: GitCommandRunner;
+  cli: CliCommandRunner;
+}): IssueReader {
+  return async (workspaceRoot, issueNumber) => {
+    const host = await detectRoadmapForgeHost(ports, workspaceRoot);
+    if (host === undefined) {
+      return {
+        kind: 'failed',
+        message: 'originがGitHub/GitLabのリポジトリではないため、Issueを読めません',
+      };
+    }
+    const issue = await fetchIssue(ports.cli, host, workspaceRoot, issueNumber);
+    return issue === undefined
+      ? { kind: 'failed', message: `Issue #${String(issueNumber)} を取得できませんでした` }
+      : { kind: 'read', issue };
   };
 }
 

@@ -228,6 +228,7 @@ code --install-extension vscode-codex-extension.vsix --force
 
 - 同梱skill: VSIXに入っている。呼び出し名は`codex-ext:<skill名>`（Codexでは`$codex-ext:<skill名>`、Claude Codeでは`/codex-ext:<skill名>`）。止めたいときは設定の`agent.bundledSkills.enabled`を`false`にする
   - GitLab向けのskill（`gitlab-develop`・`gitlab-review`・`gitlab-cleanup`など）を同梱している。Issueの着手からMR作成・自己レビュー・後片付けまでを進める。使うには`glab`が要り、GitLabのホストはリポジトリの`git remote`のURLから求める。`glab`の導入と認証は`codex-ext:gitlab-init`で確かめられる
+  - Claude Codeでは、同梱のskillとsubagentがすべて同じ名前でClaudeの設定ディレクトリ（`~/.claude`など）の`skills/`・`agents/`にあるとき、同梱skillを読ませない。同じ説明が二重に載るのを避けるため。条件の詳細はREADMEの「skills」節にある
 - 自分で追加するskill: Agentsの設定パネルでskillsセクションを開き、「フォルダからskillを追加」を押して`SKILL.md`を含むフォルダを選ぶ。呼び出し名は`codex-ext-user:<フォルダ名>`になる。フォルダは拡張機能の保存領域へ写されるため、元のフォルダを書き換えても反映されない。書き換えたら一度削除して追加し直す
   - 追加したskillは、削除するまで拡張機能から開く全ての会話で読み込まれる。信頼できるフォルダだけを追加する
   - シンボリックリンク・`.git`・`node_modules`は写さない。写す分がファイル1000個か合計10MBを超えるフォルダは追加できない

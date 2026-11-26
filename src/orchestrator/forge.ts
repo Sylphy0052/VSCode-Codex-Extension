@@ -963,6 +963,55 @@ export async function fetchIssueBody(
   }
 }
 
+export interface FetchedIssue {
+  title: string;
+  /** forgeの表記のまま（GitHubは`OPEN`/`CLOSED`、GitLabは`opened`/`closed`）。 */
+  state: string;
+  body: string;
+}
+
+/**
+ * Issueの題・状態・本文を1件取得する（Issue #2037）。取得できなければ `undefined`。
+ * 経路は`fetchIssueBody`と同じで、GitHubは `gh issue view --json`、GitLabは `glab api` を読む。
+ */
+export async function fetchIssue(
+  cli: CliCommandRunner,
+  host: ForgeHost,
+  cwd: string,
+  issue: number,
+): Promise<FetchedIssue | undefined> {
+  if (!Number.isSafeInteger(issue) || issue <= 0) {
+    return undefined;
+  }
+  const result =
+    host === 'github'
+      ? await cli.run('gh', ['issue', 'view', String(issue), '--json', 'title,state,body'], cwd)
+      : await cli.run('glab', ['api', `projects/:id/issues/${String(issue)}`], cwd);
+  if (result.code !== 0) {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null) {
+    return undefined;
+  }
+  const record = parsed as Record<string, unknown>;
+  const { title, state } = record;
+  const body = record[host === 'github' ? 'body' : 'description'];
+  if (typeof title !== 'string' || typeof state !== 'string') {
+    return undefined;
+  }
+  // GitLabは説明が空のIssueで`description: null`を返す。取得の失敗と分けて空の本文として扱う
+  if (body === null) {
+    return { title, state, body: '' };
+  }
+  return typeof body === 'string' ? { title, state, body } : undefined;
+}
+
 export interface UpdateIssueRequest {
   host: ForgeHost;
   cwd: string;
@@ -1076,6 +1125,82 @@ export async function postIssueComment(
     };
   } finally {
     await deps.fs.removeTempFile(bodyFilePath);
+  }
+}
+
+/**
+ * PR/MRへコメントを1件投稿する（Issue #2108。最適化の台帳）。本文は一時ファイル経由で渡す。
+ * GitHubは`gh pr comment --body-file`、GitLabは`glab api .../merge_requests/<n>/notes`。
+ */
+export async function postPullRequestComment(
+  deps: CreatePullRequestDeps,
+  request: { host: ForgeHost; cwd: string; number: number; body: string },
+): Promise<ForgeStepOutcome> {
+  if (!Number.isSafeInteger(request.number) || request.number <= 0 || request.body.trim() === '') {
+    return { ok: false, message: 'PR番号または本文が不正です' };
+  }
+  const bodyFilePath = await deps.fs.writeTempFile(request.body);
+  try {
+    const args =
+      request.host === 'github'
+        ? ['pr', 'comment', String(request.number), `--body-file=${bodyFilePath}`]
+        : [
+            'api',
+            `projects/:id/merge_requests/${String(request.number)}/notes`,
+            `--field=body=@${bodyFilePath}`,
+          ];
+    const command = forgeCliCommand(request.host);
+    const result = await deps.cli.run(command, args, request.cwd);
+    if (result.code !== 0) {
+      return {
+        ok: false,
+        message:
+          result.stderr.trim() !== ''
+            ? sanitizeForLog(result.stderr)
+            : `${command} でPRへのコメントに失敗しました（終了コード ${result.code}）`,
+      };
+    }
+    return { ok: true };
+  } finally {
+    await deps.fs.removeTempFile(bodyFilePath);
+  }
+}
+
+/**
+ * PR/MRのコメントの本文を読む（Issue #2108。同じ台帳を2回投稿しないため）。読めなければ`undefined`。
+ */
+export async function fetchPullRequestCommentBodies(
+  cli: CliCommandRunner,
+  request: { host: ForgeHost; cwd: string; number: number },
+): Promise<string[] | undefined> {
+  if (!Number.isSafeInteger(request.number) || request.number <= 0) {
+    return undefined;
+  }
+  const result =
+    request.host === 'github'
+      ? await cli.run('gh', ['pr', 'view', String(request.number), '--json=comments'], request.cwd)
+      : await cli.run(
+          'glab',
+          ['api', `projects/:id/merge_requests/${String(request.number)}/notes?per_page=100`],
+          request.cwd,
+        );
+  if (result.code !== 0) {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(result.stdout);
+    const list =
+      request.host === 'github'
+        ? (parsed as { comments?: unknown } | null)?.comments
+        : (parsed as unknown);
+    if (!Array.isArray(list)) {
+      return undefined;
+    }
+    return list
+      .map((entry: unknown) => (entry as { body?: unknown } | null)?.body)
+      .filter((body): body is string => typeof body === 'string');
+  } catch {
+    return undefined;
   }
 }
 

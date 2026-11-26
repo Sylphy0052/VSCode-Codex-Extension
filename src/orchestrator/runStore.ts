@@ -34,6 +34,13 @@ export interface PersistedTaskState {
   manualRetryCount: number | undefined;
   /** 再読み込みの後に同じ会話を開き直した回数（`TaskRunState.reloadResumes`、Issue #1670）。 */
   reloadResumes?: number;
+  /**
+   * 直近の試行の開始時刻・終了時刻（ISO8601、Issue #2122）。ノードあたりの所要時間の指標に使う。
+   * 開始していないノードと、このフィールドが無い形式の既存データでは省略する。終了時刻は
+   * `done` / `failed` / `blocked` / `skipped`の間だけ持ち、再実行で走り直すと消える。
+   */
+  startedAt?: string;
+  finishedAt?: string;
   failure: TaskFailureReason | undefined;
   /**
    * タスクPR/MRの番号（design.md §16.11「タスクごとの...PR/MRの番号」、Issue #118）。
@@ -178,6 +185,42 @@ export function reconcileRunOnReload(run: PersistedRun): PersistedRun {
   return { ...run, tasks, finishedAt: run.finishedAt ?? new Date().toISOString() };
 }
 
+/** 終了時刻を持つノードの状態（Issue #2122）。 */
+const FINISHED_TASK_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
+  'done',
+  'failed',
+  'blocked',
+  'skipped',
+]);
+
+/**
+ * 永続化するノードの開始・終了時刻（Issue #2122）。純粋関数。
+ *
+ * - 開始時刻は、このウィンドウで動いた試行（`liveStartedAt`）を優先し、無ければ前回の値を引き継ぐ
+ * - 終了時刻は終わった状態の間だけ持つ。同じ試行の終了時刻が既にあればそれを引き継ぎ、無ければ
+ *   このウィンドウで動いた試行に限って`now`を入れる。リロードで復元しただけのノードへ`now`を
+ *   入れると、中断から復元までの時間が所要時間に混ざるため入れない
+ */
+export function persistedTaskTimes(
+  state: TaskState,
+  liveStartedAt: string | undefined,
+  previous: Pick<PersistedTaskState, 'startedAt' | 'finishedAt'> | undefined,
+  now: Date,
+): Pick<PersistedTaskState, 'startedAt' | 'finishedAt'> {
+  const startedAt = liveStartedAt ?? previous?.startedAt;
+  if (startedAt === undefined) {
+    return {};
+  }
+  if (!FINISHED_TASK_STATES.has(state)) {
+    return { startedAt };
+  }
+  const sameAttempt = previous?.startedAt === startedAt;
+  const finishedAt =
+    (sameAttempt ? previous.finishedAt : undefined) ??
+    (liveStartedAt === undefined ? undefined : now.toISOString());
+  return finishedAt === undefined ? { startedAt } : { startedAt, finishedAt };
+}
+
 function trimRuns(runs: readonly PersistedRun[]): PersistedRun[] {
   return [...runs].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, MAX_STORED_RUNS);
 }
@@ -192,6 +235,15 @@ function trimRuns(runs: readonly PersistedRun[]): PersistedRun[] {
  */
 export class WorkflowRunStore {
   private readonly queue = new SerialQueue();
+
+  /**
+   * runの`finishedAt`が埋まった（`running`から終わった）更新の後に呼ぶ（Issue #2122）。
+   * 再開して終わり直したrunは、新しい`finishedAt`でもう一度呼ぶ（振り返り直すかは記録器が
+   * `finishedAt`で決める。Issue #2129）。
+   * 指標の記録と振り返りに使う。リロード直後の`reconcileAfterReload`では呼ばない
+   * （中断で埋まった`finishedAt`はrunの終わりではないため）。
+   */
+  onRunFinished: ((run: PersistedRun) => void) | undefined;
 
   constructor(private readonly memento: WorkflowRunMemento) {}
 
@@ -218,6 +270,9 @@ export class WorkflowRunStore {
       const next = updater(current);
       const merged = index === -1 ? [next, ...all] : all.map((r, i) => (i === index ? next : r));
       await this.memento.update(WORKFLOW_RUNS_KEY, trimRuns(merged));
+      if (next.finishedAt !== undefined && current?.finishedAt !== next.finishedAt) {
+        this.onRunFinished?.(next);
+      }
     });
   }
 

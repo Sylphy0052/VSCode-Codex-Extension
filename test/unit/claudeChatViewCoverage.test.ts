@@ -10,9 +10,8 @@ import {
   type ResumeOutcome,
 } from '../../src/claude/streamSession';
 import type { Logger } from '../../src/log';
-import type { FileSystemPort, MemoryFileSystemPort } from '../../src/session/ports';
+import type { FileSystemPort } from '../../src/session/ports';
 import { FileMentionCatalog, type FileScanPort } from '../../src/provider/fileMentions';
-import type { MemoryModeMemento } from '../../src/provider/inputModes';
 import { STATE_POST_INTERVAL_MS } from '../../src/view/chatShared';
 import type { SettingsProvider } from '../../src/view/settingsProvider';
 import { ClaudeChatViewManager } from '../../src/view/claudeChatView';
@@ -167,14 +166,6 @@ function fakeStore(overrides?: Partial<ClaudeSessionStore>): ClaudeSessionStore 
   return store as unknown as ClaudeSessionStore;
 }
 
-function fakeMemoryFileSystem(overrides?: Partial<MemoryFileSystemPort>): MemoryFileSystemPort {
-  return {
-    readStrict: async () => undefined,
-    resolveSymlinkTarget: async () => ({ kind: 'not-symlink' }),
-    ...overrides,
-  };
-}
-
 /** `afterEach`で消す使い捨てディレクトリ。 */
 const tempDirs: string[] = [];
 
@@ -184,22 +175,9 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
-function fakeMemento(): MemoryModeMemento {
-  const store = new Map<string, unknown>();
-  return {
-    get: <T>(key: string, defaultValue: T): T =>
-      store.has(key) ? (store.get(key) as T) : defaultValue,
-    update: (key: string, value: unknown): Thenable<void> => {
-      store.set(key, value);
-      return Promise.resolve();
-    },
-  };
-}
-
 function createManager(options?: {
   store?: ClaudeSessionStore;
   fileSystem?: FileSystemPort;
-  memoryFs?: MemoryFileSystemPort;
   isTaskManagedThread?: (sessionId: string) => boolean;
   settings?: Record<string, unknown>;
   holdsRestoredTaskPanel?: (sessionId: string) => boolean;
@@ -217,8 +195,6 @@ function createManager(options?: {
     () => undefined,
     () => undefined,
     options?.isTaskManagedThread ?? (() => false),
-    options?.memoryFs ?? fakeMemoryFileSystem(),
-    fakeMemento(),
     undefined,
     undefined,
     options?.globalStorageDir === null
@@ -443,6 +419,125 @@ describe('webviewメッセージの振り分け: セッションへ委ねる操�
     expect(answer.mock.calls[0]).toEqual(['req-1', selections]);
   });
 
+  describe('統括ページからのAskUserQuestionへの回答（Issue #2135）', () => {
+    const askLine = (requestId: string): string =>
+      `${JSON.stringify({
+        type: 'control_request',
+        request_id: requestId,
+        request: {
+          subtype: 'can_use_tool',
+          tool_name: 'AskUserQuestion',
+          input: {
+            questions: [
+              {
+                question: 'どちらにしますか',
+                header: '選択',
+                options: [
+                  { label: 'A', description: '' },
+                  { label: 'B', description: '' },
+                ],
+                multiSelect: false,
+              },
+            ],
+          },
+        },
+      })}\n`;
+
+    /** 実プロセスの代わりに書き込みを控えるstdinを差し込み、AskUserQuestionを1件待たせる。 */
+    async function openAsking(): Promise<{
+      manager: ClaudeChatViewManager;
+      id: string;
+      session: ClaudeStreamSession;
+      written: string[];
+    }> {
+      const { sessions } = stubStartCapturing();
+      const manager = createManager();
+      const id = await openSession(manager);
+      const session = sessions[0] as ClaudeStreamSession;
+      const written: string[] = [];
+      (session as unknown as { proc: unknown }).proc = {
+        killed: false,
+        stdin: { write: (line: string) => written.push(line), destroyed: false, writable: true },
+      };
+      session.receive(askLine('r1'));
+      await Promise.resolve();
+      return { manager, id, session, written };
+    }
+
+    const answerFromHub = (manager: ClaudeChatViewManager, id: string, label: string) =>
+      manager.controlSession(id, {
+        kind: 'answerQuestion',
+        pendingRequestId: 'r1',
+        answers: { どちらにしますか: [label] },
+      });
+
+    it('中身に質問が載り、統括から答えると応答を1回だけ書き、2回目は既に回答済み', async () => {
+      const { manager, id, session, written } = await openAsking();
+      const detail = manager.controlSession(id, { kind: 'approvalDetail' });
+      expect(detail.approvals?.[0]).toMatchObject({
+        requestId: 'r1',
+        decidable: false,
+        answer: 'choices',
+        questions: [{ question: 'どちらにしますか', multiSelect: false }],
+      });
+      expect(answerFromHub(manager, id, 'A')).toEqual({ ok: true });
+      expect(answerFromHub(manager, id, 'B')).toEqual({
+        ok: false,
+        error: 'この項目は既に回答済みです',
+      });
+      expect(written).toHaveLength(1);
+      expect(written[0]).toContain('"answers":{"どちらにしますか":"A"}');
+      expect(session.getState().approvals).toHaveLength(0);
+    });
+
+    it('タブで答えた後の統括からの回答は既に回答済みになり、タブの応答だけが書かれる', async () => {
+      const { manager, id, written } = await openAsking();
+      await manager.simulateWebviewMessage(id, {
+        type: 'answerAskUserQuestion',
+        requestId: 'r1',
+        answers: { どちらにしますか: ['A'] },
+      });
+      expect(answerFromHub(manager, id, 'B')).toEqual({
+        ok: false,
+        error: 'この項目は既に回答済みです',
+      });
+      expect(written).toHaveLength(1);
+    });
+
+    it('質問と合わない回答・承認は送らずに項目を残し、拒否だけは通す', async () => {
+      const { manager, id, session, written } = await openAsking();
+      for (const answers of [
+        {},
+        { どちらにしますか: ['A', 'B'] },
+        { どちらにしますか: ['A'], 余計: ['x'] },
+      ]) {
+        const r = manager.controlSession(id, {
+          kind: 'answerQuestion',
+          pendingRequestId: 'r1',
+          answers,
+        });
+        expect(r.ok).toBe(false);
+      }
+      expect(
+        manager.controlSession(id, {
+          kind: 'approvalDecision',
+          approvalRequestId: 'r1',
+          decision: 'accept',
+        }).ok,
+      ).toBe(false);
+      expect(written).toHaveLength(0);
+      expect(session.getState().approvals).toHaveLength(1);
+      expect(
+        manager.controlSession(id, {
+          kind: 'approvalDecision',
+          approvalRequestId: 'r1',
+          decision: 'decline',
+        }),
+      ).toEqual({ ok: true });
+      expect(written[0]).toContain('"behavior":"deny"');
+    });
+  });
+
   it('approveは不正なdecision・requestIdを無視する', async () => {
     const { sessions } = stubStartCapturing();
     const manager = createManager();
@@ -492,7 +587,7 @@ describe('webviewメッセージの振り分け: 拡張機能側のコマンド'
     ['workflowMenu', 'agent.workflows.menu'],
     ['teamWorkflow', 'agent.workflows.team'],
     ['workflowView', 'agent.workflows.view'],
-    ['sessionKanban', 'agent.sessionKanban'],
+    ['missionControl', 'agent.missionControl.open'],
     ['forgeHub', 'agent.forgeHub'],
     ['orchestratorMode', 'agent.taskRun.start'],
     ['openProgress', 'agent.openProgress'],
@@ -882,6 +977,50 @@ describe('openTaskSessionの再開とsandbox', () => {
     expect(args[0]).toBe('--settings');
     expect(args).toContain('--append-system-prompt');
     expect(args[1]).toContain('enableWeakerNestedSandbox');
+  });
+
+  it('設定で足した除外パターンをsandboxの設定・指示文・hookの判定へ渡し、危険なものは捨てて警告する（Issue #2133）', async () => {
+    const csPy = 'python3 /home/u/.claude/skills/compute-server/scripts/cs.py *';
+    __mock.setConfig('agent', {
+      claude: { sandbox: { extraExcludedCommands: [csPy, 'bash *', '*'] } },
+    });
+    const { calls } = stubStartCapturing();
+    vi.spyOn(ClaudeSandboxProbe.prototype, 'check').mockResolvedValue({
+      ok: true,
+      environment: { weakerNested: false },
+    });
+    vi.spyOn(ClaudeSandboxProbe.prototype, 'checkCwd').mockResolvedValue({ ok: true });
+    const manager = createManager();
+
+    await manager.openTaskSession({ ...TASK_INPUT, cliSandbox: 'workspace-write' });
+
+    const config = calls[0]?.config;
+    const args = config?.additionalArgs ?? [];
+    const settings = JSON.parse(args[1] ?? '{}') as { sandbox: { excludedCommands: string[] } };
+    expect(settings.sandbox.excludedCommands.at(-1)).toBe(csPy);
+    expect(settings.sandbox.excludedCommands).not.toContain('bash *');
+    expect(settings.sandbox.excludedCommands).not.toContain('*');
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toContain(
+      'python3 /home/u/.claude/skills/compute-server/scripts/cs.py',
+    );
+    expect(config?.sandboxBashGuard).toBe(true);
+    expect(config?.sandboxExtraExcludedCommands).toEqual([csPy]);
+    expect(
+      logged.warn.some((m) => m.includes('bash *') && m.includes('extraExcludedCommands')),
+    ).toBe(true);
+  });
+
+  it('sandboxが付かないときは除外パターンをhookへ渡さない（Issue #2133）', async () => {
+    __mock.setConfig('agent', {
+      claude: { sandbox: { extraExcludedCommands: ['python3 /x/cs.py *'] } },
+    });
+    const { calls } = stubStartCapturing();
+    const manager = createManager();
+
+    await manager.openTaskSession({ ...TASK_INPUT });
+
+    expect(calls[0]?.config.sandboxBashGuard).toBeUndefined();
+    expect(calls[0]?.config.sandboxExtraExcludedCommands).toBeUndefined();
   });
 });
 
@@ -2204,7 +2343,8 @@ describe('WebGPTとの議論（現在の会話から開始）', () => {
 
     await manager.simulateWebviewMessage(id, { type: 'webGptDiscussion' });
 
-    await vi.waitFor(() => expect(prepareWebGptDiscussion).toHaveBeenCalledWith(true));
+    // 第2引数は質問ファイルのボタン用の固定議題（Issue #2057）。このボタン経路では渡さない
+    await vi.waitFor(() => expect(prepareWebGptDiscussion).toHaveBeenCalledWith(true, undefined));
     expect(sessions).toHaveLength(1);
     expect(ensure).not.toHaveBeenCalled();
     expect(sendOrQueue).not.toHaveBeenCalled();
@@ -2962,6 +3102,7 @@ describe('自動引き継ぎ: 区切り待ちの契機（Reflex・分類器）',
       config: {
         'autoHandoff.onProfileChange': false,
         'autoHandoff.onAssistantSuggestion': false,
+        'autoHandoff.onHandoffPrompt': false,
         'autoHandoff.onMilestone': false,
       },
     });

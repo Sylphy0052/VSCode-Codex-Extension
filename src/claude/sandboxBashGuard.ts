@@ -1,4 +1,5 @@
-import { EXCLUDED_COMMANDS } from './sandbox';
+import { homedir } from 'node:os';
+import { sandboxExcludedCommands } from './sandbox';
 
 /**
  * sandbox付きのセッションで、sandboxの外へ回らない形のネットワークコマンドを実行前に止める
@@ -22,13 +23,51 @@ export function sandboxBashGuardHooks(): Record<string, unknown> {
   return { PreToolUse: [{ matcher: 'Bash', hookCallbackIds: [SANDBOX_BASH_GUARD_CALLBACK_ID] }] };
 }
 
-/** `excludedCommands`の各パターンを語へ分けたもの（末尾の`*`は除く）。 */
-const NETWORK_COMMANDS: readonly (readonly string[])[] = EXCLUDED_COMMANDS.map((pattern) =>
-  pattern.replace(/ \*$/, '').split(' '),
-);
+/** `excludedCommands`の各パターンを語へ分けたものと、その先頭の語（`git`・`gh`など）。 */
+interface NetworkCommandTable {
+  /** 各パターンの語（末尾の`*`は除く）。 */
+  names: readonly (readonly string[])[];
+  heads: ReadonlySet<string>;
+  /** `~/`を展開する先。設定で足した絶対パスのパターンへ`~/`で打った形を見分ける。 */
+  home: string;
+}
 
-/** `NETWORK_COMMANDS`の先頭の語（`git`・`gh`など）。 */
-const NETWORK_HEADS = new Set(NETWORK_COMMANDS.map((name) => name[0]));
+/**
+ * 固定の一覧と設定で足したパターン（Issue #2133）から判定表を作る。設定は呼ぶたびに変わり得る
+ * ので、モジュール読込時に固定せず判定のたびに作る。
+ */
+function networkCommandTable(extraExcludedCommands: readonly string[]): NetworkCommandTable {
+  const names = sandboxExcludedCommands(extraExcludedCommands).map((pattern) =>
+    pattern
+      .replace(/ \*$/, '')
+      .split(/\s+/)
+      .filter((word) => word !== ''),
+  );
+  return {
+    names: names.filter((name) => name.length > 0),
+    heads: new Set(names.map((name) => name[0]).filter((head) => head !== undefined)),
+    home: homedir(),
+  };
+}
+
+/** 語がパターンの語に一致するか。`~/`で始まる語は展開した形でも比べ、その場合は`tilde`を返す。 */
+function matchWord(
+  word: string | undefined,
+  expected: string,
+  home: string,
+): 'exact' | 'tilde' | undefined {
+  if (word === expected) {
+    return 'exact';
+  }
+  if (
+    word?.startsWith('~/') === true &&
+    expected.startsWith('/') &&
+    `${home}${word.slice(1)}` === expected
+  ) {
+    return 'tilde';
+  }
+  return undefined;
+}
 
 /** 後ろのコマンドをそのまま起動するラッパー。先頭にあるとパターンの先頭一致から外れる。 */
 const WRAPPERS = new Set([
@@ -182,10 +221,15 @@ interface NetworkCommand {
   prefixed: boolean;
   /** 出力をファイルへリダイレクトしている。 */
   redirected: boolean;
+  /** 絶対パスのパターンに`~/`で書いた語が当たっている（`~/`は展開されず一致しない）。 */
+  tilde: boolean;
 }
 
 /** 1つのコマンドが`excludedCommands`に載ったコマンドなら、その内訳を返す。 */
-function readNetworkCommand({ words, redirected }: ShellCommand): NetworkCommand | undefined {
+function readNetworkCommand(
+  { words, redirected }: ShellCommand,
+  table: NetworkCommandTable,
+): NetworkCommand | undefined {
   let i = 0;
   let prefixed = false;
   while (ASSIGNMENT.test(words[i] ?? '')) {
@@ -197,7 +241,7 @@ function readNetworkCommand({ words, redirected }: ShellCommand): NetworkCommand
     // ラッパーのオプションは値を取るもの（`timeout -s SIGKILL 60`、`sudo -u <user>`）があり、
     // 語の形だけでは読み飛ばす数を決められない。後ろで最初に現れるネットワークコマンド名を
     // 起動されるコマンドとみなす
-    const next = words.findIndex((word, k) => k > i && NETWORK_HEADS.has(word));
+    const next = words.findIndex((word, k) => k > i && table.heads.has(word));
     if (next < 0) {
       return undefined;
     }
@@ -208,22 +252,37 @@ function readNetworkCommand({ words, redirected }: ShellCommand): NetworkCommand
   if (head === undefined) {
     return undefined;
   }
-  let sub = i + 1;
+  // gitのグローバルオプション（`git -C <dir> push`）はサブコマンドの前に挟まる
+  let gitSub = i + 1;
   if (head === 'git') {
-    for (let option = words[sub]; option?.startsWith('-'); option = words[sub]) {
-      sub += GIT_OPTIONS_WITH_VALUE.has(option) ? 2 : 1;
-      prefixed = true;
+    for (let option = words[gitSub]; option?.startsWith('-'); option = words[gitSub]) {
+      gitSub += GIT_OPTIONS_WITH_VALUE.has(option) ? 2 : 1;
     }
   }
-  for (const name of NETWORK_COMMANDS) {
-    if (name[0] !== head) {
+  for (const name of table.names) {
+    const headMatch = matchWord(head, name[0] ?? '', table.home);
+    if (headMatch === undefined) {
       continue;
     }
-    if (name.length === 1) {
-      return { name, args: words.slice(i + 1), prefixed, redirected };
+    const sub = name.length > 1 ? gitSub : i + 1;
+    let tilde = headMatch === 'tilde';
+    let matched = true;
+    for (let k = 1; k < name.length; k++) {
+      const match = matchWord(words[sub + k - 1], name[k] ?? '', table.home);
+      if (match === undefined) {
+        matched = false;
+        break;
+      }
+      tilde ||= match === 'tilde';
     }
-    if (words[sub] === name[1]) {
-      return { name, args: words.slice(sub + 1), prefixed, redirected };
+    if (matched) {
+      return {
+        name,
+        args: words.slice(sub + name.length - 1),
+        prefixed: prefixed || sub !== i + 1,
+        redirected,
+        tilde,
+      };
     }
   }
   return undefined;
@@ -270,15 +329,22 @@ export function hasCommandSubstitution(command: string): boolean {
 /**
  * sandboxの外へ回らない形で書かれたネットワークコマンドがあれば、拒否理由を返す。
  * 無ければ`undefined`（そのまま実行させる）。
+ *
+ * `extraExcludedCommands`は設定で足した除外パターン（Issue #2133）。sandboxの設定と同じ値を渡す。
  */
-export function sandboxBashGuardReason(command: string): string | undefined {
+export function sandboxBashGuardReason(
+  command: string,
+  extraExcludedCommands: readonly string[] = [],
+): string | undefined {
+  const table = networkCommandTable(extraExcludedCommands);
+  const read = (c: ShellCommand): NetworkCommand | undefined => readNetworkCommand(c, table);
   const commands = splitShellCommands(command);
   // 二重引用符の中の置換は分割されず1つの語に残るため、分割とは別に見る。CLIは置換を別の
   // コマンドとして扱い、`glab mr create --description "$(cat <<'EOF' …)"`は`glab *`に
   // 一致せずsandbox内で走る（Issue #1672）
   if (hasCommandSubstitution(command)) {
     const networkNames = commands
-      .map(readNetworkCommand)
+      .map(read)
       .filter((c): c is NetworkCommand => c !== undefined)
       .map((c) => c.name.join(' '));
     if (networkNames.length > 0) {
@@ -294,10 +360,10 @@ export function sandboxBashGuardReason(command: string): string | undefined {
     }
   }
   const found = commands
-    .map(readNetworkCommand)
+    .map(read)
     .filter(
       (c): c is NetworkCommand =>
-        c !== undefined && (commands.length > 1 || c.prefixed || c.redirected),
+        c !== undefined && (commands.length > 1 || c.prefixed || c.redirected || c.tilde),
     );
   if (found.length === 0) {
     return undefined;
@@ -311,6 +377,9 @@ export function sandboxBashGuardReason(command: string): string | undefined {
     `cd・git -C <dir>・環境変数・timeoutなどを前に付けず、;・&&・||・パイプで他のコマンドと連結せず、>・>>・&>で出力をファイルへ書かず、次の形で1つずつ別のBash呼び出しとして打ち直す: ${retries.join(' / ')}`,
     '別のディレクトリで実行する必要があれば、先にcdだけを別のBash呼び出しで実行してから打つ。',
   ];
+  if (found.some((c) => c.tilde)) {
+    lines.push('~/で始まるパスは展開されず一致しないので、上の形のとおり絶対パスで打つ。');
+  }
   if (commands.length > 1 || found.some((c) => c.redirected)) {
     lines.push(
       '出力をjqなどで加工したりファイルへ保存したりしたかった場合は、単独で打ち、出力のJSONを直接読む。sandbox下で出力をファイルへ保存する手段は無い。',
@@ -323,7 +392,10 @@ export function sandboxBashGuardReason(command: string): string | undefined {
  * `hook_callback`要求への応答を組み立てる。拒否しないときは空の応答（通常どおり続行）を返す。
  * 要求の形（`input.tool_input.command`）はCLI 2.1.280で確認した。
  */
-export function answerSandboxBashGuard(payload: Record<string, unknown>): Record<string, unknown> {
+export function answerSandboxBashGuard(
+  payload: Record<string, unknown>,
+  extraExcludedCommands: readonly string[] = [],
+): Record<string, unknown> {
   if (payload['callback_id'] !== SANDBOX_BASH_GUARD_CALLBACK_ID) {
     return {};
   }
@@ -333,7 +405,7 @@ export function answerSandboxBashGuard(payload: Record<string, unknown>): Record
   if (input?.['tool_name'] !== 'Bash' || typeof command !== 'string') {
     return {};
   }
-  const reason = sandboxBashGuardReason(command);
+  const reason = sandboxBashGuardReason(command, extraExcludedCommands);
   if (reason === undefined) {
     return {};
   }
