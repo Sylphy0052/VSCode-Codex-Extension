@@ -16,6 +16,7 @@ import {
   tallyTaskRun,
 } from './taskRunDigest';
 import { findOpenGate, MAX_REVIEW_ROUNDS } from './taskRunGates';
+import { assessStagnation, formatStagnationStatus } from './taskRunStagnation';
 import {
   GOAL_CRITERIA_GUIDANCE,
   GOAL_REASON_MAX_LENGTH,
@@ -1084,6 +1085,7 @@ export function formatTaskRunState(
     `run全体の停止: ${run.haltedByUser ? 'あり' : 'なし'} / 終了: ${run.finishedAt === undefined ? 'いいえ' : 'はい'} / 全体: ${formatAssessment(run)}`,
     `判断待ちの工程: ${awaiting.length === 0 ? 'なし' : `${awaiting.map((r) => `${r.taskId}:${r.stage}`).join(', ')}（うち並列上限の空き枠内で通知の対象: 先頭${String(listStagesToAnnounce(run).length)}件）`}`,
     formatTaskRunTally(tallyTaskRun(run)),
+    formatStagnationStatus(assessStagnation(run)),
     ...resourceLines,
   ];
   const lines: string[] = [...formatGoalStateLines(run)];
