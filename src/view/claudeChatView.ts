@@ -165,7 +165,7 @@ import type { Logger } from '../log';
 import type { SummaryRolloutDeps } from '../secondOpinion/summaryRollout';
 import type { FileSystemPort } from '../session/ports';
 import type { AccountAutoSwitcher, LimitHit } from '../claude/accountAutoSwitch';
-import { ClaudeUsageProbe } from '../claude/usageProbe';
+import { ClaudeUsageProbe, type ProbedSlots } from '../claude/usageProbe';
 import { ClaudeSandboxProbe, claudeSandboxArgs, nodeSandboxProbePorts } from '../claude/sandbox';
 import { CommandCatalog } from '../provider/commandCatalog';
 import {
@@ -702,11 +702,19 @@ export class ClaudeChatViewManager
     private readonly autoName?: SessionAutoNameHost,
     /** アカウントの自動切り替え（Issue #1924）。渡さなければ使用率を記録せず、切り替えもしない。 */
     private readonly accounts?: AccountAutoSwitcher,
+    /** `/usage`から5時間枠と週次を読めたときの受け取り先（Issue #2174。Mission Controlの見込み用）。 */
+    onUsageSlots?: (probed: ProbedSlots | undefined) => void,
   ) {
     super(pinnedSessions, 'claude');
     this.catalog = new CommandCatalog(fs);
     // 取得結果をウィンドウ間で共有し、`claude`の起動を全ウィンドウで間引く（Issue #1809）
-    this.usageProbe = new ClaudeUsageProbe(claudePath, log, globalStorageDir, accounts);
+    this.usageProbe = new ClaudeUsageProbe(
+      claudePath,
+      log,
+      globalStorageDir,
+      accounts,
+      onUsageSlots,
+    );
     if (accounts !== undefined) {
       this.startAccountPolling();
     }

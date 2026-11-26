@@ -810,6 +810,8 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     pinnedSessions,
     { marks: manuallyNamedSessions },
     accountAutoSwitcher,
+    // 5時間枠と週次の使用率とリセット時刻（Issue #2174）。ステータスバーの表示には使わない
+    (probed) => usageBar.updateClaudeSlots(probed),
   );
   context.subscriptions.push(claudeChat);
 
