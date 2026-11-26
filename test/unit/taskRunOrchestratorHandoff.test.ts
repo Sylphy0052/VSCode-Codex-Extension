@@ -172,6 +172,11 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
     const orch = new TaskRunOrchestrator(deps);
 
     await orch.open('run-1');
+    // ツール利用の計測の見出しに世代を入れる（Issue #2188）
+    expect(vi.mocked(deps.server.registerTools).mock.calls[0]?.[3]).toEqual({
+      runId: 'run-1',
+      connection: 'orchestrator-1',
+    });
     // 第1世代で498件送る（上限500まで残り2件）
     const gen1Events = Array.from({ length: 498 }, (_, i) => taskFailed(`E${String(i + 1)}`));
     for (const e of gen1Events) {

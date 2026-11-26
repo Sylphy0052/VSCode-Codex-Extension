@@ -38,7 +38,7 @@ function createServer(metrics?: RoadmapQuestionMcpDeps['toolUsageMetrics']) {
     deps.toolUsageMetrics = metrics;
   }
   const server = new RoadmapQuestionMcpServer(deps);
-  const callTool = async (token: string, name: string): Promise<JsonRpcResponse> => {
+  const rpc = async (token: string, method: string, params: unknown): Promise<JsonRpcResponse> => {
     const target = resolveToken?.(token);
     if (target === undefined) {
       throw new Error('トークンが未登録');
@@ -53,15 +53,12 @@ function createServer(metrics?: RoadmapQuestionMcpDeps['toolUsageMetrics']) {
         },
         onClose: () => undefined,
       });
-      handler?.({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'tools/call',
-        params: { name, arguments: {} },
-      });
+      handler?.({ jsonrpc: '2.0', id: 1, method, params });
     });
   };
-  return { server, callTool, warnings };
+  const callTool = (token: string, name: string): Promise<JsonRpcResponse> =>
+    rpc(token, 'tools/call', { name, arguments: {} });
+  return { server, rpc, callTool, warnings };
 }
 
 function createMetrics(initial = true) {
@@ -219,5 +216,48 @@ describe('RoadmapQuestionMcpServerのツール利用の計測', () => {
     throwOnLog = false;
     await expect(callTool(token, 'start_task')).rejects.toThrow('トークンが未登録');
     expect(lines).toEqual([]);
+  });
+
+  it('解除した登録はdisposeで二重に出さず、disposeの出力で投げてもサーバは閉じる', async () => {
+    const metrics = createMetrics();
+    const { server, callTool } = createServer(metrics.port);
+    const label = { runId: 'run-1', connection: 'orchestrator-1' };
+    const released = await server.registerTools('c1', TOOLS, ok, label);
+    await callTool(released.token, 'start_task');
+    server.unregister(released.token);
+    server.dispose();
+    expect(metrics.lines).toEqual([
+      '[toolUsageMetrics task-run:run-1/orchestrator-1] calls=1 kinds=1 tools=start_task:1',
+    ]);
+
+    const throwing = createServer({
+      enabled: () => true,
+      log: () => {
+        throw new Error('書けない');
+      },
+    });
+    const { token } = await throwing.server.registerTools('c1', TOOLS, ok, label);
+    await throwing.callTool(token, 'start_task');
+    expect(() => throwing.server.dispose()).not.toThrow();
+    await expect(throwing.callTool(token, 'start_task')).rejects.toThrow('トークンが未登録');
+  });
+
+  it('計測の有無でtools/listとツール呼び出しの結果は変わらない', async () => {
+    const results = [];
+    for (const port of [undefined, createMetrics().port]) {
+      const { server, rpc } = createServer(port);
+      const { token } = await server.registerTools('c1', TOOLS, ok, {
+        runId: 'run-1',
+        connection: 'orchestrator-1',
+      });
+      results.push({
+        list: await rpc(token, 'tools/list', {}),
+        call: await rpc(token, 'tools/call', { name: 'start_task', arguments: {} }),
+      });
+    }
+    expect(results[1]).toEqual(results[0]);
+    expect(results[0]?.list).toMatchObject({
+      result: { tools: TOOLS.map((t) => ({ name: t.name })) },
+    });
   });
 });
