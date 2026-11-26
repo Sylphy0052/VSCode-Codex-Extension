@@ -1296,6 +1296,32 @@ describe('エディタの選択範囲の送り先（getActiveComposerTarget、is
     expect(manager.getActiveComposerTarget()).toBeUndefined();
   });
 
+  it('insertComposerDraft（Issue #2180）はwebviewのreadyを待ってから入力欄へ入れる', async () => {
+    stubStartCapturing();
+    const { manager } = createManager();
+    const id = await manager.openNew('/workspace/root');
+    expect(id).toBeDefined();
+    const panel = __mock.lastCreatedPanel();
+    const inserted = (): unknown[] =>
+      (panel?.webview.sent ?? []).filter(
+        (m) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { type?: unknown }).type === 'insertComposerText',
+      );
+
+    expect(manager.insertComposerDraft(id as string, '/gitlab-develop 作業')).toBe(true);
+    // 読み込み前に送ると消えるので、まだ送らない
+    expect(inserted()).toEqual([]);
+    panel?.webview.simulateMessage({ type: 'ready' });
+    expect(inserted()).toEqual([{ type: 'insertComposerText', text: '/gitlab-develop 作業' }]);
+    // 読み込み済みならすぐ送り、二度目のreadyで繰り返さない
+    expect(manager.insertComposerDraft(id as string, '次')).toBe(true);
+    panel?.webview.simulateMessage({ type: 'ready' });
+    expect(inserted()).toHaveLength(2);
+    expect(manager.insertComposerDraft('missing', 'x')).toBe(false);
+  });
+
   it('選択中の画面の入力欄へテキストを挿し込み、そのタブを表に出す', async () => {
     stubStartCapturing();
     const { manager } = createManager();

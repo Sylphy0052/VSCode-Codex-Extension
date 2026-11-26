@@ -18,6 +18,7 @@ import type {
   McWorkUnit,
 } from '../webview/missionControl/protocol';
 import { validCalendarMonth } from './workCalendar';
+import { parseTodoInput, type TodoChange, type TodoStore } from './missionControlTodos';
 import { MISSION_CONTROL_STYLES } from '../webview/missionControl/styles';
 import type { SessionControlResult } from './chatManagerBase';
 import { parseLaunchRequest, type McLaunchResult } from './missionControlLaunch';
@@ -125,6 +126,8 @@ export interface McSessionPort {
   workUnits?(days: number): Promise<McWorkUnit[]>;
   /** 作業履歴カレンダーの1か月分（Issue #2179）。`month`は1〜12。 */
   workCalendar?(year: number, month: number): Promise<McWorkCalendar>;
+  /** 期日付きのTodoの保存先（Issue #2180）。 */
+  todos?: TodoStore;
 }
 
 /** 作業単位の集計で受け付ける日数の上限（保持期間の上限と同じ）。 */
@@ -373,6 +376,10 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'handoffOpen':
       case 'workUnits':
       case 'workCalendar':
+      case 'todos':
+      case 'todoSave':
+      case 'todoDone':
+      case 'todoDelete':
         this.handleSessions(m);
         return;
       case 'runOp':
@@ -504,6 +511,31 @@ export class MissionControlViewManager implements vscode.Disposable {
       });
   }
 
+  /** 期日付きのTodoの一覧・追加・編集・完了・削除（Issue #2180）。 */
+  private async handleTodos(
+    store: TodoStore | undefined,
+    message: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (store === undefined) {
+      return { ok: false, error: 'Todoはこの画面では使えません' };
+    }
+    let change: TodoChange;
+    if (message.type === 'todos') {
+      return { ok: true, todos: store.list() };
+    } else if (message.type === 'todoSave') {
+      const input = parseTodoInput(message.todo);
+      if (typeof input === 'string') {
+        return { ok: false, error: input };
+      }
+      change = await store.save(input);
+    } else if (message.type === 'todoDone') {
+      change = await store.setDone(message.id, message.done);
+    } else {
+      change = await store.remove(message.id);
+    }
+    return change.ok ? { ok: true, todos: change.todos } : { ok: false, error: change.error };
+  }
+
   /** 閉じる・archive・delete・履歴の要求（Issue #2149）。応答は`reply`で返す。 */
   private handleSessions(message: Record<string, unknown>): void {
     const seq = message.seq;
@@ -534,6 +566,14 @@ export class MissionControlViewManager implements vscode.Disposable {
           return { ok: false, error: '作業単位の集計はこの画面では使えません' };
         }
         return { ok: true, workUnits: await port.workUnits(days) };
+      }
+      if (
+        message.type === 'todos' ||
+        message.type === 'todoSave' ||
+        message.type === 'todoDone' ||
+        message.type === 'todoDelete'
+      ) {
+        return this.handleTodos(port.todos, message);
       }
       if (message.type === 'workCalendar') {
         const { year, month } = message;

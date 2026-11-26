@@ -246,7 +246,7 @@ body.vscode-high-contrast .run-progress, body.vscode-high-contrast-light .run-pr
 @keyframes mc-spin { to { transform: rotate(360deg); } }
 @keyframes mc-enter { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
 @keyframes mc-pop { from { opacity: .4; transform: scale(.92); } to { opacity: 1; transform: none; } }
-/* 作業履歴カレンダー（Issue #2179）。作業量の段階はセッション数の比で0〜4 */
+/* 作業履歴カレンダー（Mission Control 段階23、Issue 2179）。期日付きのTodo（段階24）も同じ枠に出す。作業量の段階はセッション数の比で0〜4 */
 .calendar-box { width: min(820px, 96vw); max-height: 92vh; overflow: auto; }
 .calendar { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .calendar th { padding: 2px; font-weight: 400; color: var(--vscode-descriptionForeground); }
@@ -261,6 +261,10 @@ body.vscode-high-contrast .run-progress, body.vscode-high-contrast-light .run-pr
 .calendar-cell.today .calendar-date { font-weight: 700; text-decoration: underline; }
 .calendar-cell.selected { outline: 2px solid var(--vscode-focusBorder); outline-offset: -2px; }
 .calendar-units { margin: 0; padding-left: 18px; font-size: 12px; }
+.calendar-todo { color: var(--vscode-charts-orange, var(--vscode-foreground)); }
+.todo-list { max-height: 30vh; overflow-y: auto; }
+.row.todo-done .row-title { text-decoration: line-through; opacity: .6; }
+.row.todo-overdue .row-sub { color: var(--vscode-errorForeground); }
 body.vscode-high-contrast .calendar-cell[class*="level-"]:not(.level-0), body.vscode-high-contrast-light .calendar-cell[class*="level-"]:not(.level-0) { border-style: dashed; }
 /* 動きを減らす設定では、アニメーションと遷移をすべて止める（スピナーは弧の形だけが残る） */
 @media (prefers-reduced-motion: reduce) {

@@ -1366,4 +1366,142 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
       expect(doc.querySelectorAll('[role="dialog"]')).toHaveLength(1);
     });
   });
+  describe('期日付きのTodo（Issue #2180）', () => {
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const dayKey = (d: Date): string =>
+      `${String(d.getFullYear())}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    const todo = (overrides: Record<string, unknown> = {}) => ({
+      id: 't1',
+      title: '設計を詰める',
+      due: dayKey(new Date()),
+      skill: 'gitlab-develop',
+      repo: '/w/app',
+      provider: 'claude',
+      done: false,
+      createdAt: 1,
+      updatedAt: 1,
+      ...overrides,
+    });
+
+    it('カレンダーで追加したTodoが期日の日に出て、xで完了にできる', async () => {
+      const { window, posted, deliver, key } = boot();
+      window.HTMLElement.prototype.scrollIntoView = () => undefined;
+      await tick();
+      deliver({ type: 'snapshot', snapshot: snapshot([]) });
+      await tick();
+      key('m');
+      await tick();
+      const doc = window.document;
+      const now = new Date();
+      const calendarRequest = posted.filter((m) => m.type === 'workCalendar').at(-1);
+      deliver({
+        type: 'reply',
+        seq: calendarRequest?.seq,
+        ok: true,
+        calendar: { year: now.getFullYear(), month: now.getMonth() + 1, days: [] },
+      });
+      const todosRequest = posted.filter((m) => m.type === 'todos').at(-1);
+      expect(todosRequest).toBeDefined();
+      deliver({ type: 'reply', seq: todosRequest?.seq, ok: true, todos: [] });
+      await tick();
+      const press = (k: string, init: Partial<KeyboardEventInit> = {}): void => {
+        (doc.activeElement ?? doc.body).dispatchEvent(
+          new window.KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }),
+        );
+      };
+      // aで選んだ日（今日）を期日にしたフォームが開く
+      press('a');
+      await tick();
+      const form = doc.querySelector('[aria-label="Todoを追加"]') as HTMLElement;
+      expect(form).not.toBeNull();
+      const inputs = form.querySelectorAll('input');
+      expect((inputs[1] as HTMLInputElement).value).toBe(dayKey(now));
+      const title = inputs[0] as HTMLInputElement;
+      title.value = '設計を詰める';
+      title.dispatchEvent(new window.Event('input', { bubbles: true }));
+      const skill = inputs[2] as HTMLInputElement;
+      skill.value = 'gitlab-develop';
+      skill.dispatchEvent(new window.Event('input', { bubbles: true }));
+      await tick();
+      (form.querySelector('form') as HTMLFormElement).requestSubmit();
+      await tick();
+      const save = posted.filter((m) => m.type === 'todoSave').at(-1);
+      expect(save?.todo).toMatchObject({
+        title: '設計を詰める',
+        due: dayKey(now),
+        skill: 'gitlab-develop',
+        provider: 'claude',
+      });
+      deliver({ type: 'reply', seq: save?.seq, ok: true, todos: [todo({ repo: '' })] });
+      await tick();
+      expect(doc.querySelector('[aria-label="Todoを追加"]')).toBeNull();
+      const dialog = doc.querySelector('[aria-label="作業履歴カレンダー"]') as HTMLElement;
+      // 期日の日のマスに件数、下の一覧に作業名が出る
+      expect(dialog.querySelector('.calendar-cell.today')?.textContent).toContain('Todo 1');
+      expect(dialog.querySelector('[data-todo-row="0"]')?.textContent).toContain('設計を詰める');
+      // 別の日のマスには出ない
+      const other = [...dialog.querySelectorAll('.calendar-cell:not(.outside)')].find(
+        (cell) => !cell.classList.contains('today'),
+      );
+      expect(other?.textContent).not.toContain('Todo');
+      // xで完了
+      press('x');
+      await tick();
+      const done = posted.filter((m) => m.type === 'todoDone').at(-1);
+      expect(done).toMatchObject({ id: 't1', done: true });
+      deliver({ type: 'reply', seq: done?.seq, ok: true, todos: [todo({ done: true })] });
+      await tick();
+      expect(dialog.querySelector('[data-todo-row="0"]')?.textContent).toContain('完了');
+      expect(dialog.querySelector('.calendar-cell.today')?.textContent).not.toContain('Todo 1');
+      // Shift+Dは2回押して初めて削除する
+      press('D', { shiftKey: true });
+      await tick();
+      expect(posted.some((m) => m.type === 'todoDelete')).toBe(false);
+      press('D', { shiftKey: true });
+      await tick();
+      expect(posted.filter((m) => m.type === 'todoDelete').at(-1)).toMatchObject({ id: 't1' });
+    });
+
+    it('Todoからsで開く新規セッションは、作業名とskill名を送らずに入力欄へ入れる', async () => {
+      const { window, posted, deliver, key } = boot();
+      window.HTMLElement.prototype.scrollIntoView = () => undefined;
+      await tick();
+      deliver({ type: 'snapshot', snapshot: snapshot([]) });
+      await tick();
+      key('y');
+      await tick();
+      const doc = window.document;
+      const todosRequest = posted.filter((m) => m.type === 'todos').at(-1);
+      deliver({ type: 'reply', seq: todosRequest?.seq, ok: true, todos: [todo()] });
+      await tick();
+      const list = doc.querySelector('[aria-label="Todo"]') as HTMLElement;
+      expect(list.querySelector('[data-todo-row="0"]')?.textContent).toContain('設計を詰める');
+      (doc.activeElement ?? doc.body).dispatchEvent(
+        new window.KeyboardEvent('keydown', { key: 's', bubbles: true, cancelable: true }),
+      );
+      await tick();
+      expect(doc.querySelector('[aria-label="Todo"]')).toBeNull();
+      const options = posted.filter((m) => m.type === 'launchOptions').at(-1);
+      deliver({
+        type: 'reply',
+        seq: options?.seq,
+        ok: true,
+        repos: [{ path: '/w/other', key: '/w/other', label: 'other', source: 'history' }],
+      });
+      await tick();
+      const dialog = doc.querySelector('[aria-label="新規セッション"]') as HTMLElement;
+      expect((dialog.querySelector('select') as HTMLSelectElement).value).toBe('/w/app');
+      expect((dialog.querySelector('textarea') as HTMLTextAreaElement).value).toBe(
+        '/gitlab-develop 設計を詰める',
+      );
+      (dialog.querySelector('form') as HTMLFormElement).requestSubmit();
+      await tick();
+      expect(posted.filter((m) => m.type === 'launch').at(-1)).toMatchObject({
+        cwd: '/w/app',
+        provider: 'claude',
+        prompt: '',
+        draft: '/gitlab-develop 設計を詰める',
+      });
+    });
+  });
 });

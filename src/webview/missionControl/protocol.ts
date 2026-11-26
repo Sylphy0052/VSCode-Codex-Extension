@@ -417,6 +417,40 @@ export interface McLaunchRequest extends McLaunchSettings {
   prompt: string;
   /** 別のworktree（`<repo>/.claude/worktrees/`配下）で動かすか。 */
   worktree: boolean;
+  /**
+   * 開いた会話の入力欄へ入れる下書き（送信しない。Issue #2180のTodoから起動）。`prompt`と
+   * 両方は指定しない。
+   */
+  draft?: string | undefined;
+}
+
+/** 期日付きのTodo（Mission Control 段階24。Issue #2180）。ホストのglobalStateに保存する。 */
+export interface McTodo {
+  /** ホストが振るid。 */
+  id: string;
+  /** 作業名（1行、1〜200文字）。 */
+  title: string;
+  /** 期日（ローカル日付の`YYYY-MM-DD`。カレンダーの`calendarDayKey`と同じ書式）。 */
+  due: string;
+  /** 使うskill（`/`・`$`を付けない名前）。無ければ空文字。 */
+  skill: string;
+  /** 起動するrepoの絶対パス。無ければ空文字。 */
+  repo: string;
+  /** 起動するCLI。 */
+  provider: McProvider;
+  done: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Todoの追加・編集の入力。`id`があれば編集。 */
+export interface McTodoInput {
+  id?: string | undefined;
+  title: string;
+  due: string;
+  skill: string;
+  repo: string;
+  provider: McProvider;
 }
 
 /** 開始ダイアログのmodelの候補1件。 */
@@ -767,6 +801,8 @@ export type McHostMessage =
       workUnits?: McWorkUnit[] | undefined;
       /** `workCalendar`の応答（Issue #2179）。 */
       calendar?: McWorkCalendar | undefined;
+      /** `todos`・`todoSave`・`todoDone`・`todoDelete`の応答: 変更後の一覧（Issue #2180）。 */
+      todos?: McTodo[] | undefined;
       /** `issueList`の応答（Issue #2150）。 */
       issues?: McIssueListing | undefined;
       /** run・roadmapの操作の結果の説明（Issue #2150）。 */
@@ -916,6 +952,11 @@ export type McWebviewMessage =
   | { type: 'workUnits'; seq: number; days: number }
   /** 作業履歴カレンダーの1か月分（Issue #2179）。`month`は1〜12。 */
   | { type: 'workCalendar'; seq: number; year: number; month: number }
+  /** 期日付きのTodo（Issue #2180）。 */
+  | { type: 'todos'; seq: number }
+  | { type: 'todoSave'; seq: number; todo: McTodoInput }
+  | { type: 'todoDone'; seq: number; id: string; done: boolean }
+  | { type: 'todoDelete'; seq: number; id: string }
   /** ライブtailの対象。`target`が無ければ止める。 */
   | { type: 'watch'; target?: McTarget | undefined }
   /** レビュー待ちの1ファイルをdiffエディタで開く（Issue #2138の1）。 */

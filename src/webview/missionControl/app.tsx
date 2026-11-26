@@ -23,6 +23,8 @@ import { McHeader, PrefsDialog, SaveFilterDialog, UsageDialog } from './globalPa
 import { UsageHistoryDialog } from './usageHistory';
 import { WorkUnitsDialog } from './workUnits';
 import { WorkCalendarDialog } from './workCalendar';
+import { TodoListDialog } from './todos';
+import { repoLabel, todoDraftText } from './todoLogic';
 import {
   activeSavedFilter,
   cycleSavedFilter,
@@ -117,6 +119,7 @@ import type {
   McSkillUse,
   McSnapshot,
   McTarget,
+  McTodo,
 } from './protocol';
 
 /** Reload後に戻す画面の状態（`vscode.setState`）。 */
@@ -337,6 +340,16 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const [usageHistoryOpen, setUsageHistoryOpen] = useState(false);
   const [workUnitsOpen, setWorkUnitsOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
+  // 期日付きのTodo（Issue #2180）。`launchTodo`はTodoから開いた新規セッションの画面の元
+  const [todosOpen, setTodosOpen] = useState(false);
+  const [launchTodo, setLaunchTodo] = useState<McTodo | undefined>(undefined);
+  /** Todoから新規セッションの画面を開く（作業名とskill名は入力欄へ入れるだけで送らない）。 */
+  const startFromTodo = (todo: McTodo): void => {
+    setCalendarOpen(false);
+    setTodosOpen(false);
+    setLaunchTodo(todo);
+    setLaunchOpen(true);
+  };
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [saveFilterOpen, setSaveFilterOpen] = useState(false);
   /** 複数選択（`x`）したセッションの`McSession.key`（Issue #2149の1）。 */
@@ -934,6 +947,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       case 'workCalendar':
         setCalendarOpen(true);
         return;
+      case 'todos':
+        setTodosOpen(true);
+        return;
       case 'prefs':
         setPrefsOpen(true);
         return;
@@ -1120,6 +1136,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         setHelpOpen((open) => !open);
         return;
       case 'newSession':
+        setLaunchTodo(undefined);
         setLaunchOpen(true);
         return;
       case 'escape':
@@ -1380,7 +1397,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     ledgerOpen: ledger !== undefined,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
-    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen || calendarOpen,
+    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen || calendarOpen || todosOpen,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1395,7 +1412,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     ledgerOpen: ledger !== undefined,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
-    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen || calendarOpen,
+    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen || calendarOpen || todosOpen,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1454,6 +1471,8 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           setSaveFilterOpen(false);
           setWorkUnitsOpen(false);
           setCalendarOpen(false);
+          setTodosOpen(false);
+          setLaunchTodo(undefined);
           setPalette(undefined);
         } else if (resolved?.command.kind === 'escape' && event.target instanceof HTMLElement) {
           if (state.paletteOpen) {
@@ -1708,7 +1727,10 @@ export function App(props: { bridge: Bridge }): JSX.Element {
               <button
                 type="button"
                 class="btn primary"
-                onClick={() => setLaunchOpen(true)}
+                onClick={() => {
+                  setLaunchTodo(undefined);
+                  setLaunchOpen(true);
+                }}
                 title="新規セッション（n）"
                 data-key-label="n"
               >
@@ -1917,7 +1939,18 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         <WorkUnitsDialog bridge={bridge} onClose={() => setWorkUnitsOpen(false)} />
       ) : null}
       {calendarOpen ? (
-        <WorkCalendarDialog bridge={bridge} onClose={() => setCalendarOpen(false)} />
+        <WorkCalendarDialog
+          bridge={bridge}
+          onClose={() => setCalendarOpen(false)}
+          onStartTodo={startFromTodo}
+        />
+      ) : null}
+      {todosOpen ? (
+        <TodoListDialog
+          bridge={bridge}
+          onClose={() => setTodosOpen(false)}
+          onStart={startFromTodo}
+        />
       ) : null}
       {prefsOpen ? (
         <PrefsDialog
@@ -1947,9 +1980,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         <LaunchDialog
           bridge={bridge}
           sessions={snapshot.sessions}
-          onClose={() => setLaunchOpen(false)}
+          todo={launchTodo}
+          onClose={() => {
+            setLaunchOpen(false);
+            setLaunchTodo(undefined);
+          }}
           onLaunched={(message) => {
             setLaunchOpen(false);
+            setLaunchTodo(undefined);
             setToast(message);
           }}
         />
@@ -2595,14 +2633,19 @@ const LAUNCH_SOURCE_LABELS: Record<McLaunchRepo['source'], string> = {
 function LaunchDialog(props: {
   bridge: Bridge;
   sessions: readonly McSession[];
+  /**
+   * Todoから開いたとき（Issue #2180）。repo・CLIを初期値にし、作業名とskill名を最初の指示で
+   * なく「入力欄へ入れる文」にする（開いた会話で人が確かめて送る）。
+   */
+  todo?: McTodo | undefined;
   onClose: () => void;
   onLaunched: (message: string) => void;
 }): JSX.Element {
-  const { bridge } = props;
+  const { bridge, todo } = props;
   const [repos, setRepos] = useState<Loadable<McLaunchRepo[]>>({ status: 'loading' });
   const [path, setPath] = useState<string | undefined>(undefined);
-  const [provider, setProvider] = useState<McProvider>('codex');
-  const [prompt, setPrompt] = useState('');
+  const [provider, setProvider] = useState<McProvider>(todo?.provider ?? 'codex');
+  const [prompt, setPrompt] = useState(todo === undefined ? '' : todoDraftText(todo));
   /** 利用者が手で切り替えたworktreeの指定。`undefined`の間はrepoに応じた既定を使う。 */
   const [worktreeChoice, setWorktreeChoice] = useState<boolean | undefined>(undefined);
   const [busy, setBusy] = useState(false);
@@ -2620,12 +2663,26 @@ function LaunchDialog(props: {
         setRepos({ status: 'error', error: result.error ?? '候補を取り寄せられませんでした' });
         return;
       }
-      const list = result.repos ?? [];
+      const listed = result.repos ?? [];
+      // Todoのrepoが候補に無ければ（最近使っていないrepo）、先頭に足して選ぶ
+      const todoRepo = todo?.repo ?? '';
+      const list =
+        todoRepo === '' || listed.some((repo) => repo.path === todoRepo)
+          ? listed
+          : [
+              {
+                path: todoRepo,
+                key: todoRepo,
+                label: repoLabel(todoRepo),
+                source: 'picked' as const,
+              },
+              ...listed,
+            ];
       setRepos({ status: 'ok', value: list });
       setChoices(result.choices);
-      setPath((current) => current ?? list[0]?.path);
+      setPath((current) => current ?? (todoRepo !== '' ? todoRepo : list[0]?.path));
     });
-  }, [bridge]);
+  }, [bridge, todo]);
   useEffect(() => {
     firstRef.current?.focus();
   }, [repos.status]);
@@ -2646,11 +2703,26 @@ function LaunchDialog(props: {
     if (remembered === undefined) {
       return;
     }
+    if (todo !== undefined) {
+      // TodoのCLIは変えない。前回の設定は同じCLIのときだけ当てる（入力欄の`/`・`$`がCLIごとに違う）
+      if (remembered.provider === todo.provider) {
+        setSettings(normalizeLaunchSettings(todo.provider, remembered, choices));
+      }
+      return;
+    }
     setProvider(remembered.provider);
     setSettings(normalizeLaunchSettings(remembered.provider, remembered, choices));
-  }, [choices, chosenKey]);
+  }, [choices, chosenKey, todo]);
 
   const changeProvider = (next: McProvider): void => {
+    if (todo !== undefined) {
+      // 入れる文を書き換えていなければ、skillの呼び方（Claudeは`/`、Codexは`$`）を合わせる
+      setPrompt((current) =>
+        current === todoDraftText({ ...todo, provider })
+          ? todoDraftText({ ...todo, provider: next })
+          : current,
+      );
+    }
     setProvider(next);
     setSettings((prev) => normalizeLaunchSettings(next, prev, choices));
   };
@@ -2681,7 +2753,11 @@ function LaunchDialog(props: {
     }
     setBusy(true);
     setError(undefined);
-    const request = { cwd: chosen.path, provider, prompt, worktree, ...settings };
+    // Todoからのときは送らずに入力欄へ入れる（Issue #2180）
+    const request =
+      todo === undefined
+        ? { cwd: chosen.path, provider, prompt, worktree, ...settings }
+        : { cwd: chosen.path, provider, prompt: '', draft: prompt, worktree, ...settings };
     void bridge.launch(request).then((result) => {
       setBusy(false);
       if (!result.ok) {
@@ -2709,7 +2785,7 @@ function LaunchDialog(props: {
           launch();
         }}
       >
-        <h2>新規セッション</h2>
+        <h2>{todo === undefined ? '新規セッション' : `新規セッション（Todo: ${todo.title}）`}</h2>
         <label>
           Repo
           <span class="launch-row">
@@ -2768,7 +2844,9 @@ function LaunchDialog(props: {
           onProvider={setProvider}
         />
         <label>
-          最初の指示（空なら会話を開くだけ）
+          {todo === undefined
+            ? '最初の指示（空なら会話を開くだけ）'
+            : '開いた会話の入力欄へ入れる文（送信はしない）'}
           <textarea
             class="text-input"
             rows={4}

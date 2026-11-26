@@ -68,7 +68,9 @@ export type McKeyCommand =
   // 作業単位（Issue番号ごと）の使用量（Issue #2177）
   | { kind: 'workUnits' }
   // 作業履歴カレンダー（Issue #2179）
-  | { kind: 'workCalendar' };
+  | { kind: 'workCalendar' }
+  // 期日付きのTodo（Issue #2180）
+  | { kind: 'todos' };
 
 /** 選んだセッションへの操作（Issue #2160）。`pin`はピン留めの付け外しを切り替える。 */
 export type McSessionOp = 'rename' | 'fork' | 'pin' | 'clear' | 'handoff' | 'rewind';
@@ -387,6 +389,13 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
     label:
       '作業履歴カレンダーを開く（← / →で日、↑ / ↓で週、[ / ]で月、n / pでセッション、Enterで開く）',
     command: { kind: 'workCalendar' },
+  },
+  {
+    // 予定（yotei）の`y`（Issue #2180）
+    keys: ['y'],
+    label:
+      '期日付きのTodoを開く（aで追加、eで編集、xで完了、Shift+Dで削除、sで新規セッションを始める）',
+    command: { kind: 'todos' },
   },
   {
     keys: [','],
