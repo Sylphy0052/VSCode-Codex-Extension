@@ -508,3 +508,37 @@ describe('formatImageTimingLog', () => {
     expect(line).not.toContain('\n');
   });
 });
+
+describe('generateImage の遅れログ', () => {
+  const SECRET = 'SECRET-BODY-xyz';
+
+  it('完了表示の後に画像が遅れて出たら、その遅れを記録する', async () => {
+    const lines: string[] = [];
+    setScript({ answer: [done([], { text: SECRET }), done([], { text: SECRET }), done([BLOB])] });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const r = await generateImage(
+      { prompt: SECRET },
+      { endpoint: 'e', outputDir: outDir, logInfo: (m) => lines.push(m) },
+    );
+    expect(r.ok).toBe(true);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(
+      /^\[webgpt-image\] timing result=image imageAfterMs=4000 imageAfterPolls=3 settledMs=\d+ settledPolls=\d+ images=1 answerChars=4$/,
+    );
+    expect(lines[0]).not.toContain(SECRET);
+  });
+
+  it('画像なしで確定したら、確定までの回数と回答の文字数だけ記録する', async () => {
+    const lines: string[] = [];
+    setScript({ answer: [done([], { text: SECRET })] });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    await generateImage(
+      { prompt: SECRET },
+      { endpoint: 'e', outputDir: outDir, logInfo: (m) => lines.push(m) },
+    );
+    expect(lines).toEqual([
+      `[webgpt-image] timing result=no-image imageAfterMs=- imageAfterPolls=- settledMs=14000 settledPolls=8 images=0 answerChars=${SECRET.length}`,
+    ]);
+    expect(lines[0]).not.toContain(SECRET);
+  });
+});
