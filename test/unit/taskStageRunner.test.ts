@@ -186,11 +186,13 @@ function build(initial: readonly TaskRun[], options: HarnessOptions = {}) {
   const openCodex = vi.fn(openImpl);
   const channels: Channel[] = [];
   const mcpServer = {
-    registerTools: vi.fn(async (connectionId: string, _tools: unknown, call: ToolCall) => {
-      const token = `tok-${String(channels.length + 1)}`;
-      channels.push({ connectionId, call, token });
-      return { url: `http://mcp.local/${token}`, token };
-    }),
+    registerTools: vi.fn(
+      async (connectionId: string, _tools: unknown, call: ToolCall, _usageLabel?: unknown) => {
+        const token = `tok-${String(channels.length + 1)}`;
+        channels.push({ connectionId, call, token });
+        return { url: `http://mcp.local/${token}`, token };
+      },
+    ),
     unregister: vi.fn(),
   };
   const git = { run: vi.fn(async (_args: readonly string[], _cwd: string) => OK_GIT) };
@@ -404,6 +406,11 @@ describe('TaskStageRunner.pump 工程の開始', () => {
     expect(plan).toMatchObject({ maxIterations: MAX_ITERATIONS, backgroundWaitLimitMs: 1_800_000 });
     expect(plan?.continuePrompt.startsWith('続けて。')).toBe(true);
     expect(t.onRunChanged).toHaveBeenCalled();
+    // ツール利用の計測の見出しに工程名とtaskIdを渡す（Issue #2188）
+    expect(t.mcpServer.registerTools.mock.calls[0]?.[3]).toEqual({
+      runId: 'run-1',
+      connection: 'stage-issuePlan:T1',
+    });
   });
 
   it('同じ工程の過去の失敗があれば、開始時のプロンプトへ前回までの失敗として載せる', async () => {

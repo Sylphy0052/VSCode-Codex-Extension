@@ -32,6 +32,7 @@ import {
   type RoadmapAskArgs,
   type RoadmapAskOutcome,
   type RoadmapQuestionVerdict,
+  type RoadmapToolUsageLabel,
 } from './roadmapQuestionMcp';
 import {
   implementSessionBlockReason,
@@ -222,6 +223,8 @@ export interface TaskStageRunnerDeps {
       connectionId: string,
       tools: readonly McpToolDefinition[],
       call: (name: string, rawArgs: unknown) => Promise<RoadmapAskOutcome>,
+      /** ツール利用の計測の行の見出し（Issue #2188）。 */
+      usageLabel?: RoadmapToolUsageLabel,
     ): Promise<{ url: string; token: string }>;
     unregister(token: string): void;
   };
@@ -1491,6 +1494,8 @@ export class TaskStageRunner {
       `task:${liveKey(runId, ref.taskId)}:${ref.attemptId}`,
       STAGE_TOOLS,
       (name, rawArgs) => this.onToolCall(binding, name, rawArgs),
+      // 工程名を入れる（#1324の受入基準2の「フェーズごと」の判断材料）
+      { runId, connection: `stage-${ref.stage}:${ref.taskId}` },
     );
     return { url, token, binding };
   }
