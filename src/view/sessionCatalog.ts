@@ -16,6 +16,11 @@ import { sanitizeInlineText } from '../orchestrator/untrustedText';
 export const SESSION_CATALOG_FILE = 'session-catalog.json';
 const CATALOG_VERSION = 1;
 export const SESSION_CATALOG_MAX = 20_000;
+/**
+ * Mission Controlの履歴で読むセッションの最小件数（Issue #2178）。Claude Codeだけに使う（索引から返す
+ * だけで軽い）。
+ */
+export const MC_HISTORY_LIST_MIN = 2_000;
 const TITLE_MAX = 200;
 const PROMPT_MAX = 300;
 const PATH_MAX = 1_000;

@@ -279,7 +279,12 @@ import {
   type McOffListSession,
 } from './view/missionControlSessions';
 import { HANDOFF_LEDGER_INDEX_FILE, HandoffLedger } from './view/handoffLedger';
-import { missingFiles, SESSION_CATALOG_FILE, SessionCatalog } from './view/sessionCatalog';
+import {
+  MC_HISTORY_LIST_MIN,
+  missingFiles,
+  SESSION_CATALOG_FILE,
+  SessionCatalog,
+} from './view/sessionCatalog';
 import type { McLifecycleOp } from './webview/missionControl/protocol';
 import { setupTaskRun } from './view/taskRunSetup';
 import type { TaskRunPendingPort } from './view/taskRunPending';
@@ -2227,14 +2232,21 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           maxEntries: readConfig().historyMaxEntries,
         };
         // `thread/list`由来の一覧はarchive済みを含まないため、ファイルから拾って重ねる
-        const [listed, archived] = await Promise.all([
+        // 全期間を探すため（Issue #2178）、Claude Codeは索引から多めに読む（読むだけで軽い）。
+        // ここで読んだ分は目録へ書き留めるので、transcriptが消えた後も引ける。Codexの
+        // `thread/list`は件数を増やすと名称未設定のスレッドへ名前を書き込むので増やさない
+        const [listed, archived, claudeMore] = await Promise.all([
           providers.listSessions(options, log),
           store.listArchived(options).catch((e: unknown) => {
             log.warn(`Mission Control: archive済みのセッションを読めませんでした: ${String(e)}`);
             return [];
           }),
+          claudeStore
+            .list({ ...options, maxEntries: MC_HISTORY_LIST_MIN })
+            .then((r) => r.sessions)
+            .catch(() => []),
         ]);
-        const sessions = mergeArchivedSessions(listed, archived);
+        const sessions = mergeArchivedSessions(listed, [...archived, ...claudeMore]);
         missionControlHistory = sessions;
         // 全期間（Issue #2178）: 一覧で見かけたセッションを目録へ書き留め、目録とhandoffに
         // 残ったセッション（transcriptが消えたものを含む）を重ねる
