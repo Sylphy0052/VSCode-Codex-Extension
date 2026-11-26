@@ -84,6 +84,7 @@ export interface ImageGenerationMcpDeps {
    */
   checkAvailable: (prompt: string) => Promise<string | undefined>;
   logWarn: (message: string) => void;
+  logInfo?: ((message: string) => void) | undefined;
   /** テスト用の差し替え口。 */
   generate?: (request: GenerateImageRequest, signal: AbortSignal) => Promise<GenerateImageResult>;
 }
@@ -244,6 +245,7 @@ async function handleToolCall(
         outputDir: deps.outputDir,
         signal: abortSignal,
         logWarn: deps.logWarn,
+        logInfo: deps.logInfo,
       }));
   const run = state.queue.then(() => {
     // 順番を待つ間に呼び出し元が離れていたら、送信しない
