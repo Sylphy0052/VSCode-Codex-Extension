@@ -489,6 +489,57 @@ export interface McHistoryItem {
   /** 最後に更新された時刻（ms）。不明なら0。 */
   updatedAt: number;
   archived: boolean;
+  /** 最初の依頼文（Issue #2178）。外部由来のテキストなので文字列として描くだけにする。 */
+  firstPrompt?: string | undefined;
+  /** handoffに残ったユーザー発話（最も古いhandoffの最初の1件）。 */
+  handoffRequest?: string | undefined;
+  /** このセッションのhandoffの件数。 */
+  handoffCount?: number | undefined;
+  /**
+   * 会話記録（transcript / rollout）が消えているか。`true`なら開き直せない（handoff台帳で
+   * 本文を読む）。確かめられなかったら無い。
+   */
+  transcriptMissing?: boolean | undefined;
+}
+
+/** handoff台帳の絞り込み（Issue #2178）。日付はwebviewがローカル時刻で範囲（ms）にする。 */
+export interface McHandoffQuery {
+  /** 本文の部分一致。 */
+  query: string;
+  /** セッションid・作業ディレクトリ・ブランチの部分一致。 */
+  session: string;
+  trigger: 'all' | 'manual' | 'auto';
+  fromMs?: number | undefined;
+  toMs?: number | undefined;
+}
+
+/** handoff台帳の1件。値はすべてhandoffファイル由来（外部由来）で、1行に均してある。 */
+export interface McHandoffItem {
+  /** ファイル名（開くときの鍵）。 */
+  name: string;
+  provider?: McProvider | undefined;
+  sessionId: string;
+  repoKey: string;
+  repoLabel: string;
+  cwdFull: string;
+  branch: string;
+  model: string;
+  trigger: 'manual' | 'auto' | 'unknown';
+  triggerLabel: string;
+  /** 生成時刻（ms）。不明なら0。 */
+  createdAt: number;
+  /** ユーザー発話の最初の1件。 */
+  request: string;
+  /** 本文で一致した前後。本文で探したときだけ。 */
+  snippet?: string | undefined;
+}
+
+export interface McHandoffListing {
+  items: McHandoffItem[];
+  /** 本文以外の条件に合った件数。 */
+  total: number;
+  /** 上限で打ち切ったか。 */
+  truncated: boolean;
 }
 
 /** 作業単位の利用枠の消費の概算（窓1つ分。Issue #2177）。 */
@@ -652,6 +703,10 @@ export type McHostMessage =
       outcomes?: McLifecycleOutcome[] | undefined;
       /** `history`の応答（Issue #2149の3）。 */
       history?: McHistoryItem[] | undefined;
+      /** `history`の応答: 件数の上限で載せなかった古いセッションの数（Issue #2178）。 */
+      historyOmitted?: number | undefined;
+      /** `handoffLedger`の応答（Issue #2178）。 */
+      handoffs?: McHandoffListing | undefined;
       /** `workUnits`の応答（Issue #2177）。並べ替えはwebviewが行う。 */
       workUnits?: McWorkUnit[] | undefined;
       /** `issueList`の応答（Issue #2150）。 */
@@ -797,6 +852,8 @@ export type McWebviewMessage =
   | { type: 'history'; seq: number }
   /** 履歴の1件をこのウィンドウで開き直す。 */
   | { type: 'historyOpen'; seq: number; provider: McProvider; threadId: string }
+  | { type: 'handoffLedger'; seq: number; query: McHandoffQuery }
+  | { type: 'handoffOpen'; seq: number; name: string }
   /** 作業単位の集計（Issue #2177）。`days`は直近何日分か（0なら保持期間の全部）。 */
   | { type: 'workUnits'; seq: number; days: number }
   /** ライブtailの対象。`target`が無ければ止める。 */

@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import type { Logger } from '../log';
 import { formatSessionTarget } from '../orchestrator/sessionBridge';
 import type {
+  McHandoffListing,
+  McHandoffQuery,
   McHistoryItem,
   McLaunchChoices,
   McLaunchRepo,
@@ -30,6 +32,7 @@ import { parseRunCommand } from './missionControlCommands';
 import { applyDeleteFilter, applySaveFilter, parseSetPref } from './missionControlPrefs';
 import type { McSettingsPort } from './missionControlSettings';
 import {
+  parseHandoffQuery,
   parseLifecycleRequest,
   ReadMarker,
   type McLifecycleRunResult,
@@ -105,8 +108,14 @@ export interface McSessionPort {
   lifecycle(op: McLifecycleOp, targets: readonly McTarget[]): Promise<McLifecycleRunResult>;
   /** archive済みを含む過去のセッション（新しい順）。 */
   history(): Promise<McHistoryItem[]>;
+  /** 直前の`history`で、件数の上限により載せなかった古いセッションの数（Issue #2178）。 */
+  historyOmitted?(): number;
   /** 履歴の1件をこのウィンドウで開き直す。失敗したら理由の文を返す。 */
   historyOpen(provider: McProvider, threadId: string): Promise<string | undefined>;
+  /** handoff台帳を絞り込む（Issue #2178）。 */
+  handoffLedger?(query: McHandoffQuery): Promise<McHandoffListing>;
+  /** handoff本文をエディタで開く。失敗したら理由の文を返す。 */
+  handoffOpen?(name: string): Promise<string | undefined>;
   /**
    * 作業履歴を作業単位にまとめたもの（Issue #2177）。`days`は直近何日分か（0なら保持期間の
    * 全部）。並べ替えはwebviewが行う。
@@ -356,6 +365,8 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'lifecycle':
       case 'history':
       case 'historyOpen':
+      case 'handoffLedger':
+      case 'handoffOpen':
       case 'workUnits':
         this.handleSessions(m);
         return;
@@ -501,7 +512,8 @@ export class MissionControlViewManager implements vscode.Disposable {
     }
     const run = async (): Promise<Record<string, unknown>> => {
       if (message.type === 'history') {
-        return { ok: true, history: await port.history() };
+        const history = await port.history();
+        return { ok: true, history, historyOmitted: port.historyOmitted?.() };
       }
       if (message.type === 'workUnits') {
         const { days } = message;
@@ -524,6 +536,21 @@ export class MissionControlViewManager implements vscode.Disposable {
           return { ok: false, error: '開くセッションが正しくありません' };
         }
         const error = await port.historyOpen(provider, threadId);
+        return error === undefined ? { ok: true } : { ok: false, error };
+      }
+      if (message.type === 'handoffLedger') {
+        const query = parseHandoffQuery(message.query);
+        if (query === undefined || port.handoffLedger === undefined) {
+          return { ok: false, error: 'handoff台帳の条件が正しくありません' };
+        }
+        return { ok: true, handoffs: await port.handoffLedger(query) };
+      }
+      if (message.type === 'handoffOpen') {
+        const { name } = message;
+        if (typeof name !== 'string' || name === '' || port.handoffOpen === undefined) {
+          return { ok: false, error: '開くhandoffが正しくありません' };
+        }
+        const error = await port.handoffOpen(name);
         return error === undefined ? { ok: true } : { ok: false, error };
       }
       const request = parseLifecycleRequest(message);

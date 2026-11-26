@@ -268,13 +268,26 @@ import {
 } from './view/missionControlResume';
 import { createMissionControlHost, isRunningTurn, resumeKey } from './view/missionControlHost';
 import {
+  buildAllPeriodHistory,
   isLifecycleOp,
   LIFECYCLE_UNSUPPORTED_MESSAGE,
   mergeArchivedSessions,
+  openHistoryTarget,
+  resolveHistoryOpen,
   runLifecycle,
   supportsArchive,
-  toHistoryItems,
+  toHandoffListing,
+  transcriptPathsToCheck,
+  type McOffListSession,
 } from './view/missionControlSessions';
+import { HANDOFF_LEDGER_INDEX_FILE, HandoffLedger } from './view/handoffLedger';
+import { readStateDbThreads } from './codex/stateDbThreads';
+import {
+  MC_HISTORY_LIST_MIN,
+  missingFiles,
+  SESSION_CATALOG_FILE,
+  SessionCatalog,
+} from './view/sessionCatalog';
 import type { McLifecycleOp } from './webview/missionControl/protocol';
 import { setupTaskRun } from './view/taskRunSetup';
 import type { TaskRunPendingPort } from './view/taskRunPending';
@@ -2065,6 +2078,22 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
   );
   /** Mission Controlへ最後に渡した履歴（Issue #2149の3）。開き直す要求の突き合わせに使う。 */
   let missionControlHistory: SessionSummary[] = [];
+  /** 一覧に無い（目録・handoffだけで知っている）履歴（Issue #2178）。 */
+  let missionControlOffList: McOffListSession[] = [];
+  /** 直前の履歴で、件数の上限により載せなかった古いセッションの数（Issue #2178）。 */
+  let missionControlHistoryOmitted = 0;
+  const missionControlStateDir = path.join(context.globalStorageUri.fsPath, 'mission-control');
+  const handoffLedger = new HandoffLedger(
+    path.join(context.globalStorageUri.fsPath, 'handoff'),
+    path.join(missionControlStateDir, HANDOFF_LEDGER_INDEX_FILE),
+    log,
+  );
+  const sessionCatalog = new SessionCatalog(
+    path.join(missionControlStateDir, SESSION_CATALOG_FILE),
+    log,
+  );
+  // 全期間の履歴は件数が多く、ライブの一覧の解決結果（上限256件）を押し出さないよう別に持つ
+  const missionControlHistoryRepoResolver = createRepoResolver(undefined, 5_000);
   // 利用枠はステータスバーとMission Control（Issue #2162）が同じ値を読む。MCのタブはReload後に
   // 早く復元されうるので、MCより先に作っておく
   const usageBar = new UsageStatusBar();
@@ -2255,17 +2284,58 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
           maxEntries: readConfig().historyMaxEntries,
         };
         // `thread/list`由来の一覧はarchive済みを含まないため、ファイルから拾って重ねる
-        const [listed, archived] = await Promise.all([
+        // 全期間を探すため（Issue #2178）、Claude Codeは索引から多めに読む（読むだけで軽い）。
+        // ここで読んだ分は目録へ書き留めるので、transcriptが消えた後も引ける。Codexの
+        // `thread/list`はrolloutが残るスレッドしか返さないので、状態DBのthreadsから読んで
+        // 目録へだけ入れる（一覧には混ぜない。rolloutの有無は目録の側でstatして確かめる）
+        const [listed, archived, claudeMore, codexStateDb] = await Promise.all([
           providers.listSessions(options, log),
           store.listArchived(options).catch((e: unknown) => {
             log.warn(`Mission Control: archive済みのセッションを読めませんでした: ${String(e)}`);
             return [];
           }),
+          claudeStore
+            .list({ ...options, maxEntries: MC_HISTORY_LIST_MIN })
+            .then((r) => r.sessions)
+            .catch(() => []),
+          readStateDbThreads(paths.home, log),
         ]);
-        const sessions = mergeArchivedSessions(listed, archived);
+        const sessions = mergeArchivedSessions(listed, [...archived, ...claudeMore]);
         missionControlHistory = sessions;
-        return toHistoryItems(sessions, missionControlRepoResolver);
+        // 全期間（Issue #2178）: 一覧で見かけたセッションを目録へ書き留め、目録とhandoffに
+        // 残ったセッション（transcriptが消えたものを含む）を重ねる
+        const [catalog, handoffs] = await Promise.all([
+          // 一覧の値を後に置き、同じセッションでは一覧の値を残す
+          sessionCatalog.merge([...codexStateDb, ...sessions]).catch((e: unknown) => {
+            log.warn(`Mission Control: セッション目録を読めませんでした: ${String(e)}`);
+            return [];
+          }),
+          handoffLedger
+            .refresh()
+            .then(() => handoffLedger.list())
+            .catch((e: unknown) => {
+              log.warn(`Mission Control: handoffを読めませんでした: ${String(e)}`);
+              return [];
+            }),
+        ]);
+        const missing = await missingFiles(transcriptPathsToCheck(sessions, catalog, handoffs));
+        const built = buildAllPeriodHistory({
+          listed: sessions,
+          catalog,
+          handoffs,
+          missing,
+          resolveRepo: missionControlHistoryRepoResolver,
+        });
+        missionControlOffList = built.offList;
+        missionControlHistoryOmitted = built.omitted;
+        if (built.omitted > 0) {
+          log.info(
+            `Mission Control: 履歴は新しい${String(built.items.length)}件だけ渡しました（古い${String(built.omitted)}件は載せていません）`,
+          );
+        }
+        return built.items;
       },
+      historyOmitted: () => missionControlHistoryOmitted,
       workUnits: async (days) => {
         // 作業履歴は全ウィンドウが同じ保存領域へ書くので、ここで読めば全ウィンドウ分になる
         const since = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : undefined;
@@ -2276,30 +2346,43 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       },
       historyOpen: async (provider, threadId) => {
         // webviewから届いたidは、直前に渡した履歴に載っていたものだけを開く
-        const session = missionControlHistory.find(
-          (s) => s.provider === provider && s.id === threadId,
+        const target = resolveHistoryOpen(
+          missionControlHistory,
+          missionControlOffList,
+          provider,
+          threadId,
         );
-        if (session === undefined) {
-          return '履歴にこのセッションが見つかりません。履歴を開き直してください';
+        return openHistoryTarget(target, {
+          unarchive: (id) => actions.run('unarchive', id),
+          unarchived: (session) => {
+            log.info(`Mission Control: 履歴から再開するためarchiveを解除しました（${session.id}）`);
+            missionControlHistory = missionControlHistory.map((s) =>
+              s === session ? { ...s, archived: false } : s,
+            );
+            missionControlOffList = missionControlOffList.map((s) =>
+              s.provider === session.provider && s.threadId === session.id
+                ? { ...s, archived: false }
+                : s,
+            );
+          },
+          open: (session) => openSession(chat, claudeChat, log, session),
+        });
+      },
+      handoffLedger: async (query) =>
+        toHandoffListing(await handoffLedger.search(query), missionControlHistoryRepoResolver),
+      handoffOpen: async (name) => {
+        // webviewから届いた名前は、台帳に載っているファイルだけを開く（パスを組ませない）
+        const file = handoffLedger.pathOf(name);
+        if (file === undefined) {
+          return 'handoffが見つかりません。台帳を開き直してください';
         }
-        // archive済みのCodexのセッションは、app-serverが再開を断る（「unarchiveしてから」と
-        // 返す。実測）。再開の操作なので、先にarchiveを解除する
-        if (session.provider === 'codex' && session.archived) {
-          try {
-            const run = await actions.run('unarchive', session.id);
-            if (run.code !== 0) {
-              return `archiveを解除できませんでした: ${run.stderr.trim()}`;
-            }
-          } catch (e: unknown) {
-            return `archiveを解除できませんでした: ${String(e)}`;
-          }
-          log.info(`Mission Control: 履歴から再開するためarchiveを解除しました（${session.id}）`);
-          missionControlHistory = missionControlHistory.map((s) =>
-            s === session ? { ...s, archived: false } : s,
-          );
+        try {
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+          await vscode.window.showTextDocument(doc, { preview: true });
+          return undefined;
+        } catch (e: unknown) {
+          return `handoffを開けませんでした: ${String(e)}`;
         }
-        openSession(chat, claudeChat, log, session);
-        return undefined;
       },
     },
     () => missionControlRunsHolder.current,

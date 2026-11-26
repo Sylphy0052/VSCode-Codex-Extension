@@ -149,6 +149,8 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .issue-box { width: min(640px, 94vw); }
 .history-box { width: min(720px, 94vw); display: grid; gap: 8px; }
 .history-filter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto auto; gap: 6px; }
+.ledger-filter { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1.5fr) auto auto auto; gap: 6px; }
+.history-list .row-sub.prompt { font-style: italic; }
 .history-list { max-height: 50vh; overflow: auto; border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
 /* フォーカスのあるペインを枠で示す。枠はペインの状態で描き、ペイン自身の標準の枠は消す */
 .pane:focus { outline: none; }

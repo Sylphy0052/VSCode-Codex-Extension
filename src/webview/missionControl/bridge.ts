@@ -3,6 +3,8 @@ import type {
   McAttachment,
   McControlAction,
   McHandoffDetail,
+  McHandoffListing,
+  McHandoffQuery,
   McHistoryItem,
   McHostMessage,
   McIssueListing,
@@ -63,6 +65,8 @@ export interface ReplyResult {
   choices?: McLaunchChoices | undefined;
   outcomes?: McLifecycleOutcome[] | undefined;
   history?: McHistoryItem[] | undefined;
+  historyOmitted?: number | undefined;
+  handoffs?: McHandoffListing | undefined;
   workUnits?: McWorkUnit[] | undefined;
   issues?: McIssueListing | undefined;
   message?: string | undefined;
@@ -95,6 +99,10 @@ export interface Bridge {
   history(): Promise<ReplyResult>;
   /** 履歴の1件を開き直す。 */
   historyOpen(provider: McProvider, threadId: string): Promise<ReplyResult>;
+  /** handoff台帳を絞り込んで取り寄せる（Issue #2178）。 */
+  handoffLedger(query: McHandoffQuery): Promise<ReplyResult>;
+  /** handoff本文をエディタで開かせる。 */
+  handoffOpen(name: string): Promise<ReplyResult>;
   /** 作業単位の集計を取り寄せる（Issue #2177）。`days`は直近何日分か（0なら全部）。 */
   workUnits(days: number): Promise<ReplyResult>;
   /** レビュー待ちの1ファイルをdiffエディタで開かせる（Issue #2138の1）。 */
@@ -227,6 +235,8 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           choices: message.choices,
           outcomes: message.outcomes,
           history: message.history,
+          historyOmitted: message.historyOmitted,
+          handoffs: message.handoffs,
           workUnits: message.workUnits,
           issues: message.issues,
           message: message.message,
@@ -314,6 +324,8 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     lifecycle: (op, targets) => call({ type: 'lifecycle', op, targets: targets.map(targetOnly) }),
     history: () => call({ type: 'history' }),
     historyOpen: (provider, threadId) => call({ type: 'historyOpen', provider, threadId }),
+    handoffLedger: (query) => call({ type: 'handoffLedger', query }),
+    handoffOpen: (name) => call({ type: 'handoffOpen', name }),
     workUnits: (days) => call({ type: 'workUnits', days }),
     openDiff: (to, file) => call({ type: 'openDiff', ...targetOnly(to), path: file }),
     reviewAck: (to) => call({ type: 'reviewAck', ...targetOnly(to) }),

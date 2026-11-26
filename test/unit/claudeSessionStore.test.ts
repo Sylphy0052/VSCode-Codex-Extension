@@ -129,6 +129,8 @@ describe('ClaudeSessionStore', () => {
         updatedAt: '2026-08-06T21:00:00.000Z',
         cwd: '/w/alpha',
         archived: false,
+        // 全期間の目録で、transcriptが消えたかを後で確かめるのに使う（Issue #2178）
+        transcriptPath: transcript('-w-alpha', ID_A),
       },
     ]);
   });
