@@ -68,8 +68,8 @@ describe('ClaudeUsageProbe', () => {
     const claude = fakeClaude(
       REPORT + 'Current week (all models): 23% used · resets Oct 16, 7am (Asia/Tokyo)\n',
     );
-    const gotA: ProbedSlots[] = [];
-    const gotB: ProbedSlots[] = [];
+    const gotA: (ProbedSlots | undefined)[] = [];
+    const gotB: (ProbedSlots | undefined)[] = [];
     const a = new ClaudeUsageProbe(
       () => claude,
       log,
@@ -100,8 +100,15 @@ describe('ClaudeUsageProbe', () => {
   it('強制取得に失敗したら前回の5時間枠と週次を共有に残さない（Issue #2174）', async () => {
     const shared = path.join(dir, 'shared');
     const claude = fakeClaude(REPORT);
-    const a = new ClaudeUsageProbe(() => claude, log, shared);
-    const gotB: ProbedSlots[] = [];
+    const gotA: (ProbedSlots | undefined)[] = [];
+    const a = new ClaudeUsageProbe(
+      () => claude,
+      log,
+      shared,
+      undefined,
+      (p) => gotA.push(p),
+    );
+    const gotB: (ProbedSlots | undefined)[] = [];
     const b = new ClaudeUsageProbe(
       () => claude,
       log,
@@ -111,21 +118,25 @@ describe('ClaudeUsageProbe', () => {
     );
     const now = 10_000_000;
     await a.read(now);
+    expect(gotA).toHaveLength(1);
     // アカウントを切り替えた後の強制取得が、使用率を読めずに終わる
     fakeClaude('nothing useful\n');
     await a.readFresh(() => now + 1000);
     expect(launches()).toBe(2);
-    // 共有の結果を使うウィンドウに、切り替え前のアカウントの値を渡さない
+    // 取り直しを求めた時点で、持っている値を捨てさせる
+    expect(gotA).toHaveLength(2);
+    expect(gotA[1]).toBeUndefined();
+    // 共有の結果を使うウィンドウには、切り替え前のアカウントの値を渡さず、捨てさせる
     await b.read(now + 2000);
     expect(launches()).toBe(2);
-    expect(gotB).toEqual([]);
+    expect(gotB).toEqual([undefined]);
   });
 
   it('通常の取得に失敗したときは前回の5時間枠と週次を共有に残す（Issue #2174）', async () => {
     const shared = path.join(dir, 'shared');
     const claude = fakeClaude(REPORT);
     const a = new ClaudeUsageProbe(() => claude, log, shared);
-    const gotB: ProbedSlots[] = [];
+    const gotB: (ProbedSlots | undefined)[] = [];
     const b = new ClaudeUsageProbe(
       () => claude,
       log,
@@ -141,12 +152,12 @@ describe('ClaudeUsageProbe', () => {
     expect(launches()).toBe(2);
     await b.read(now + 24 * 3_600_000 + 1000);
     expect(launches()).toBe(2);
-    expect(gotB.map((p) => [p.readAt, p.slots.fiveHour?.pct])).toEqual([[now, 16]]);
+    expect(gotB.map((p) => [p?.readAt, p?.slots.fiveHour?.pct])).toEqual([[now, 16]]);
   });
 
   it('5時間枠も週次も読めなければ受け取り先を呼ばない（Issue #2174）', async () => {
     const claude = fakeClaude('nothing useful\n');
-    const got: ProbedSlots[] = [];
+    const got: (ProbedSlots | undefined)[] = [];
     const probe = new ClaudeUsageProbe(
       () => claude,
       log,

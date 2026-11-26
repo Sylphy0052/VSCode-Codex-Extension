@@ -142,8 +142,11 @@ export class ClaudeUsageProbe {
   private freshRequested = false;
   /** 進行中の取得。終われば解決する（失敗しても拒否しない）。 */
   private inFlight: Promise<void> = Promise.resolve();
-  /** 進行中の`readOnce`で得た5時間枠と週次（Issue #2174）。読めなければundefined。 */
-  private readSlots: ProbedSlots | undefined;
+  /**
+   * 進行中の`readOnce`で受け取り先へ渡すもの（Issue #2174）。`undefined`なら渡さない（前の値を
+   * 残す）。`{ probed: undefined }`なら、今の値が無いことを渡す（前の値を消させる）。
+   */
+  private readSlots: { probed: ProbedSlots | undefined } | undefined;
 
   constructor(
     private readonly claudePath: () => string,
@@ -158,8 +161,10 @@ export class ClaudeUsageProbe {
     /**
      * 5時間枠と週次の使用率・リセット時刻を読めたら呼ぶ（Issue #2174。Mission Controlの見込み用）。
      * 他のウィンドウの結果を使ったときも呼ぶ。切り替え前のアカウントの値は渡さない。
+     * `undefined`は「今の値が無い」で、受け取り先は持っている値を捨てる。`requestFresh`
+     * （アカウントの切り替えの前後）と、5時間枠と週次の無い共有の結果を使ったときに渡す。
      */
-    private readonly onSlots?: (probed: ProbedSlots) => void,
+    private readonly onSlots?: (probed: ProbedSlots | undefined) => void,
   ) {}
 
   /** 取得した枠を稼働中だったアカウントへ記録し、自動切り替えの判断を呼ぶ。失敗しても取得は成功扱い。 */
@@ -213,6 +218,9 @@ export class ClaudeUsageProbe {
    */
   requestFresh(): void {
     this.freshRequested = true;
+    // 持っている5時間枠と週次は切り替え前のアカウントのものでありうる。取り直しが失敗しても
+    // 切り替え前の値を今の値として出し続けないよう、先に捨てさせる（Issue #2174）
+    this.deliverSlots(undefined);
   }
 
   /**
@@ -268,9 +276,15 @@ export class ClaudeUsageProbe {
   }
 
   private emitSlots(): void {
-    const probed = this.readSlots;
+    const result = this.readSlots;
     this.readSlots = undefined;
-    if (probed === undefined || this.onSlots === undefined) {
+    if (result !== undefined) {
+      this.deliverSlots(result.probed);
+    }
+  }
+
+  private deliverSlots(probed: ProbedSlots | undefined): void {
+    if (this.onSlots === undefined) {
       return;
     }
     try {
@@ -337,7 +351,7 @@ export class ClaudeUsageProbe {
       const slots = output === undefined ? undefined : parseUsageSlots(output, now);
       const highestPct = slots === undefined ? undefined : highestOf(slots);
       if (slots !== undefined) {
-        this.readSlots = { slots, readAt: now };
+        this.readSlots = { probed: { slots, readAt: now } };
       }
       // 保存値で代わりに記録できても、新しい値は取れていないので失敗として数え、再試行の
       // 間隔を延ばす。CLIは429を約32分覚えて再要求しないため、短い間隔で取り直しても取れない
@@ -382,7 +396,9 @@ export class ClaudeUsageProbe {
   private adopt(record: SharedUsageRecord): ChatUsage | undefined {
     this.failures = record.failures;
     this.nextReadAt = record.readAt + intervalAfter(record.failures, record.highestPct);
-    this.readSlots = record.slots;
+    // 5時間枠と週次の無い記録は、強制取得の途中か失敗（切り替え前の値を引き継がない）、
+    // まだ読めていない、旧版が書いた、のどれか。どれも今の値が無いので、前の値を捨てさせる
+    this.readSlots = { probed: record.slots };
     return record.usage;
   }
 

@@ -703,7 +703,7 @@ export class ClaudeChatViewManager
     /** アカウントの自動切り替え（Issue #1924）。渡さなければ使用率を記録せず、切り替えもしない。 */
     private readonly accounts?: AccountAutoSwitcher,
     /** `/usage`から5時間枠と週次を読めたときの受け取り先（Issue #2174。Mission Controlの見込み用）。 */
-    onUsageSlots?: (probed: ProbedSlots) => void,
+    onUsageSlots?: (probed: ProbedSlots | undefined) => void,
   ) {
     super(pinnedSessions, 'claude');
     this.catalog = new CommandCatalog(fs);

@@ -235,6 +235,14 @@ describe('UsageStatusBar のClaude制限表示（issue #1221）', () => {
     expect(bar.current().claudeSlots).toBe(probed);
     expect(bar.current().claude.map((e) => e.label)).toEqual(['5時間', 'セッション']);
     expect(fired).toBe(1);
+    // 今の値が無いと渡されたら捨てる（アカウントの切り替え後。表示は変えない）
+    bar.updateClaudeSlots(undefined);
+    expect(bar.current().claudeSlots).toBeUndefined();
+    expect(fired).toBe(2);
+    expect(claudeTextOf(bar)).toBe(before.claude);
+    // 持っていなければ発火しない
+    bar.updateClaudeSlots(undefined);
+    expect(fired).toBe(2);
   });
 });
 

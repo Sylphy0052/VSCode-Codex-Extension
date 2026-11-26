@@ -116,9 +116,13 @@ export class UsageStatusBar implements vscode.Disposable {
   /**
    * `/usage`から読んだ5時間枠と週次を持つ（Issue #2174）。Mission Controlが現ペースでの
    * 見込みを出すためだけに使う。ステータスバーの表示は変えない（`claudeLimits`へ重ねると
-   * 見出しとツールチップの枠が増える）。
+   * 見出しとツールチップの枠が増える）。`undefined`は今の値が無いことで、持っている値を捨てる
+   * （アカウントを切り替えた後に、切り替え前の値を見込みに使い続けないため）。
    */
-  updateClaudeSlots(probed: ProbedSlots): void {
+  updateClaudeSlots(probed: ProbedSlots | undefined): void {
+    if (probed === undefined && this.claudeSlots === undefined) {
+      return;
+    }
     this.claudeSlots = probed;
     this.changed.fire();
   }
