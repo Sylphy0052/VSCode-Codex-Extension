@@ -32,6 +32,9 @@ export interface McRepoInfo {
 
 export type McRepoResolver = (cwd: string | undefined) => McRepoInfo;
 
+/** 返事待ちを強調するまでの既定（`agent.missionControl.replyWaitMinutes`の既定30分。Issue #2171）。 */
+const DEFAULT_REPLY_WAIT_MS = 30 * 60_000;
+
 const UNKNOWN_REPO: McRepoInfo = { key: '(unknown)', label: '(不明)', full: '(不明)' };
 
 /** `createRepoResolver`が覚えるcwdの件数の上限。 */
@@ -253,6 +256,11 @@ export interface McSnapshotInput {
   now: number;
   /** 停滞とみなすまでの時間（ms）。設定`agent.missionControl.stallMinutes`から作る。 */
   stallMs: number;
+  /**
+   * 返事待ちを強調するまでの時間（ms。Issue #2171）。設定`agent.missionControl.replyWaitMinutes`
+   * から作る。無ければ既定（30分）。
+   */
+  replyWaitMs?: number | undefined;
   /** レビュー待ち（セッションのkey → 変更）。Issue #2138の1。 */
   reviews?: ReadonlyMap<string, McReview> | undefined;
   /** Reloadで切れたこのウィンドウの会話（Issue #2138の3）。 */
@@ -316,6 +324,10 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
       costUsd: session.costUsd,
       review: input.reviews?.get(key),
       pinned: input.isPinned?.(session.provider, session.threadId) === true ? true : undefined,
+      // 返事待ちの判定と未読（Issue #2171）。立っていなければ載せない
+      taskManaged: session.taskManaged === true ? true : undefined,
+      handoffKept: session.handoffKept === true ? true : undefined,
+      unread: session.unread === true ? true : undefined,
     });
     for (const item of items) {
       addPending(item);
@@ -349,6 +361,7 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
     sessions,
     pending,
     stallMs: input.stallMs,
+    replyWaitMs: input.replyWaitMs ?? DEFAULT_REPLY_WAIT_MS,
     resumable,
   };
 }

@@ -15,6 +15,7 @@ import { keyLabelFor } from './keys';
 import type { McFilter } from './logic';
 import type {
   McBooleanPrefKey,
+  McNumberPrefKey,
   McPrefs,
   McSavedFilter,
   McSession,
@@ -28,9 +29,24 @@ import type {
 
 /** 拡張ホストの`MAX_FILTER_NAME_CHARS`（`missionControlPrefs.ts`）に合わせる。 */
 const MAX_FILTER_NAME_CHARS = 40;
-/** 停滞の閾値の範囲（`package.json`の`agent.missionControl.stallMinutes`）。 */
-const STALL_MIN = 1;
-const STALL_MAX = 1440;
+/**
+ * 分数の設定の範囲（`package.json`の`agent.missionControl.stallMinutes`・`replyWaitMinutes`。
+ * 返事待ちはIssue #2171）。
+ */
+const MINUTES_MIN = 1;
+const MINUTES_MAX = 1440;
+
+const MINUTES_PREF_ROWS: ReadonlyArray<readonly [McNumberPrefKey, string]> = [
+  ['missionControl.stallMinutes', '停滞とみなす分数'],
+  ['missionControl.replyWaitMinutes', '返事待ちを強調する分数'],
+];
+
+function isValidMinutes(text: string): boolean {
+  const value = Number(text);
+  return (
+    text.trim() !== '' && Number.isInteger(value) && value >= MINUTES_MIN && value <= MINUTES_MAX
+  );
+}
 
 const PROVIDER_USAGE: ReadonlyArray<readonly ['codex' | 'claude', string]> = [
   ['codex', 'Codex'],
@@ -193,9 +209,12 @@ export function PrefsDialog(props: {
   const { bridge, prefs } = props;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
-  const [stall, setStall] = useState(
-    prefs === undefined ? '' : String(prefs['missionControl.stallMinutes']),
-  );
+  const [minutes, setMinutes] = useState<Record<McNumberPrefKey, string>>(() => ({
+    'missionControl.stallMinutes':
+      prefs === undefined ? '' : String(prefs['missionControl.stallMinutes']),
+    'missionControl.replyWaitMinutes':
+      prefs === undefined ? '' : String(prefs['missionControl.replyWaitMinutes']),
+  }));
   const firstRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -231,44 +250,61 @@ export function PrefsDialog(props: {
     });
   };
 
-  const stallValue = Number(stall);
-  const stallValid =
-    stall.trim() !== '' &&
-    Number.isInteger(stallValue) &&
-    stallValue >= STALL_MIN &&
-    stallValue <= STALL_MAX;
-  const submitStall = (e: Event): void => {
+  // 変えた分数だけを、1件ずつ順に送る（返事待ちの分数はIssue #2171）
+  const minutesValid = MINUTES_PREF_ROWS.every(([key]) => isValidMinutes(minutes[key]));
+  const minutesChanged = MINUTES_PREF_ROWS.filter(
+    ([key]) => Number(minutes[key]) !== prefs[key],
+  ).map(([key]) => key);
+  const submitMinutes = (e: Event): void => {
     e.preventDefault();
-    if (!stallValid || busy || stallValue === prefs['missionControl.stallMinutes']) {
+    if (!minutesValid || busy || minutesChanged.length === 0) {
       return;
     }
-    send('missionControl.stallMinutes', stallValue);
+    setBusy(true);
+    setError(undefined);
+    void (async () => {
+      for (const key of minutesChanged) {
+        const result = await bridge.setPref(key, Number(minutes[key]));
+        if (!result.ok) {
+          setBusy(false);
+          setError(result.error ?? '設定を変えられませんでした');
+          return;
+        }
+      }
+      setBusy(false);
+      props.onDone('設定を変えました');
+    })();
   };
 
   return (
     <div class="help" role="dialog" aria-label="Mission Controlの設定">
-      <form class="help-box" onSubmit={submitStall}>
+      <form class="help-box" onSubmit={submitMinutes}>
         <h2>Mission Controlの設定</h2>
-        <label class="check">
-          停滞とみなす分数（{String(STALL_MIN)}〜{String(STALL_MAX)}）
-          <input
-            ref={firstRef}
-            class="text-input"
-            type="number"
-            min={STALL_MIN}
-            max={STALL_MAX}
-            step={1}
-            aria-label="停滞とみなす分数"
-            value={stall}
-            disabled={busy}
-            onInput={(e) => setStall((e.currentTarget as HTMLInputElement).value)}
-          />
-        </label>
+        {MINUTES_PREF_ROWS.map(([key, label], index) => (
+          <label key={key} class="check" data-pref={key}>
+            {label}（{String(MINUTES_MIN)}〜{String(MINUTES_MAX)}）
+            <input
+              {...(index === 0 ? { ref: firstRef } : {})}
+              class="text-input"
+              type="number"
+              min={MINUTES_MIN}
+              max={MINUTES_MAX}
+              step={1}
+              aria-label={label}
+              value={minutes[key]}
+              disabled={busy}
+              onInput={(e) => {
+                const value = (e.currentTarget as HTMLInputElement).value;
+                setMinutes((prev) => ({ ...prev, [key]: value }));
+              }}
+            />
+          </label>
+        ))}
         <div class="actions">
           <button
             type="submit"
             class="btn primary"
-            disabled={busy || !stallValid || stallValue === prefs['missionControl.stallMinutes']}
+            disabled={busy || !minutesValid || minutesChanged.length === 0}
           >
             分数を変える（Enter）
           </button>

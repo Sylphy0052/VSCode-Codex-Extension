@@ -251,6 +251,7 @@ import {
 } from './view/missionControlModel';
 import {
   createMissionControlLauncher,
+  readMissionControlReplyWaitMs,
   readMissionControlStallMs,
 } from './view/missionControlLauncher';
 import {
@@ -1545,6 +1546,10 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         model: state?.observedModel?.model,
         tokens: state?.sessionTokens,
         costUsd: state?.sessionCost?.totalCostUsd,
+        // 返事待ちの判定と未読（Issue #2171）。立っていなければ載せない
+        taskManaged: session.taskManaged === true ? true : undefined,
+        handoffKept: session.handoffKept !== undefined ? true : undefined,
+        unread: session.replyUnread === true ? true : undefined,
         pending:
           state === undefined
             ? []
@@ -1971,6 +1976,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         return (await imageGenerationConsent) ? undefined : '利用者が画像生成を許可しませんでした';
       },
       logWarn: (message) => log.warn(message),
+      logInfo: (message) => log.info(message),
     });
     imageGenerationHost
       .then((host) => {
@@ -2076,6 +2082,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         activitySince: missionControlActivitySince,
         now: Date.now(),
         stallMs: readMissionControlStallMs(),
+        replyWaitMs: readMissionControlReplyWaitMs(),
         // ピン留めの印は全ウィンドウ共通（Issue #2160）。他ウィンドウのセッションもここで引く
         isPinned: (provider, threadId) =>
           pinnedSessions.isPinned(pinKeyFor({ provider, id: threadId })),

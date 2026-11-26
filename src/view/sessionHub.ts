@@ -72,6 +72,18 @@ export interface SharedSession {
   tokens?: number | undefined;
   /** セッションの推定費用（USD。Claude Codeだけ）。 */
   costUsd?: number | undefined;
+  /**
+   * オーケストレータ配下の子セッションか（Issue #2171）。Mission Controlは返事待ちに出さない。
+   * 古い版のウィンドウが書いたファイルには無い（無ければ`false`として扱う）。
+   */
+  taskManaged?: boolean | undefined;
+  /** 引き継ぎ後に旧タブとして残っているか（Issue #2171）。返事待ちに出さない。 */
+  handoffKept?: boolean | undefined;
+  /**
+   * 返事待ちのまま人がまだ見ていないか（Issue #2171）。会話を持つウィンドウが判定して書き、
+   * 既読（タブの表示・Mission Controlの詳細ペインでの表示）で下げる。
+   */
+  unread?: boolean | undefined;
 }
 
 /** `lastOutput`の上限（文字数）。共有ファイルと画面へ長い行を流さない。 */
@@ -227,7 +239,23 @@ function normalizeSharedSession(session: SharedSession, windowId: string): Share
       : undefined;
   const tokens = nonNegativeNumber(session.tokens);
   const costUsd = nonNegativeNumber(session.costUsd);
-  return { ...session, loop, pending, lastOutput, lastOutputAt, model, tokens, costUsd };
+  // 返事待ちの判定に使う印（Issue #2171）。`true`以外は立っていないものとして扱う
+  const taskManaged = session.taskManaged === true ? true : undefined;
+  const handoffKept = session.handoffKept === true ? true : undefined;
+  const unread = session.unread === true ? true : undefined;
+  return {
+    ...session,
+    loop,
+    pending,
+    lastOutput,
+    lastOutputAt,
+    model,
+    tokens,
+    costUsd,
+    taskManaged,
+    handoffKept,
+    unread,
+  };
 }
 
 function withOwnerWindow(items: readonly PendingItem[], windowId: string): PendingItem[] {
@@ -777,7 +805,9 @@ export type SessionHubRequestKind =
   | 'clear'
   | 'handoff'
   | 'rewindPreview'
-  | 'rewind';
+  | 'rewind'
+  /** Mission Controlの詳細ペインで表示した返事待ちを既読にする（Issue #2171）。 */
+  | 'markRead';
 
 /**
  * 承認待ち1件の中身（Issue #1259）。

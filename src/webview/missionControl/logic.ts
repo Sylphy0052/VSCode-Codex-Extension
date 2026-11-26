@@ -346,14 +346,69 @@ export function stalledSince(
  * カードの見た目を決める状態（Issue #2151）。`activity`に、停滞（実行中で出力が止まった）を
  * 足したもの。色と形（アイコン・枠の線種）の両方をこれで選ぶ。
  */
-export type McCardStatus = McActivity | 'stalled';
+export type McCardStatus = McActivity | 'stalled' | 'replyWait' | 'replyWaitLong';
+
+/** 返事待ちを強調するまでの既定（`agent.missionControl.replyWaitMinutes`の既定30分）。 */
+export const DEFAULT_REPLY_WAIT_MS = 30 * 60_000;
+
+/**
+ * 返事待ち（Issue #2171）。待機中の通常チャット。拡張のidleは実行中でも承認待ちでもない状態なので、
+ * 中身（質問で終わったか等）は推測しない。オーケストレータ配下の子セッションと、引き継ぎ後に
+ * 残った旧タブは人の返事を待っていないので除く。
+ */
+export function isReplyWaiting(
+  session: Pick<McSession, 'activity' | 'taskManaged' | 'handoffKept'>,
+): boolean {
+  return (
+    session.activity === 'idle' && session.taskManaged !== true && session.handoffKept !== true
+  );
+}
+
+/** 返事待ちが`replyWaitMs`以上続いているか。起点は待機になった時刻（`activitySince`）。 */
+export function isLongReplyWait(
+  session: Pick<McSession, 'activity' | 'taskManaged' | 'handoffKept' | 'activitySince'>,
+  now: number,
+  replyWaitMs: number,
+): boolean {
+  return isReplyWaiting(session) && now - session.activitySince >= replyWaitMs;
+}
 
 export function cardStatus(
-  session: Pick<McSession, 'activity' | 'lastOutputAt' | 'activitySince'>,
+  session: Pick<
+    McSession,
+    'activity' | 'lastOutputAt' | 'activitySince' | 'taskManaged' | 'handoffKept'
+  >,
   now: number,
   stallMs: number,
+  replyWaitMs: number = DEFAULT_REPLY_WAIT_MS,
 ): McCardStatus {
-  return isStalled(session, now, stallMs) ? 'stalled' : session.activity;
+  if (isStalled(session, now, stallMs)) {
+    return 'stalled';
+  }
+  if (isReplyWaiting(session)) {
+    return isLongReplyWait(session, now, replyWaitMs) ? 'replyWaitLong' : 'replyWait';
+  }
+  return session.activity;
+}
+
+/** 状態のピルの文言（名前だけ。経過時間は呼び出し側が添える）。 */
+export function cardStatusLabel(status: McCardStatus): string {
+  switch (status) {
+    case 'stalled':
+      return '停滞';
+    case 'replyWait':
+    case 'replyWaitLong':
+      return '返事待ち';
+    default:
+      return ACTIVITY_LABELS[status];
+  }
+}
+
+/** 未読の印を出すか（Issue #2171）。返事待ちのものだけ。 */
+export function isUnreadReply(
+  session: Pick<McSession, 'activity' | 'taskManaged' | 'handoffKept' | 'unread'>,
+): boolean {
+  return session.unread === true && isReplyWaiting(session);
 }
 
 /** 人の対応が要るか（入力待ち・引き継ぎ確認・待ち項目あり）。カードに印を付ける。 */

@@ -142,6 +142,27 @@ describe('buildMissionControlSnapshot（Issue #2136）', () => {
     expect(snapshot.pending[1]).toMatchObject({ options: ['A', 'B'], isCurrentWindow: false });
   });
 
+  it('返事待ちの印と分数をスナップショットへ載せる（Issue #2171）', () => {
+    const snapshot = buildMissionControlSnapshot({
+      sessions: [
+        session({ threadId: 'a', unread: true }),
+        session({ threadId: 'b', taskManaged: true, handoffKept: true }),
+      ],
+      windowPending: [],
+      currentWindowId: 'w-self',
+      resolveRepo: resolveByCwd,
+      activitySince: new ActivitySince(),
+      now: 0,
+      stallMs: 300_000,
+      replyWaitMs: 600_000,
+    });
+    expect(snapshot.replyWaitMs).toBe(600_000);
+    expect(snapshot.sessions[0]).toMatchObject({ unread: true });
+    expect(snapshot.sessions[0]?.taskManaged).toBeUndefined();
+    expect(snapshot.sessions[1]).toMatchObject({ taskManaged: true, handoffKept: true });
+    expect(snapshot.sessions[1]?.unread).toBeUndefined();
+  });
+
   it('同じidの待ち項目は1行にする', () => {
     const item = pending({ id: 'dup' });
     const snapshot = buildMissionControlSnapshot({

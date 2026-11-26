@@ -371,6 +371,24 @@ describe('SessionHubReader', () => {
     expect(sessions[1]?.loop).toBeUndefined();
   });
 
+  it('返事待ちの印（taskManaged・handoffKept・unread）はtrueだけを通す（Issue #2171）', async () => {
+    const { reader, internals } = makeReader();
+    const other = randomUUID();
+    await putSessionFile(
+      other,
+      fileBody(other, [
+        session('marked', { taskManaged: true, handoffKept: true, unread: true }),
+        session('junk', { taskManaged: 'yes', handoffKept: 1, unread: 'true' } as never),
+      ]),
+    );
+    await internals.reconcileAll();
+    const sessions = reader.getOthers()[0]?.sessions ?? [];
+    expect(sessions[0]).toMatchObject({ taskManaged: true, handoffKept: true, unread: true });
+    expect(sessions[1]?.taskManaged).toBeUndefined();
+    expect(sessions[1]?.handoffKept).toBeUndefined();
+    expect(sessions[1]?.unread).toBeUndefined();
+  });
+
   it('stale（mtimeまたはupdatedAtが45秒超）のウィンドウは除外する', async () => {
     const { reader, internals } = makeReader();
     const oldMtime = randomUUID();

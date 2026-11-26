@@ -1,10 +1,12 @@
 import type { SessionSummary } from '../codex/types';
+import { formatSessionTarget } from '../orchestrator/sessionBridge';
 import { sanitizeInlineText } from '../orchestrator/untrustedText';
 import type {
   McHistoryItem,
   McLifecycleOp,
   McLifecycleOutcome,
   McProvider,
+  McSession,
   McTarget,
 } from '../webview/missionControl/protocol';
 import type { McRepoResolver } from './missionControlModel';
@@ -239,4 +241,43 @@ export function toHistoryItems(
   }
   items.sort((a, b) => b.updatedAt - a.updatedAt);
   return items.slice(0, MAX_HISTORY_ITEMS);
+}
+
+/** 既読の要求を送り直すまでの間隔（ms）。宛先のウィンドウの書き込みが届くまで連打しない。 */
+export const MARK_READ_RETRY_MS = 5_000;
+
+/**
+ * Mission Controlの詳細ペインで表示したセッションの既読（Issue #2171）。
+ *
+ * 未読の印は会話を持つウィンドウが立て、共有ファイル経由で全ウィンドウへ伝わる。詳細ペインで
+ * 未読のセッションを表示したら、そのウィンドウへ`markRead`を送る。スナップショットは250msごとに
+ * 作り直すので、印が下がったのが伝わるまでの間は同じ要求を重ねて送らない。
+ */
+export class ReadMarker {
+  private readonly requested = new Map<string, number>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /** 既読の要求を送るべきなら`true`を返し、送ったものとして覚える。 */
+  take(
+    sessions: ReadonlyArray<Pick<McSession, 'key' | 'unread'>> | undefined,
+    target: McTarget | undefined,
+  ): boolean {
+    if (sessions === undefined || target === undefined) {
+      return false;
+    }
+    const key = formatSessionTarget(target);
+    const session = sessions.find((s) => s.key === key);
+    if (session?.unread !== true) {
+      this.requested.delete(key);
+      return false;
+    }
+    const at = this.now();
+    const last = this.requested.get(key);
+    if (last !== undefined && at - last < MARK_READ_RETRY_MS) {
+      return false;
+    }
+    this.requested.set(key, at);
+    return true;
+  }
 }

@@ -40,6 +40,7 @@ const BOOLEAN_PREFS: Readonly<Record<McBooleanPrefKey, BooleanPrefSpec>> = {
 /** `package.json`の`minimum` / `maximum` / `default`と同じ。 */
 const NUMBER_PREFS: Readonly<Record<McNumberPrefKey, NumberPrefSpec>> = {
   'missionControl.stallMinutes': { kind: 'number', fallback: 5, min: 1, max: 1440 },
+  'missionControl.replyWaitMinutes': { kind: 'number', fallback: 30, min: 1, max: 1440 },
 };
 
 /**

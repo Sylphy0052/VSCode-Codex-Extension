@@ -31,18 +31,27 @@ const RECENT_REPOS_KEY = 'agent.missionControl.recentRepos';
 const LAUNCH_DEFAULTS_KEY = 'agent.missionControl.launchDefaults';
 
 const DEFAULT_STALL_MINUTES = 5;
-const MAX_STALL_MINUTES = 1440;
+const DEFAULT_REPLY_WAIT_MINUTES = 30;
+const MAX_MINUTES = 1440;
+
+/** `agent`節の分数の設定をmsで返す。範囲外（1〜1440）・数値でない値は既定へ丸める。 */
+function readMinutesMs(key: string, fallback: number): number {
+  const raw = vscode.workspace.getConfiguration('agent').get<unknown>(key, fallback);
+  const minutes =
+    typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 && raw <= MAX_MINUTES
+      ? raw
+      : fallback;
+  return minutes * 60_000;
+}
 
 /** 設定`agent.missionControl.stallMinutes`をmsで返す。範囲外・数値でない値は既定へ丸める。 */
 export function readMissionControlStallMs(): number {
-  const raw = vscode.workspace
-    .getConfiguration('agent')
-    .get<unknown>('missionControl.stallMinutes', DEFAULT_STALL_MINUTES);
-  const minutes =
-    typeof raw === 'number' && Number.isFinite(raw) && raw >= 1 && raw <= MAX_STALL_MINUTES
-      ? raw
-      : DEFAULT_STALL_MINUTES;
-  return minutes * 60_000;
+  return readMinutesMs('missionControl.stallMinutes', DEFAULT_STALL_MINUTES);
+}
+
+/** 設定`agent.missionControl.replyWaitMinutes`をmsで返す（Issue #2171）。丸め方は停滞と同じ。 */
+export function readMissionControlReplyWaitMs(): number {
+  return readMinutesMs('missionControl.replyWaitMinutes', DEFAULT_REPLY_WAIT_MINUTES);
 }
 
 async function isDirectory(target: string): Promise<boolean> {
