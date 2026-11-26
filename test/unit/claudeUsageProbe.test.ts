@@ -97,6 +97,53 @@ describe('ClaudeUsageProbe', () => {
     expect(gotB).toEqual(gotA);
   });
 
+  it('強制取得に失敗したら前回の5時間枠と週次を共有に残さない（Issue #2174）', async () => {
+    const shared = path.join(dir, 'shared');
+    const claude = fakeClaude(REPORT);
+    const a = new ClaudeUsageProbe(() => claude, log, shared);
+    const gotB: ProbedSlots[] = [];
+    const b = new ClaudeUsageProbe(
+      () => claude,
+      log,
+      shared,
+      undefined,
+      (p) => gotB.push(p),
+    );
+    const now = 10_000_000;
+    await a.read(now);
+    // アカウントを切り替えた後の強制取得が、使用率を読めずに終わる
+    fakeClaude('nothing useful\n');
+    await a.readFresh(() => now + 1000);
+    expect(launches()).toBe(2);
+    // 共有の結果を使うウィンドウに、切り替え前のアカウントの値を渡さない
+    await b.read(now + 2000);
+    expect(launches()).toBe(2);
+    expect(gotB).toEqual([]);
+  });
+
+  it('通常の取得に失敗したときは前回の5時間枠と週次を共有に残す（Issue #2174）', async () => {
+    const shared = path.join(dir, 'shared');
+    const claude = fakeClaude(REPORT);
+    const a = new ClaudeUsageProbe(() => claude, log, shared);
+    const gotB: ProbedSlots[] = [];
+    const b = new ClaudeUsageProbe(
+      () => claude,
+      log,
+      shared,
+      undefined,
+      (p) => gotB.push(p),
+    );
+    const now = 10_000_000;
+    await a.read(now);
+    fakeClaude('nothing useful\n');
+    // 間隔を空けて取り直し、読めずに終わる
+    await a.read(now + 24 * 3_600_000);
+    expect(launches()).toBe(2);
+    await b.read(now + 24 * 3_600_000 + 1000);
+    expect(launches()).toBe(2);
+    expect(gotB.map((p) => [p.readAt, p.slots.fiveHour?.pct])).toEqual([[now, 16]]);
+  });
+
   it('5時間枠も週次も読めなければ受け取り先を呼ばない（Issue #2174）', async () => {
     const claude = fakeClaude('nothing useful\n');
     const got: ProbedSlots[] = [];

@@ -310,13 +310,17 @@ export class ClaudeUsageProbe {
           : now - previous.readAt >= STALE_FAILURES_MS
             ? 0
             : previous.failures;
+      // 前回の5時間枠と週次（Issue #2174）。強制取得はアカウントの切り替え直後に、切り替え前の
+      // 値を使わないために行うので、前回の値を引き継がない（他のウィンドウがadoptすると、
+      // 切り替え前のアカウントの値を今の値として渡してしまう）
+      const carriedSlots = forced ? undefined : previous?.slots;
       // 起動する前に時刻だけ書き、取得中に他のウィンドウが重ねて起動しないようにする。
       // 取得中にadoptした他のウィンドウへ割合が届くよう、前回の値は残す
       await this.writeShared({
         readAt: now,
         usage: previous?.usage,
         failures,
-        ...(previous?.slots === undefined ? {} : { slots: previous.slots }),
+        ...(carriedSlots === undefined ? {} : { slots: carriedSlots }),
       });
       // 稼働中を読む直前に下ろす。取得中に切り替わって再度求められたら、次の`read`で取り直す
       this.freshRequested = false;
@@ -346,9 +350,9 @@ export class ClaudeUsageProbe {
         ...(highestPct === undefined ? {} : { highestPct }),
         ...(slots !== undefined
           ? { slots: { slots, readAt: now } }
-          : previous?.slots === undefined
+          : carriedSlots === undefined
             ? {}
-            : { slots: previous.slots }),
+            : { slots: carriedSlots }),
       });
       if (slots !== undefined) {
         await this.recordSlots(startedAccount, slots, now);
