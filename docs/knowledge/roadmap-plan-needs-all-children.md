@@ -21,7 +21,7 @@ updated: 2026-11-27
 
 - 着手順の区画には、チェックリストの子Issueを1件残らず載せる。着手条件を待つIssueも、`段1 依存: なし`などで載せる
 - 着手条件を待つIssueしか残っていないときは、条件を満たすまでrunを起動しない。runの対象から外す手段は、チェックリストから外すことだけ
-- ロードマップの本文を書き換えたら、反映後の本文を`extractRoadmapChildren`・`findRoadmapPlanSection`・`parseRoadmapPlanSection`・`validateRoadmapPlan`に通し、エラーが0件か確かめる。esbuildで小さなスクリプトに束ねれば、手元のnodeで実行できる
+- ロードマップの本文を書き換えたら、反映後の本文を`extractRoadmapChildren`・`findRoadmapPlanSection`・`parseRoadmapPlanSection`・`validateRoadmapPlan`に通し、エラーが0件か確かめる。4つの関数を`src/orchestrator/roadmapImport.ts`からimportする小さな`.ts`をscratchに書き、`node_modules/.bin/esbuild <script>.ts --bundle --platform=node --external:vscode --outfile=<scratch>/check_plan.cjs`で束ね、`gh issue view <番号> --json body -q .body`で取った本文のファイルを`node <scratch>/check_plan.cjs <本文>`に渡す。本文が空でないこと（`test -s`）を先に確かめる
 - ロードマップの説明文に、コードの挙動についての主張（「〜はrunのタスクにならない」など）を書くときは、該当コードを確かめてから書く
 
 関連: #1457

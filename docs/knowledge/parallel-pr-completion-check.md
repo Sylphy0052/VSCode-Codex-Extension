@@ -1,10 +1,10 @@
 ---
 name: parallel-pr-completion-check
-description: 並列PRをマージした後は、main先頭のCI結論と統合後の全テストを確かめてから完了と報告する。subagentの「既存エラー」報告と行番号は、そのまま信じない
+description: 並列PRをマージした後は、統合後のmainの検証（2026-11-20以降はCIが無効なので手元のtypecheck・lint・format:check・全テスト）を確かめてから完了と報告する。subagentの「既存エラー」報告と行番号は、そのまま信じない
 updated: 2026-11-27
 ---
 
-# 並列PRのマージ後は、main先頭のCIを確かめるまで完了と言わない
+# 並列PRのマージ後は、統合後のmainの検証を確かめるまで完了と言わない
 
 ## 何が起きたか
 
