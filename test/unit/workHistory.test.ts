@@ -14,6 +14,8 @@ import {
 } from '../../src/view/workHistory';
 import {
   extractIssueNumber,
+  reportWorkHistoryHandoff,
+  setWorkHistoryHandoffSink,
   USAGE_DUPLICATE_WINDOW_MS,
   WorkHistoryRecorder,
 } from '../../src/view/workHistoryRecorder';
@@ -143,6 +145,35 @@ describe('WorkHistoryRecorder: セッションのイベント', () => {
     ]);
   });
 
+  it('書けなくても例外を投げずonErrorへ渡す', async () => {
+    // 保存先のディレクトリと同名のファイルを置いて、mkdirを失敗させる
+    await writeFile(join(dir, WORK_HISTORY_DIR_NAME), '');
+    const r = recorder();
+    expect(() => r.observeSessions([session()])).not.toThrow();
+    await store.flush();
+    expect(() => r.stop()).not.toThrow();
+    // 追記（observeSessionsとstop）の2件。初回の追記で走る古い記録の削除も失敗を渡す
+    expect(errors.filter((m) => m.includes('作業履歴を追記できませんでした'))).toHaveLength(2);
+    expect(errors.filter((m) => m.includes('古い作業履歴を消せませんでした'))).toHaveLength(1);
+  });
+
+  it('引き継ぎの口から親子を記録する（親が未記録でも書く）', async () => {
+    const r = recorder();
+    setWorkHistoryHandoffSink((provider, parent, child) => {
+      r.recordHandoff(provider, parent, child);
+    });
+    try {
+      reportWorkHistoryHandoff('codex', 'p1', 'c1');
+    } finally {
+      setWorkHistoryHandoffSink(undefined);
+    }
+    reportWorkHistoryHandoff('codex', 'p2', 'c2');
+    await store.flush();
+    expect(
+      (await sessionRecords()).map((rec) => [rec.event, rec.threadId, rec.childThreadId]),
+    ).toEqual([['handoff', 'p1', 'c1']]);
+  });
+
   it('保存前に既知の秘密の形を伏せ、改行を落として1行にする', async () => {
     const r = recorder();
     r.observeSessions([session({ title: `token ${FAKE_TOKEN}\n偽の行` })]);
@@ -208,6 +239,15 @@ describe('保持期間', () => {
     expect(await recorder(5).pruneIfDue(true)).toBe(1);
     expect((await sessionRecords()).map((rec) => rec.threadId)).toEqual(['mid', 'new']);
     expect(await readdir(join(dir, WORK_HISTORY_DIR_NAME))).toHaveLength(2);
+  });
+
+  it('複数のウィンドウが同時に消しても失敗にしない', async () => {
+    await store.append([startRecord(NOW - 10 * DAY, 'old'), startRecord(NOW - 9 * DAY, 'old2')]);
+    const other = new WorkHistoryStore(dir, (message) => errors.push(message));
+    const results = await Promise.all([store.prune(NOW, 5), other.prune(NOW, 5)]);
+    expect(results.reduce((sum, n) => sum + n, 0)).toBe(2);
+    expect(errors).toEqual([]);
+    expect(await readdir(join(dir, WORK_HISTORY_DIR_NAME))).toEqual([]);
   });
 
   it('間隔の内側では削除を試さない', async () => {

@@ -50,7 +50,7 @@ const DAY_FILE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})\.jsonl$/;
  * - `update`: タイトル・目的の要約・ブランチ・Issue番号のどれかが変わった
  * - `skill`: skillを起動した（`skill`に名前）
  * - `turn`: ターンが終わった（実行中から待機へ）。その時点の費用・トークンを載せる
- * - `handoff`: 引き継いだ（`childThreadId`に引き継ぎ先）
+ * - `handoff`: 引き継いだ（`childThreadId`に引き継ぎ先）。作り直しで同じ親の行が複数あれば後の行が正
  * - `end`: 一覧から消えた（`reason`が`closed`）か、ウィンドウを閉じた・Reloadした（`shutdown`）
  */
 export type WorkHistorySessionEvent = 'start' | 'update' | 'skill' | 'turn' | 'handoff' | 'end';
@@ -302,7 +302,7 @@ export class WorkHistoryStore {
 
   /** 記録を追記する。形の合わない記録は書かない。 */
   append(records: readonly WorkHistoryRecord[]): Promise<void> {
-    const lines = toLinesByDay(records);
+    const lines = this.toLines(records);
     if (lines.size === 0) {
       return this.queue;
     }
@@ -326,7 +326,7 @@ export class WorkHistoryStore {
    * 先に積んだ非同期の追記より前に並ぶことがある（読み手は`at`で並べる）。
    */
   appendSync(records: readonly WorkHistoryRecord[]): void {
-    const lines = toLinesByDay(records);
+    const lines = this.toLines(records);
     if (lines.size === 0) {
       return;
     }
@@ -357,6 +357,16 @@ export class WorkHistoryStore {
   /** 積んだ追記が終わるまで待つ（テスト・終了処理用）。 */
   flush(): Promise<void> {
     return this.queue;
+  }
+
+  /** 記録を行へ直す。失敗しても呼び出し側（セッションの状態の通知など）へ例外を投げない。 */
+  private toLines(records: readonly WorkHistoryRecord[]): Map<string, string> {
+    try {
+      return toLinesByDay(records);
+    } catch (e: unknown) {
+      this.onError(`作業履歴を追記できませんでした: ${e instanceof Error ? e.message : String(e)}`);
+      return new Map();
+    }
   }
 }
 
@@ -394,6 +404,7 @@ export async function pruneWorkHistory(
   }
   const cutoff = retentionCutoff(now, retentionDays);
   let removed = 0;
+  let firstError: unknown;
   for (const name of names) {
     const start = dayStartOf(name);
     if (start === undefined) {
@@ -401,10 +412,21 @@ export async function pruneWorkHistory(
     }
     const d = new Date(start);
     const nextDayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
-    if (nextDayStart <= cutoff) {
+    if (nextDayStart > cutoff) {
+      continue;
+    }
+    try {
       await unlink(join(dir, name));
       removed++;
+    } catch (e: unknown) {
+      // 別のウィンドウが同時に消した分は消えたものとして扱う。他の失敗も残りのファイルは続けて消す
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+        firstError ??= e;
+      }
     }
+  }
+  if (firstError !== undefined) {
+    throw firstError;
   }
   return removed;
 }

@@ -186,7 +186,11 @@ export class WorkHistoryRecorder {
     return records;
   }
 
-  /** 引き継いだ（親→子）。子の`start`は次の`observeSessions`で出る。 */
+  /**
+   * 引き継いだ（親→子）。子の`start`は次の`observeSessions`で出る。引き継ぎ先のmodel/effortが
+   * ズレて作り直したときは、同じ親でもう1行出る。同じ親の`handoff`が複数あれば後の行が正で、
+   * 先の子は作り直しで閉じられる（その子の`end`が出る）。
+   */
   recordHandoff(
     provider: WorkHistoryProvider,
     parentThreadId: string,
@@ -268,7 +272,8 @@ export class WorkHistoryRecorder {
 
   /**
    * ウィンドウを閉じる・Reloadするときに呼ぶ。開いていたセッションの`end`（`shutdown`）を
-   * 同期で書く。以降の記録はしない。
+   * 同期で書く。以降の記録はしない。直前に積んだ非同期の追記（`turn`・`usage`など）は待たない
+   * ので、拡張の停止に間に合わなければ落ちる（`end`に費用・トークンを載せて補う）。
    */
   stop(): void {
     if (this.stopped) {
@@ -324,5 +329,9 @@ export function reportWorkHistoryHandoff(
   parentThreadId: string,
   childThreadId: string,
 ): void {
-  handoffSink?.(provider, parentThreadId, childThreadId);
+  try {
+    handoffSink?.(provider, parentThreadId, childThreadId);
+  } catch {
+    // 記録の失敗で引き継ぎを止めない（書き込みの失敗は記録係がwarnへ出している）
+  }
 }

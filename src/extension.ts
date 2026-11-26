@@ -2087,6 +2087,12 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
     usageBar.onDidChange(() => {
       workHistory.observeUsage(buildMcUsage(usageBar.current(), Date.now()));
     }),
+    // 保持日数を縮めたら、6時間ごとの削除を待たずに消す
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration('agent.missionControl.historyRetentionDays')) {
+        void workHistory.pruneIfDue(true);
+      }
+    }),
     {
       dispose: () => {
         clearInterval(workHistoryTimer);
