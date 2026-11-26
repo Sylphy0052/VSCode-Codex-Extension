@@ -171,6 +171,50 @@ describe('Mission Controlのwebview（Issue #2136）', () => {
     expect(posted.find((m) => m.action === 'answerTaskRunQuestion')).toBeUndefined();
   });
 
+  it('使ったskillをカードに直近2件、詳細ペインに時刻つきで全件出す（Issue #2173）', async () => {
+    const { window, deliver } = boot();
+    await tick();
+    const base = snapshot([]);
+    const at = (h: number, m: number): number => new Date(2026, 10, 26, h, m).getTime();
+    deliver({
+      type: 'snapshot',
+      snapshot: {
+        ...base,
+        now: at(12, 0),
+        sessions: [
+          {
+            key: 's1',
+            windowId: 'w2',
+            threadId: 't9',
+            provider: 'claude',
+            isCurrentWindow: false,
+            repoKey: '/w/app',
+            title: '会話',
+            activity: 'idle',
+            activitySince: 0,
+            cwdLabel: 'app',
+            cwdFull: '/w/app',
+            pendingCount: 0,
+            skills: [
+              { name: 'gitlab-issue', at: at(9, 1) },
+              { name: '<b>evil</b>', at: at(10, 2) },
+              { name: 'gitlab-review', at: at(11, 3) },
+            ],
+          },
+        ],
+      },
+    });
+    await tick();
+    const card = window.document.querySelector('.row-skills');
+    expect(card?.textContent).toBe('skill: gitlab-review ← <b>evil</b>');
+    const lines = [...window.document.querySelectorAll('.detail-skills li')].map(
+      (li) => li.textContent,
+    );
+    expect(lines).toEqual(['09:01 gitlab-issue', '10:02 <b>evil</b>', '11:03 gitlab-review']);
+    // 外部由来のskill名はテキストとして出す
+    expect(window.document.querySelector('b')).toBeNull();
+  });
+
   it('セッションを選ぶとライブtailを頼み、composerから指示を送る（Issue #2137）', async () => {
     const { window, posted, deliver } = boot();
     await tick();

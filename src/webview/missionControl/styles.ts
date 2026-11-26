@@ -183,6 +183,10 @@ button:focus-visible, .row:focus-visible { outline: 2px solid var(--vscode-focus
 /* 目的の1文要約（Issue 2172）。タイトルの次に読む行なので本文の色で出す */
 .row-purpose { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--vscode-foreground); }
 .grid .row-purpose { grid-column: 1 / 3; }
+.row-skills { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.grid .row-skills { grid-column: 1 / 3; }
+.detail-skills ol { margin: 0; padding-left: 20px; }
+.detail-skills .muted { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 .detail-purpose { margin: 0; }
 .detail-purpose .muted { color: var(--vscode-descriptionForeground); }
 .row-sub .badge { margin-left: 6px; }
@@ -218,7 +222,7 @@ button:focus-visible, .row:focus-visible { outline: 2px solid var(--vscode-focus
 .empty kbd { min-width: 20px; padding: 0 5px; text-align: center; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); border-radius: 3px; background: var(--vscode-textCodeBlock-background, transparent); }
 /* 密度: コンパクトでは余白を詰め、最後の発言と補足の行を隠す */
 .mc.compact .row { padding-top: 2px; padding-bottom: 2px; }
-.mc.compact .session-row .row-out, .mc.compact .session-row .row-facts { display: none; }
+.mc.compact .session-row .row-out, .mc.compact .session-row .row-facts, .mc.compact .session-row .row-skills { display: none; }
 .mc.compact .grid { gap: 4px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
 .mc.compact .grid .session-row { padding: 4px 8px 4px 10px; }
 .mc.compact .pane-title { padding-top: 4px; padding-bottom: 4px; }

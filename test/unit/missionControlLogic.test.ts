@@ -11,6 +11,7 @@ import {
   filterResumable,
   filterSessions,
   formatElapsed,
+  formatSkillTime,
   isAnswerableInInbox,
   isStalled,
   type McFilter,
@@ -18,6 +19,7 @@ import {
   mapKey,
   moveSelection,
   purposeLabels,
+  recentSkillNames,
   reconcileSelection,
   setOther,
 } from '../../src/webview/missionControl/logic';
@@ -302,6 +304,38 @@ describe('セッションの目的の1文要約（Issue #2172）', () => {
       { ...EMPTY_FILTER, query: '決済' },
     );
     expect(result.map((s) => s.key)).toEqual(['a']);
+  });
+});
+
+describe('セッションで使ったskill（Issue #2173）', () => {
+  it('カードには直近2件を新しい順に出す', () => {
+    const skills = [
+      { name: 'a', at: 1 },
+      { name: 'b', at: 2 },
+      { name: 'c', at: 3 },
+    ];
+    expect(recentSkillNames(skills)).toEqual(['c', 'b']);
+    expect(recentSkillNames([{ name: 'a', at: 1 }])).toEqual(['a']);
+    expect(recentSkillNames(undefined)).toEqual([]);
+  });
+
+  it('時刻は同じ日ならHH:MM、違う日ならM/D HH:MMで出す', () => {
+    const now = new Date(2026, 10, 26, 15, 0).getTime();
+    expect(formatSkillTime(new Date(2026, 10, 26, 9, 5).getTime(), now)).toBe('09:05');
+    expect(formatSkillTime(new Date(2026, 10, 25, 23, 59).getTime(), now)).toBe('11/25 23:59');
+  });
+
+  it('名前の空な要素はカードに出さず、0以下や表せない時刻は空文字にする', () => {
+    expect(
+      recentSkillNames([
+        { name: 'a', at: 1 },
+        { name: '', at: 2 },
+      ]),
+    ).toEqual(['a']);
+    const now = new Date(2026, 10, 26, 15, 0).getTime();
+    expect(formatSkillTime(0, now)).toBe('');
+    expect(formatSkillTime(Number.NaN, now)).toBe('');
+    expect(formatSkillTime(9e15, now)).toBe('');
   });
 });
 

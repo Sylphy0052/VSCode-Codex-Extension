@@ -855,6 +855,41 @@ describe('applyStreamEvent', () => {
     expect(state.items[0]?.text).toBe('SKILL.mdの内容');
   });
 
+  it('skillContextに起動時刻を持たせ、届き直しても最初の時刻を保つ（Issue #2173）', () => {
+    const event = {
+      type: 'user',
+      uuid: 'u1',
+      isMeta: true,
+      sourceToolUseID: 'toolu_01abc',
+      timestamp: '2026-11-26T01:02:03.000Z',
+      message: { content: [{ type: 'text', text: 'SKILL.mdの内容' }] },
+    };
+    const state = apply([event, { ...event, timestamp: '2026-11-26T09:00:00.000Z' }]);
+    expect(state.items).toHaveLength(1);
+    expect(state.items[0]?.skillLaunchedAt).toBe(Date.parse('2026-11-26T01:02:03.000Z'));
+  });
+
+  it('時刻の無いskillContextは受け取った時刻を持ち、通常の発言は持たない（Issue #2173）', () => {
+    const before = Date.now();
+    const state = apply([
+      {
+        type: 'user',
+        uuid: 'u1',
+        isMeta: true,
+        sourceToolUseID: 'toolu_01abc',
+        message: { content: [{ type: 'text', text: 'SKILL.mdの内容' }] },
+      },
+      {
+        type: 'user',
+        uuid: 'u2',
+        message: { content: [{ type: 'text', text: 'ふつうの発言' }] },
+      },
+    ]);
+    expect(state.items[0]?.skillLaunchedAt).toBeGreaterThanOrEqual(before);
+    expect(state.items[1]?.kind).toBe('userMessage');
+    expect(state.items[1]).not.toHaveProperty('skillLaunchedAt');
+  });
+
   it('slash command起動でsourceToolUseIDが無くてもskillContextにする（issue #889）', () => {
     const state = apply([
       {
@@ -969,6 +1004,41 @@ describe('applyStreamEvent', () => {
     const skill = state.items.find((i) => i.id === 'u1');
     expect(skill?.kind).toBe('skillContext');
     expect(skill?.detail).toBe('genshijin:help');
+  });
+
+  it('plugin skillの本文が同じuuidで届き直しても種類・名前・起動時刻を保つ（Issue #2173）', () => {
+    const body = {
+      type: 'user',
+      uuid: 'u1',
+      isSynthetic: true,
+      message: { content: [{ type: 'text', text: 'リファレンスカードを表示する。\n' }] },
+    };
+    const state = apply([
+      {
+        type: 'assistant',
+        message: {
+          id: 'm1',
+          content: [
+            { type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'genshijin:help' } },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'Launching skill: genshijin:help' },
+          ],
+        },
+      },
+      { ...body, timestamp: '2026-11-26T01:02:03.000Z' },
+      { ...body, timestamp: '2026-11-26T01:05:00.000Z' },
+    ]);
+    const skills = state.items.filter((i) => i.id === 'u1');
+    expect(skills).toHaveLength(1);
+    expect(skills[0]?.kind).toBe('skillContext');
+    expect(skills[0]?.detail).toBe('genshijin:help');
+    expect(skills[0]?.skillLaunchedAt).toBe(Date.parse('2026-11-26T01:02:03.000Z'));
   });
 
   it('Skillツールの結果の直後でもisSyntheticが無い発言はuserMessageのまま（issue #1968）', () => {
