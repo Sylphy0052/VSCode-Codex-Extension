@@ -2029,15 +2029,14 @@ function ActivityPill(props: {
   const status = cardStatus(session, now, stallMs, replyWaitMs);
   const since = stalledSince(session);
   const label = cardStatusLabel(status);
-  // 状態が変わると作り直して、ピルの出現のアニメーションで変化（完了など）を知らせる
+  // 状態が変わると作り直して、ピルの出現のアニメーションで変化（完了など）を知らせる。
+  // 返事待ちの経過はピルの直後に並ぶ待機の経過（`activitySince`起点）と同じなので添えない
   return (
     <span key={status} class={`pill ${status}`} title={PILL_TITLES[status]}>
       <StatusIcon status={status} label={label} decorative />
       {status === 'stalled' && since !== undefined
         ? `${label} ${formatElapsed(now - since)}`
-        : status === 'replyWaitLong'
-          ? `${label} ${formatElapsed(now - session.activitySince)}`
-          : label}
+        : label}
     </span>
   );
 }

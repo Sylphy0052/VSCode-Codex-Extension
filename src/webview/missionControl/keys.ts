@@ -358,7 +358,7 @@ export const KEY_BINDINGS: readonly McKeyBinding[] = [
   },
   {
     keys: [','],
-    label: 'Mission Controlの設定（停滞の閾値・通知）を開く',
+    label: 'Mission Controlの設定（停滞・返事待ちの閾値、通知）を開く',
     command: { kind: 'prefs' },
   },
   {

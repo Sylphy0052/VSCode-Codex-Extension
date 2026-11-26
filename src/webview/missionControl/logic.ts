@@ -391,7 +391,7 @@ export function cardStatus(
   return session.activity;
 }
 
-/** 状態のピルの文言。返事待ちは経過時間を添えるのでここでは名前だけ。 */
+/** 状態のピルの文言（名前だけ。経過時間は呼び出し側が添える）。 */
 export function cardStatusLabel(status: McCardStatus): string {
   switch (status) {
     case 'stalled':
