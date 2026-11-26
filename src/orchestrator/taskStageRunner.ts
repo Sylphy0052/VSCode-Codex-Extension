@@ -360,6 +360,12 @@ interface LiveStageSession {
   pausing: boolean;
   /** ターンの途中か。`runLoop`で指示を送った直後から立て、状態の通知で更新する。 */
   busy: boolean;
+  /**
+   * 引き継ぎで残した前の世代のセッション（古い順）。工程の間はタブを残し、`release`で
+   * まとめて破棄する（Issue #2183）。`taskManaged`のため人もMission Controlも閉じられず、
+   * ここで破棄しないとrunの終了後もウィンドウに残り続ける。
+   */
+  predecessors: TaskSession[];
 }
 
 /**
@@ -1531,6 +1537,7 @@ export class TaskStageRunner {
       pendingPrefix: undefined,
       pausing: false,
       busy: false,
+      predecessors: [],
     };
     channel.binding.entry = entry;
     channel.binding.session = session;
@@ -1954,11 +1961,12 @@ export class TaskStageRunner {
     session.open({ preserveFocus: true, viewColumn: 2 });
     previous.note(
       `task:handoff:${ref.attemptId}`,
-      `${ref.taskId}の「${STAGE_LABELS[ref.stage]}」を${String(generation)}代目のセッションへ引き継ぎました。このタブはこのまま残ります`,
+      `${ref.taskId}の「${STAGE_LABELS[ref.stage]}」を${String(generation)}代目のセッションへ引き継ぎました。このタブは工程が終わるまで残ります`,
     );
     // 古いタブからの報告は、トークンの失効と実行回の不一致の両方で拒否する
     this.deps.mcpServer.unregister(entry.token);
     entry.ref = ref;
+    entry.predecessors.push(previous);
     entry.session = session;
     entry.input = input;
     entry.generation = generation;
@@ -2159,6 +2167,22 @@ export class TaskStageRunner {
     entry.lease = undefined;
     if (options.dispose) {
       entry.session.dispose();
+    }
+    // 前の世代は工程が終わった・止まった時点で役目を終える。`dispose: false`（今のタブを
+    // 人に残す経路）でも破棄する
+    const predecessors = entry.predecessors;
+    entry.predecessors = [];
+    for (const previous of predecessors) {
+      try {
+        previous.dispose();
+      } catch (e) {
+        // 1件の失敗で残りの破棄と以降の後片付けを止めない
+        this.warn(
+          entry.runId,
+          entry.ref.taskId,
+          `${entry.ref.taskId}の前の世代のセッションを閉じられませんでした: ${errorMessage(e)}`,
+        );
+      }
     }
     // 工程が終わった・止まったら、答えを届ける先が無いため未回答の質問を取り消す
     void this.mutate(entry.runId, (r) =>
