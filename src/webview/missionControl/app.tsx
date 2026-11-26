@@ -21,6 +21,7 @@ import { KindIcon, ProviderIcon, StatusIcon } from './icons';
 import { IssueStartDialog, orderRuns, RunsPane } from './runs';
 import { McHeader, PrefsDialog, SaveFilterDialog, UsageDialog } from './globalPanels';
 import { UsageHistoryDialog } from './usageHistory';
+import { WorkUnitsDialog } from './workUnits';
 import {
   activeSavedFilter,
   cycleSavedFilter,
@@ -321,6 +322,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   const [usageOpen, setUsageOpen] = useState(false);
   /** 利用枠の推移グラフ（Issue #2176）。 */
   const [usageHistoryOpen, setUsageHistoryOpen] = useState(false);
+  const [workUnitsOpen, setWorkUnitsOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [saveFilterOpen, setSaveFilterOpen] = useState(false);
   /** 複数選択（`x`）したセッションの`McSession.key`（Issue #2149の1）。 */
@@ -881,6 +883,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
         setUsageOpen(false);
         setUsageHistoryOpen((open) => !open);
         return;
+      case 'workUnits':
+        setWorkUnitsOpen(true);
+        return;
       case 'prefs':
         setPrefsOpen(true);
         return;
@@ -1323,7 +1328,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     historyOpen,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
-    globalDialogOpen: prefsOpen || saveFilterOpen,
+    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1337,7 +1342,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
     historyOpen,
     issuesOpen,
     opDialogOpen: opDialog !== undefined,
-    globalDialogOpen: prefsOpen || saveFilterOpen,
+    globalDialogOpen: prefsOpen || saveFilterOpen || workUnitsOpen,
     paletteOpen: palette !== undefined,
     tab,
     dispatch,
@@ -1392,6 +1397,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
           setOpDialog(undefined);
           setPrefsOpen(false);
           setSaveFilterOpen(false);
+          setWorkUnitsOpen(false);
           setPalette(undefined);
         } else if (resolved?.command.kind === 'escape' && event.target instanceof HTMLElement) {
           if (state.paletteOpen) {
@@ -1841,6 +1847,9 @@ export function App(props: { bridge: Bridge }): JSX.Element {
       ) : null}
       {usageHistoryOpen ? (
         <UsageHistoryDialog bridge={bridge} onClose={() => setUsageHistoryOpen(false)} />
+      ) : null}
+      {workUnitsOpen ? (
+        <WorkUnitsDialog bridge={bridge} onClose={() => setWorkUnitsOpen(false)} />
       ) : null}
       {prefsOpen ? (
         <PrefsDialog

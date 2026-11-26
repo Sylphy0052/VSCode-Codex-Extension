@@ -307,8 +307,9 @@ import { FavoritesTreeProvider } from './view/favoritesTreeProvider';
 import { SettingsProvider } from './view/settingsProvider';
 import { UsageStatusBar } from './view/usageStatusBar';
 import { buildMcUsage } from './view/missionControlUsage';
-import { normalizeRetentionDays, WorkHistoryStore } from './view/workHistory';
+import { normalizeRetentionDays, readWorkHistory, WorkHistoryStore } from './view/workHistory';
 import { loadUsageHistory } from './view/usageHistory';
+import { aggregateWorkUnits } from './view/workUnits';
 import {
   setWorkHistoryHandoffSink,
   WORK_HISTORY_OBSERVE_INTERVAL_MS,
@@ -2264,6 +2265,14 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         const sessions = mergeArchivedSessions(listed, archived);
         missionControlHistory = sessions;
         return toHistoryItems(sessions, missionControlRepoResolver);
+      },
+      workUnits: async (days) => {
+        // 作業履歴は全ウィンドウが同じ保存領域へ書くので、ここで読めば全ウィンドウ分になる
+        const since = days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : undefined;
+        // 費用・トークンはセッションの累計値なので、期間より前の記録も読んで差し引きに使う
+        // （期間の境界をまたぐセッションの、期間前の分を数えないため）
+        const records = await readWorkHistory(context.globalStorageUri.fsPath);
+        return aggregateWorkUnits(records, { since });
       },
       historyOpen: async (provider, threadId) => {
         // webviewから届いたidは、直前に渡した履歴に載っていたものだけを開く
