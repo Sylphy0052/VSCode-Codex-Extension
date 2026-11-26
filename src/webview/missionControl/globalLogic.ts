@@ -93,7 +93,7 @@ export interface McUsageProjection {
 /**
  * 使用率 ÷ 窓の経過割合 で、リセット時点の使用率と、100%に届く時刻を見込む（Issue #2174）。
  * 窓の始まりは`resetsAt - windowMs`とする。長さ・リセット時刻・使用率のどれかが分からない窓、
- * リセット済みの窓、上限に達した窓（もう見込む先が無い）、経過が短すぎる窓には出さない。
+ * リセット済みの窓、上限に達した窓（`limited`か使用率100%以上。もう見込む先が無い）、経過が短すぎる窓には出さない。
  */
 export function projectUsage(window: McUsageWindow, now: number): McUsageProjection | undefined {
   const { usedPercent, resetsAt, windowMs } = window;
@@ -103,6 +103,8 @@ export function projectUsage(window: McUsageWindow, now: number): McUsageProject
     windowMs === undefined ||
     !(windowMs > 0) ||
     window.limited ||
+    // 到達の通知（Claudeは`rate_limit_event`）より先に使用率が100%に届くことがある
+    usedPercent >= 100 ||
     isWindowStale(window, now)
   ) {
     return undefined;

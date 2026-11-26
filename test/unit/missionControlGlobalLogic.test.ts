@@ -161,6 +161,11 @@ describe('利用枠の到達見込み（Issue #2174）', () => {
     expect(projectUsage(win({ ...base, resetsAt: undefined }), NOW)).toBeUndefined();
     expect(projectUsage(win({ ...base, usedPercent: undefined }), NOW)).toBeUndefined();
     expect(projectUsage(win({ ...base, limited: true }), NOW)).toBeUndefined();
+    // 到達の通知より先に使用率が100%に届いた窓
+    expect(projectUsage(win({ ...base, usedPercent: 100 }), NOW)).toBeUndefined();
+    expect(projectUsage(win({ ...base, usedPercent: 99 }), NOW)?.reachAt).toEqual(
+      expect.any(Number),
+    );
     expect(projectUsage(win({ ...base, resetsAt: NOW - 1 }), NOW)).toBeUndefined();
     expect(projectUsage(win({ ...base, windowMs: 0 }), NOW)).toBeUndefined();
     expect(formatUsageProjection(win({ ...base, windowMs: undefined }), NOW)).toBe('');
