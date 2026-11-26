@@ -107,10 +107,10 @@ body.vscode-high-contrast .row.selected, body.vscode-high-contrast-light .row.se
 .usage-history-series { margin: 4px 0 12px; }
 .usage-history-series h4 { margin: 6px 0 2px; }
 .usage-chart { display: block; width: 100%; max-width: 520px; height: auto; }
-.usage-chart-grid { stroke: var(--vscode-panel-border, rgba(128, 128, 128, 0.4)); stroke-width: 1; }
-.usage-chart-line { fill: none; stroke: var(--vscode-charts-blue, #3794ff); stroke-width: 1.5; }
-.usage-chart-dot { fill: var(--vscode-charts-blue, #3794ff); }
-.usage-chart-bar { fill: var(--vscode-charts-green, #89d185); }
+.usage-chart-grid { stroke: var(--vscode-panel-border, var(--vscode-descriptionForeground)); stroke-width: 1; }
+.usage-chart-line { fill: none; stroke: var(--vscode-charts-blue, var(--vscode-foreground)); stroke-width: 1.5; }
+.usage-chart-dot { fill: var(--vscode-charts-blue, var(--vscode-foreground)); }
+.usage-chart-bar { fill: var(--vscode-charts-green, var(--vscode-charts-blue)); }
 .usage-chart-text { fill: var(--vscode-descriptionForeground); font-size: 9px; }
 .help-box kbd { font-family: var(--vscode-editor-font-family, monospace); }
 .toast { position: fixed; right: 12px; bottom: 12px; padding: 6px 10px; border-radius: 4px; color: var(--vscode-notifications-foreground, var(--vscode-foreground)); background: var(--vscode-notifications-background, var(--vscode-editorWidget-background)); border: 1px solid var(--vscode-notifications-border, var(--vscode-panel-border)); }
