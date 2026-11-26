@@ -18,6 +18,8 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from '../../src/orchestrator/taskSession';
+import type { EndReviewVerdict } from '../../src/orchestrator/taskRunEndReview';
+import { makeTask } from '../helpers/taskRunFixture';
 
 /**
  * Issue #1580 のtaskRunOrchestrator向け単体テスト。次の2点を確かめる:
@@ -388,5 +390,102 @@ describe('イベント通知の件数と字数（Issue #1981）', () => {
     expect(formatRecommendation({ model: 'opus', effort: 'low', reasons: [] })).toBe(
       '推奨: model=opus effort=low',
     );
+  });
+});
+
+describe('終了レビュー（Issue #2194）', () => {
+  const doneTask = makeTask('T1', 'mergeCleanup', 'done');
+  const running = (): TaskRun =>
+    makeRun({ taskOrder: ['T1'], tasks: { T1: doneTask }, goal: { objective: '目的A' } });
+  const config = { enabled: true, replanWindowSeconds: 600, maxReopens: 2 };
+
+  async function openWith(endReview: NonNullable<TaskRunOrchestratorDeps['endReview']>) {
+    const runBox = { current: running() };
+    const s1 = makeFakeSession('s1');
+    const deps = {
+      ...makeDeps({ openTaskSession: vi.fn().mockResolvedValue(s1.session) }, runBox),
+      endReview,
+    };
+    const orch = new TaskRunOrchestrator(deps);
+    await orch.open('run-1');
+    s1.emitState({ busy: false });
+    const prev = runBox.current;
+    runBox.current = { ...prev, finishedAt: '2026-01-02T00:00:00.000Z' };
+    orch.handleRunTransition(prev, runBox.current);
+    return { runBox, s1 };
+  }
+
+  it('runFinishedの代わりに集計とgoalを載せた終了レビューを届け、判定を会話に1行残し、送った時刻を記録する', async () => {
+    const judge = vi.fn(
+      async () => ({ kind: 'judged', met: false, probability: 0.4, reason: '理由' }) as const,
+    );
+    const { runBox, s1 } = await openWith({ config: () => config, judge });
+    await vi.waitFor(() =>
+      expect(runBox.current.endReview?.finishedAt).toBe('2026-01-02T00:00:00.000Z'),
+    );
+    const sent = s1.sentTexts.join('\n');
+    expect(judge).toHaveBeenCalledTimes(1);
+    expect(sent).toContain('終了レビュー');
+    expect(sent).toContain('run全体の集計');
+    expect(sent).toContain('目的: 目的A');
+    // 素のrunFinished（本文「runが終了しました」だけ）は届けない
+    expect(sent).not.toMatch(/runが終了しました(?!（終了レビュー）)/);
+    expect(vi.mocked(s1.session.note)).toHaveBeenCalledWith(
+      'end-review-2026-01-02T00:00:00.000Z',
+      expect.stringContaining('完了条件を満たしていない'),
+    );
+  });
+
+  it('判定が例外でも「判定なし」で終了レビューは届く', async () => {
+    const judge = vi.fn(async () => {
+      throw new Error('boom');
+    });
+    const { runBox, s1 } = await openWith({ config: () => config, judge });
+    await vi.waitFor(() => expect(runBox.current.endReview).toBeDefined());
+    expect(s1.sentTexts.join('\n')).toContain('判定なし');
+  });
+
+  it('判定の間にOrchestratorの世代が変わっても、同じ終わりなら新しい世代へ終了レビューを届ける', async () => {
+    let release: (v: EndReviewVerdict) => void = () => undefined;
+    const judge = vi.fn(
+      () =>
+        new Promise<EndReviewVerdict>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const runBox = { current: running() };
+    const s1 = makeFakeSession('s1');
+    const s2 = makeFakeSession('s2');
+    const openTaskSession = vi
+      .fn()
+      .mockResolvedValueOnce(s1.session)
+      .mockResolvedValueOnce(s2.session);
+    const orch = new TaskRunOrchestrator({
+      ...makeDeps({ openTaskSession }, runBox),
+      endReview: { config: () => config, judge },
+    });
+    await orch.open('run-1');
+    s1.emitState({ busy: false });
+    const prev = runBox.current;
+    runBox.current = { ...prev, finishedAt: '2026-01-02T00:00:00.000Z' };
+    orch.handleRunTransition(prev, runBox.current);
+    await vi.waitFor(() => expect(judge).toHaveBeenCalledTimes(1));
+
+    await orch.open('run-1', true);
+    s2.emitState({ busy: false });
+    release({ kind: 'skipped' });
+    await vi.waitFor(() =>
+      expect(runBox.current.endReview?.finishedAt).toBe('2026-01-02T00:00:00.000Z'),
+    );
+    expect(s2.sentTexts.join('\n')).toContain('（終了レビュー）');
+  });
+
+  it('設定がOFFなら今までどおりrunFinishedだけを届ける', async () => {
+    const judge = vi.fn();
+    const { runBox, s1 } = await openWith({ config: () => ({ ...config, enabled: false }), judge });
+    await vi.waitFor(() => expect(s1.sentTexts.join('\n')).toContain('runが終了しました'));
+    expect(judge).not.toHaveBeenCalled();
+    expect(runBox.current.endReview).toBeUndefined();
+    expect(s1.sentTexts.slice(1).join('\n')).not.toContain('（終了レビュー）');
   });
 });

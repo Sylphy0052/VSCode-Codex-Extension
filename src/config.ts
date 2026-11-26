@@ -21,6 +21,14 @@ import { DEFAULT_FINAL_MERGE_DECISION_TIMEOUT_SEC } from './orchestrator/runner'
 import { DEFAULT_CONTEXT_LOW_PERCENT } from './orchestrator/contextLow';
 import { DEFAULT_OVERLAP_CHECK_INTERVAL_SEC } from './orchestrator/taskOverlap';
 import {
+  DEFAULT_END_REVIEW_MAX_REOPENS,
+  DEFAULT_END_REVIEW_REPLAN_WINDOW_SECONDS,
+  MAX_END_REVIEW_MAX_REOPENS,
+  MAX_END_REVIEW_REPLAN_WINDOW_SECONDS,
+  MIN_END_REVIEW_REPLAN_WINDOW_SECONDS,
+  type TaskRunEndReviewConfig,
+} from './orchestrator/taskRunEndReview';
+import {
   DEFAULT_SPLIT_SUGGEST_FILE_COUNT,
   DEFAULT_SPLIT_SUGGEST_LINE_COUNT,
   DEFAULT_SPLIT_SUGGEST_TURN_COUNT,
@@ -909,6 +917,35 @@ export function readTaskRunAutoStartStagesEnabled(): boolean {
     .getConfiguration('agent')
     .get<boolean>('taskRun.autoStartStages.enabled');
   return typeof raw === 'boolean' ? raw : false;
+}
+
+/**
+ * 終了レビュー（Issue #2194）の設定。全タスクが終わってrunが終わったときに集計とgoalをOrchestratorへ送り、
+ * 送ってから`replanWindowSeconds`秒の間だけ終わったrunへの`propose_plan`を受け付ける。範囲外の値は
+ * 既定値に戻す。
+ */
+export function readTaskRunEndReviewConfig(): TaskRunEndReviewConfig {
+  const c = vscode.workspace.getConfiguration('agent');
+  const enabled = c.get<boolean>('taskRun.endReview.enabled');
+  const windowSeconds = c.get<number>('taskRun.endReview.replanWindowSeconds');
+  const maxReopens = c.get<number>('taskRun.endReview.maxReopens');
+  return {
+    enabled: typeof enabled === 'boolean' ? enabled : true,
+    replanWindowSeconds:
+      typeof windowSeconds === 'number' &&
+      Number.isFinite(windowSeconds) &&
+      windowSeconds >= MIN_END_REVIEW_REPLAN_WINDOW_SECONDS &&
+      windowSeconds <= MAX_END_REVIEW_REPLAN_WINDOW_SECONDS
+        ? Math.floor(windowSeconds)
+        : DEFAULT_END_REVIEW_REPLAN_WINDOW_SECONDS,
+    maxReopens:
+      typeof maxReopens === 'number' &&
+      Number.isInteger(maxReopens) &&
+      maxReopens >= 0 &&
+      maxReopens <= MAX_END_REVIEW_MAX_REOPENS
+        ? maxReopens
+        : DEFAULT_END_REVIEW_MAX_REOPENS,
+  };
 }
 
 /** @see readAutoHandoffSoftThresholdPercent */

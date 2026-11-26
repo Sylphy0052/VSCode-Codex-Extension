@@ -59,6 +59,14 @@ import {
   type StartStageRejection,
 } from './taskRunScheduler';
 import {
+  checkFinishedRunReplan,
+  END_REVIEW_DISABLED,
+  FINISHED_RUN_REFUSAL,
+  reopenByEndReviewReplan,
+  type FinishedRunReplan,
+  type TaskRunEndReviewConfig,
+} from './taskRunEndReview';
+import {
   approveTaskPlan,
   planRequiresHumanApproval,
   type PlanApprover,
@@ -200,6 +208,11 @@ export interface TaskRunControllerDeps {
    * 省略時は`human`。
    */
   planApprovalMode?(): PlanApprovalMode;
+  /**
+   * 終了レビュー（設定`agent.taskRun.endReview.*`。Issue #2194）。終わったrunへの`propose_plan`を
+   * 受け付けるかの判断に使う。省略時はOFF（今までどおり終わったrunの計画は断る）。
+   */
+  endReview?(): TaskRunEndReviewConfig;
   /**
    * Orchestratorの`resolve_gate`で、ユーザーの判断待ちの関門の判断をReflexに審査させる（Issue #1787）。
    * 省略時とReflexモードが無効なとき（`undefined`を返す）は審査せず人に確かめる。
@@ -552,6 +565,7 @@ export class TaskRunController {
     let failure: string | undefined;
     let assigned: ReadonlyMap<string, string> = new Map();
     let autoApproved = false;
+    let reopened = false;
     const next = await this.updateRun(runId, (r) => {
       // forgeへの問い合わせの間に別のrunが同じIssueを計画へ入れていないか、書き込みの直列の中で確かめ直す
       const conflict = this.findIssueConflict(r, tasks);
@@ -559,7 +573,7 @@ export class TaskRunController {
         failure = conflict;
         return r;
       }
-      const resolved = resolveTaskPlan(r, tasks);
+      const resolved = resolveTaskPlan(r, tasks, this.finishedRunReplan(r));
       if (!resolved.ok) {
         failure = resolved.message;
         return r;
@@ -572,6 +586,12 @@ export class TaskRunController {
           () => this.newId(),
           this.now(),
         );
+        if (r.finishedAt !== undefined) {
+          // 終了レビューからの再計画（Issue #2194）。計画を受け付けた同じ状態更新で終わりを外す。
+          // reopenを単独で先行させないので、再開したまま計画が無く宙に浮くことはない
+          proposed = reopenByEndReviewReplan(proposed);
+          reopened = true;
+        }
         if (review !== undefined) {
           // Reflexへ渡した内容から書き込み時までに変わっていなければ判定を適用する
           const unchanged = JSON.stringify(resolved.value.drafts) === review.reviewedDrafts;
@@ -610,12 +630,44 @@ export class TaskRunController {
     return {
       ok: true,
       message: [
+        ...(reopened ? ['終了レビューからの再計画として、終わったrunを再開した。'] : []),
         autoApproved
           ? `計画を受け付け、Reflexの判定により自動承認した（${String(next.taskOrder.length)}タスク）。工程を始める。`
           : `計画を受け付けた（${String(next.taskOrder.length)}タスク）。ユーザーの承認を待っている。承認されるまで工程は始まらない。`,
         mapping === '' ? '新しいタスクは無い。' : `採番したtaskId: ${mapping}`,
       ].join('\n'),
     };
+  }
+
+  /**
+   * 終わったrunへの`propose_plan`を受け付けるか（終了レビューからの再計画。Issue #2194）。動いているrunは
+   * `undefined`（判断不要）。受付時間・再開の上限・設定に加え、同じロードマップIssueを扱う終わっていない
+   * 別のrunがあれば断る（ロードマップIssueごとに終わっていないrunを1本にする約束を、再開でも崩さない）。
+   * 書き込みの直列の中（`updateRun`の更新関数）でも呼び、時刻と他のrunの状態を確かめ直す。
+   */
+  private finishedRunReplan(run: TaskRun): FinishedRunReplan | undefined {
+    if (run.finishedAt === undefined) {
+      return undefined;
+    }
+    const check = checkFinishedRunReplan(
+      run,
+      this.deps.endReview?.() ?? END_REVIEW_DISABLED,
+      this.now(),
+    );
+    if (!check.ok) {
+      return check;
+    }
+    const roadmapIssue = run.roadmap?.issueNumber;
+    if (roadmapIssue !== undefined) {
+      const other = this.findRoadmapRun(run.workspaceRoot, roadmapIssue);
+      if (other !== undefined && other.runId !== run.runId) {
+        return {
+          ok: false,
+          reason: `${FINISHED_RUN_REFUSAL}（同じロードマップIssueを扱う終わっていない別のrun「${taskRunLabel(other)}」がある）`,
+        };
+      }
+    }
+    return check;
   }
 
   /**
@@ -642,7 +694,7 @@ export class TaskRunController {
     if (config === undefined) {
       return undefined;
     }
-    const resolved = resolveTaskPlan(current, tasks);
+    const resolved = resolveTaskPlan(current, tasks, this.finishedRunReplan(current));
     if (!resolved.ok) {
       return undefined;
     }
@@ -666,7 +718,7 @@ export class TaskRunController {
   ): Promise<string | undefined> {
     const run = this.deps.store.find(runId);
     // 構造の不正はこの後のresolveTaskPlanが理由を返すので、forgeへ問い合わせない
-    if (run === undefined || !resolveTaskPlan(run, tasks).ok) {
+    if (run === undefined || !resolveTaskPlan(run, tasks, this.finishedRunReplan(run)).ok) {
       return undefined;
     }
     const known = new Set(listTasks(run).map((t) => t.existingIssueNumber));

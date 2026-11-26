@@ -20,6 +20,7 @@ import {
   readTaskRunOptimizeLimits,
   readTaskRunOptimizeRefuter,
   readTaskRunAutoStartStagesEnabled,
+  readTaskRunEndReviewConfig,
   readTaskRunPlanApprovalMode,
   readTaskRunPlanAutoApproveEnabled,
   readTaskRunResourceIntervalMs,
@@ -74,6 +75,7 @@ import {
   MAX_GATES_PER_TASK,
   MAX_REVIEW_ROUNDS,
 } from '../orchestrator/taskRunGates';
+import { judgeEndReview } from '../orchestrator/taskRunEndReview';
 import { TaskRunMergeKeys } from '../orchestrator/taskRunMergeKey';
 import { TaskRunOrchestrator } from '../orchestrator/taskRunOrchestrator';
 import { createIssueReader, createTaskRunRoadmapPort } from '../orchestrator/taskRunRoadmapForge';
@@ -528,6 +530,8 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     planReview,
     // 計画を承認する主体（Issue #2073）。既定のhumanでは従来どおり
     planApprovalMode: () => readTaskRunPlanApprovalMode(),
+    // 終了レビューからの再計画の受付（Issue #2194）
+    endReview: () => readTaskRunEndReviewConfig(),
     // 判断待ちの工程を推奨値で自動開始する（Issue #2031）。設定はエンジンに依らない
     autoStartStages: () => readTaskRunAutoStartStagesEnabled(),
     // 関門の判断の審査（Issue #1787）も計画の審査と同じReflexの設定で行う
@@ -595,6 +599,14 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     judgeAskUserQuestionAnswerer: judgeAskUserQuestion,
     judgeQuestionAnswerByOrchestrator,
     judgeStopStageAnswerer: judgeStopStage,
+    // 終了レビュー（Issue #2194）。判定は他のReflex判定と同じくReflexモードの親スイッチがOFFなら走らせない
+    endReview: {
+      config: () => readTaskRunEndReviewConfig(),
+      judge: async (run) =>
+        readReflexEnabled()
+          ? judgeEndReview(reflexDeps(run.engine), run)
+          : { kind: 'skipped' as const },
+    },
     ...(deps.runNotes === undefined ? {} : { runNotes: deps.runNotes }),
     readIssue: createIssueReader(ports),
     startSelfImproveRun: (self, issueNumber) =>
