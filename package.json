@@ -2,7 +2,7 @@
   "name": "vscode-codex-extension",
   "displayName": "Agent Sessions",
   "description": "Codex / Claude Code のセッションをエディタタブとして開き、履歴から復元する",
-  "version": "2026.1126.3",
+  "version": "2026.1126.4",
   "license": "MIT",
   "publisher": "Sylphy0052",
   "private": true,
@@ -1003,6 +1003,14 @@
           "maximum": 1440,
           "scope": "window",
           "markdownDescription": "Mission Controlで、実行中なのに出力がこの分数動かないセッションを「停滞」と表示する（Issue #2137）。範囲外の値と数値でない値は既定の5へ丸める。"
+        },
+        "agent.missionControl.replyWaitMinutes": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 1440,
+          "scope": "window",
+          "markdownDescription": "Mission Controlで、返事待ち（通常のチャットのターンが終わって人の指示を待っている状態）がこの分数を超えたセッションを色と破線で強調する（Issue #2171）。オーケストレータ配下のセッションと、引き継ぎ後に残った旧タブは返事待ちに数えない。範囲外の値と数値でない値は既定の30へ丸める。"
         },
         "agent.sessionAutoName.enabled": {
           "type": "boolean",

@@ -27,7 +27,11 @@ import {
 import { parseRunCommand } from './missionControlCommands';
 import { applyDeleteFilter, applySaveFilter, parseSetPref } from './missionControlPrefs';
 import type { McSettingsPort } from './missionControlSettings';
-import { parseLifecycleRequest, type McLifecycleRunResult } from './missionControlSessions';
+import {
+  parseLifecycleRequest,
+  ReadMarker,
+  type McLifecycleRunResult,
+} from './missionControlSessions';
 import { MAX_TASK_RUN_PARALLEL } from '../orchestrator/taskRunState';
 import { pickAttachmentFiles } from './missionControlAttachments';
 import { parseAction, parseTarget, type SessionControl } from './sessionControlMessage';
@@ -124,6 +128,8 @@ export class MissionControlViewManager implements vscode.Disposable {
   private liveTimer: ReturnType<typeof setInterval> | undefined;
   private liveInFlight = false;
   private latestSnapshot: McSnapshot | undefined;
+  /** 詳細ペインで表示した返事待ちの既読（Issue #2171）。 */
+  private readonly readMarker = new ReadMarker();
 
   constructor(
     private readonly read: () => McSnapshot,
@@ -224,6 +230,7 @@ export class MissionControlViewManager implements vscode.Disposable {
           this.schedulePost();
         }
         this.restartLive();
+        this.markWatchedRead();
       }),
       panel.webview.onDidReceiveMessage((message: unknown) => this.receive(message)),
     );
@@ -272,6 +279,30 @@ export class MissionControlViewManager implements vscode.Disposable {
     if (this.watched !== undefined && this.watched.windowId === this.windowId) {
       this.pushLive();
     }
+    this.markWatchedRead();
+  }
+
+  /**
+   * 詳細ペインで表示中のセッションが未読の返事待ちなら既読にする（Issue #2171）。宛先の解決
+   * （自ウィンドウか別ウィンドウか）は他の操作と同じ`control`に任せる。MCが見えている間だけ。
+   */
+  private markWatchedRead(): void {
+    if (this.panel?.visible !== true) {
+      return;
+    }
+    const target = this.watched;
+    if (target === undefined || !this.readMarker.take(this.latestSnapshot?.sessions, target)) {
+      return;
+    }
+    void this.control(target, { kind: 'markRead' })
+      .then((result) => {
+        if (result.ok) {
+          this.refresh();
+        }
+      })
+      .catch((e: unknown) => {
+        this.log.warn(`Mission Control: 既読にできませんでした: ${String(e)}`);
+      });
   }
 
   private receive(message: unknown): void {
@@ -344,6 +375,7 @@ export class MissionControlViewManager implements vscode.Disposable {
         : undefined;
     this.watched = target;
     this.restartLive();
+    this.markWatchedRead();
   }
 
   private restartLive(): void {

@@ -79,6 +79,12 @@ export interface McSession {
   review?: McReview | undefined;
   /** 履歴でピン留めしているか（Issue #2160）。古い版の拡張ホストは返さない。 */
   pinned?: boolean | undefined;
+  /** オーケストレータ配下の子セッション（Issue #2171）。返事待ちに出さない。 */
+  taskManaged?: boolean | undefined;
+  /** 引き継ぎ後に旧タブとして残っている（Issue #2171）。返事待ちに出さない。 */
+  handoffKept?: boolean | undefined;
+  /** 返事待ちのまま人がまだ見ていない（Issue #2171）。全ウィンドウで同じ値になる。 */
+  unread?: boolean | undefined;
 }
 
 /** レビュー待ちの変更1ファイル。 */
@@ -138,6 +144,11 @@ export interface McSnapshot {
   pending: McPendingItem[];
   /** 実行中のまま出力がこの時間（ms）動かなければ「停滞」とする（Issue #2137の5）。 */
   stallMs: number;
+  /**
+   * 返事待ちがこの時間（ms）を超えたら強調する（Issue #2171）。古い版の拡張ホストでは無い
+   * （webviewは既定の30分で判定する）。
+   */
+  replyWaitMs?: number | undefined;
   /** Reloadで切れたセッション（このウィンドウの分だけ）。古い版の拡張ホストでは無い。 */
   resumable?: McResumeItem[] | undefined;
   /** オーケストレータモードのrun（Issue #2150）。task runが使えないときは無い。 */
@@ -188,7 +199,7 @@ export type McBooleanPrefKey =
   | 'notifications.sound.approvalPending'
   | 'notifications.sound.handoff'
   | 'notifications.sound.onlyWhenHidden';
-export type McNumberPrefKey = 'missionControl.stallMinutes';
+export type McNumberPrefKey = 'missionControl.stallMinutes' | 'missionControl.replyWaitMinutes';
 export type McPrefKey = McBooleanPrefKey | McNumberPrefKey;
 
 export type McPrefs = Record<McBooleanPrefKey, boolean> & Record<McNumberPrefKey, number>;
