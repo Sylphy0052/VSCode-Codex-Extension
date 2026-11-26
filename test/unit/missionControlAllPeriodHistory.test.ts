@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -73,6 +73,29 @@ describe('SessionCatalog', () => {
       title: '見出しa',
       firstPrompt: '最初の依頼',
     });
+  });
+
+  it('壊れた目録・形の違う行は捨てて作り直す', async () => {
+    const path = join(dir, 'catalog.json');
+    const warnings: string[] = [];
+    const log = { warn: (m: string) => warnings.push(m) };
+    await writeFile(path, '{"version":1,"entries":[', 'utf8');
+    const entries = await new SessionCatalog(path, log).merge([summary('a')]);
+    expect(entries.map((e) => e.threadId)).toEqual(['a']);
+    expect(warnings.join('\n')).toContain('作り直します');
+    const saved = JSON.parse(await readFile(path, 'utf8')) as { entries: unknown[] };
+    expect(saved.entries).toHaveLength(1);
+
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        entries: [{ provider: 'evil', threadId: 'x', updatedAt: 0 }, { threadId: 'y' }, null],
+      }),
+      'utf8',
+    );
+    const again = await new SessionCatalog(path, log).merge([summary('b')]);
+    expect(again.map((e) => e.threadId)).toEqual(['b']);
   });
 });
 

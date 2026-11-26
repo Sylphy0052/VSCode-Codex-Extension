@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -200,6 +200,36 @@ describe('HandoffLedger', () => {
     const result = await ledger.search({ query: '共通', session: '', trigger: 'all' });
     expect(result.hits).toHaveLength(LEDGER_HIT_MAX);
     expect(result.truncated).toBe(true);
+  });
+
+  it('壊れた索引からは作り直し、警告だけ残す', async () => {
+    await put('a-2026-11-25T00-00-00-000.md', handoffText({ sessionId: 'a', body: '本文' }));
+    await mkdir(dirname(indexPath), { recursive: true });
+    await writeFile(indexPath, '{"version":1,"entries":[{"name":', 'utf8');
+    const warnings: string[] = [];
+    const ledger = new HandoffLedger(handoffDir, indexPath, { warn: (m) => warnings.push(m) });
+    const result = await ledger.search({ query: '本文', session: '', trigger: 'all' });
+    expect(result.hits.map((h) => h.entry.sessionId)).toEqual(['a']);
+    expect(warnings.join('\n')).toContain('作り直します');
+    const saved = JSON.parse(await readFile(indexPath, 'utf8')) as { entries: unknown[] };
+    expect(saved.entries).toHaveLength(1);
+  });
+
+  it('索引に細工した名前が載っていてもパスを組まない', async () => {
+    await put('a-2026-11-25T00-00-00-000.md', handoffText({ sessionId: 'a' }));
+    await new HandoffLedger(handoffDir, indexPath).refresh();
+    const saved = JSON.parse(await readFile(indexPath, 'utf8')) as {
+      version: number;
+      entries: { name: string }[];
+    };
+    const [entry] = saved.entries;
+    saved.entries.push({ ...entry, name: '../../outside.md' }, { ...entry, name: '/etc/x.md' });
+    await writeFile(indexPath, JSON.stringify(saved), 'utf8');
+    const ledger = new HandoffLedger(handoffDir, indexPath);
+    await ledger.refresh();
+    expect(ledger.pathOf('../../outside.md')).toBeUndefined();
+    expect(ledger.pathOf('/etc/x.md')).toBeUndefined();
+    expect(ledger.list().map((e) => e.name)).toEqual(['a-2026-11-25T00-00-00-000.md']);
   });
 
   it('handoffのディレクトリが無ければ空', async () => {

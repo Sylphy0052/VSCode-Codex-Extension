@@ -279,6 +279,7 @@ import {
   type McOffListSession,
 } from './view/missionControlSessions';
 import { HANDOFF_LEDGER_INDEX_FILE, HandoffLedger } from './view/handoffLedger';
+import { readStateDbThreads } from './codex/stateDbThreads';
 import {
   MC_HISTORY_LIST_MIN,
   missingFiles,
@@ -2234,8 +2235,9 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
         // `thread/list`由来の一覧はarchive済みを含まないため、ファイルから拾って重ねる
         // 全期間を探すため（Issue #2178）、Claude Codeは索引から多めに読む（読むだけで軽い）。
         // ここで読んだ分は目録へ書き留めるので、transcriptが消えた後も引ける。Codexの
-        // `thread/list`は件数を増やすと名称未設定のスレッドへ名前を書き込むので増やさない
-        const [listed, archived, claudeMore] = await Promise.all([
+        // `thread/list`はrolloutが残るスレッドしか返さないので、状態DBのthreadsから読んで
+        // 目録へだけ入れる（一覧には混ぜない。rolloutの有無は目録の側でstatして確かめる）
+        const [listed, archived, claudeMore, codexStateDb] = await Promise.all([
           providers.listSessions(options, log),
           store.listArchived(options).catch((e: unknown) => {
             log.warn(`Mission Control: archive済みのセッションを読めませんでした: ${String(e)}`);
@@ -2245,13 +2247,15 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
             .list({ ...options, maxEntries: MC_HISTORY_LIST_MIN })
             .then((r) => r.sessions)
             .catch(() => []),
+          readStateDbThreads(paths.home, log),
         ]);
         const sessions = mergeArchivedSessions(listed, [...archived, ...claudeMore]);
         missionControlHistory = sessions;
         // 全期間（Issue #2178）: 一覧で見かけたセッションを目録へ書き留め、目録とhandoffに
         // 残ったセッション（transcriptが消えたものを含む）を重ねる
         const [catalog, handoffs] = await Promise.all([
-          sessionCatalog.merge(sessions).catch((e: unknown) => {
+          // 一覧の値を後に置き、同じセッションでは一覧の値を残す
+          sessionCatalog.merge([...codexStateDb, ...sessions]).catch((e: unknown) => {
             log.warn(`Mission Control: セッション目録を読めませんでした: ${String(e)}`);
             return [];
           }),
