@@ -1501,12 +1501,17 @@ describe('TaskStageRunner 引き継ぎ', () => {
       expect(await delegateOf(t)(HANDOFF)).toBe(true);
       expect(await delegateOf(t, 1)(HANDOFF)).toBe(true);
       expect(t.sessions).toHaveLength(3);
+      // 閉じた前の世代が終了を通知しても、後片付けをやり直さない
+      t.session(0).dispose.mockImplementation(() => t.session(0).emitFinished('manual'));
       expect(await reportDone(t)).toMatchObject({ isError: false });
       t.session(2).emitState(false);
       await flush();
       expect(t.session(2).dispose).toHaveBeenCalledTimes(1);
       expect(t.session(0).dispose).toHaveBeenCalledTimes(1);
       expect(t.session(1).dispose).toHaveBeenCalledTimes(1);
+      await flush();
+      expect(t.session(2).dispose).toHaveBeenCalledTimes(1);
+      expect(t.task().stages.issuePlan.status).toBe('done');
     });
 
     it('工程を止めたら前の世代は閉じ、今のタブは残す', async () => {
