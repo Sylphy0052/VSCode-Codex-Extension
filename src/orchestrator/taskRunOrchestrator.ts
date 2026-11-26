@@ -629,13 +629,13 @@ export class TaskRunOrchestrator {
    * 終了レビューを送る（Issue #2194）。goalがありReflexが有効なら完了条件の判定を1回走らせて添え、
    * 結果を会話に1行残す。判定に失敗したら「判定なし」として送る。届けた（イベントの上限で捨てなかった）
    * ときだけ送った時刻をrunへ記録し、そこから再計画の受付時間を数える。判定の間にrunが再開した・
-   * 終わり直した・Orchestratorの世代が変わったときは送らない（古い終わりのレビューを届けない）。
+   * 終わり直した・Orchestratorを閉じたときは送らない（古い終わりのレビューを届けない）。世代が
+   * 変わっただけなら、その時点の世代へ届ける。
    */
   private async sendEndReview(run: TaskRun): Promise<void> {
     const endReview = this.deps.endReview;
     const finishedAt = run.finishedAt;
-    const live = this.live.get(run.runId);
-    if (endReview === undefined || finishedAt === undefined || live === undefined) {
+    if (endReview === undefined || finishedAt === undefined || !this.live.has(run.runId)) {
       return;
     }
     let verdict: EndReviewVerdict;
@@ -645,7 +645,10 @@ export class TaskRunOrchestrator {
       verdict = { kind: 'unavailable' };
     }
     const current = this.deps.controller.find(run.runId);
-    if (current?.finishedAt !== finishedAt || this.live.get(run.runId) !== live) {
+    // 判定の間にOrchestratorの世代が変わっても（更新・引き継ぎ）、同じ終わりなら今の世代へ届ける。
+    // `runFinished`はすでにまとめて捨てているので、ここで捨てると終了の知らせが届かなくなる
+    const live = this.live.get(run.runId);
+    if (current?.finishedAt !== finishedAt || live === undefined) {
       return;
     }
     const config = endReview.config();

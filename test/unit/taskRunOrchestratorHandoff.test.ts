@@ -18,6 +18,7 @@ import type {
   TaskSessionHost,
   TaskSessionInput,
 } from '../../src/orchestrator/taskSession';
+import type { EndReviewVerdict } from '../../src/orchestrator/taskRunEndReview';
 import { makeTask } from '../helpers/taskRunFixture';
 
 /**
@@ -442,6 +443,41 @@ describe('終了レビュー（Issue #2194）', () => {
     const { runBox, s1 } = await openWith({ config: () => config, judge });
     await vi.waitFor(() => expect(runBox.current.endReview).toBeDefined());
     expect(s1.sentTexts.join('\n')).toContain('判定なし');
+  });
+
+  it('判定の間にOrchestratorの世代が変わっても、同じ終わりなら新しい世代へ終了レビューを届ける', async () => {
+    let release: (v: EndReviewVerdict) => void = () => undefined;
+    const judge = vi.fn(
+      () =>
+        new Promise<EndReviewVerdict>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const runBox = { current: running() };
+    const s1 = makeFakeSession('s1');
+    const s2 = makeFakeSession('s2');
+    const openTaskSession = vi
+      .fn()
+      .mockResolvedValueOnce(s1.session)
+      .mockResolvedValueOnce(s2.session);
+    const orch = new TaskRunOrchestrator({
+      ...makeDeps({ openTaskSession }, runBox),
+      endReview: { config: () => config, judge },
+    });
+    await orch.open('run-1');
+    s1.emitState({ busy: false });
+    const prev = runBox.current;
+    runBox.current = { ...prev, finishedAt: '2026-01-02T00:00:00.000Z' };
+    orch.handleRunTransition(prev, runBox.current);
+    await vi.waitFor(() => expect(judge).toHaveBeenCalledTimes(1));
+
+    await orch.open('run-1', true);
+    s2.emitState({ busy: false });
+    release({ kind: 'skipped' });
+    await vi.waitFor(() =>
+      expect(runBox.current.endReview?.finishedAt).toBe('2026-01-02T00:00:00.000Z'),
+    );
+    expect(s2.sentTexts.join('\n')).toContain('（終了レビュー）');
   });
 
   it('設定がOFFなら今までどおりrunFinishedだけを届ける', async () => {
