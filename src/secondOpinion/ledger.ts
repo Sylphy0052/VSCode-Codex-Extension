@@ -202,6 +202,50 @@ export function isLedgerFilled(ledger: Ledger): boolean {
   return ledger.findings.every((f) => f.state !== '未対応');
 }
 
+/** `digestLedger`が要約に残す未実測の場面の件数（件数自体は全数を数える）。 */
+export const MAX_DIGEST_SCENES = 5;
+/** `digestLedger`が残す場面の文の長さの上限。 */
+export const MAX_DIGEST_SCENE_TEXT = 200;
+
+/**
+ * 台帳の集計（Issue #2192）。TaskRunがreview工程の報告から計算して保存し、Orchestratorへ渡す。
+ * 文（`target`・場面の`text`）は外部由来（LLMの出力）なので、表示する側で無害化する。
+ */
+export interface LedgerDigest {
+  /** 本来の場面の数。 */
+  genuineSceneCount: number;
+  /** 本来の場面のうち未実測（`unsettledScenes`）の数。 */
+  unsettledSceneCount: number;
+  /** 未実測の場面の先頭`MAX_DIGEST_SCENES`件。文は`MAX_DIGEST_SCENE_TEXT`で切る。 */
+  unsettledScenes: readonly { id: string; text: string }[];
+  /** 状態が「未対応」の指摘の数。 */
+  openFindingCount: number;
+  /** `isLedgerFilled`の結果。 */
+  filled: boolean;
+}
+
+/** 台帳を集計する。台帳として読めなければ`undefined`。 */
+export function digestLedger(text: string): LedgerDigest | undefined {
+  const ledger = parseLedger(text);
+  if (ledger === undefined) {
+    return undefined;
+  }
+  const unsettled = unsettledScenes(ledger);
+  return {
+    genuineSceneCount: ledger.scenes.filter((s) => s.kind === '本来の場面').length,
+    unsettledSceneCount: unsettled.length,
+    unsettledScenes: unsettled.slice(0, MAX_DIGEST_SCENES).map((s) => ({
+      id: s.id,
+      text:
+        s.text.length > MAX_DIGEST_SCENE_TEXT
+          ? `${s.text.slice(0, MAX_DIGEST_SCENE_TEXT)}…`
+          : s.text,
+    })),
+    openFindingCount: ledger.findings.filter((f) => f.state === '未対応').length,
+    filled: isLedgerFilled(ledger),
+  };
+}
+
 /** advisorへの依頼文（Issue #2065 手1・手2）。 */
 export function buildLedgerRequest(previous: Ledger | undefined, filledAlready: boolean): string {
   const lines = [

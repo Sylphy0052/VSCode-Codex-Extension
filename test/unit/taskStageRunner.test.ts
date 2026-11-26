@@ -937,6 +937,9 @@ describe('TaskStageRunner 工程の報告', () => {
     ]);
     await flush();
     expect(t.task().review).toMatchObject({ passed: false, remainingFindings: ['指摘A'] });
+    // Issue #2192: doneの報告のsummaryを保存し、台帳を読めない報告も完了として「台帳なし」にする
+    expect(t.task().stageSummaries?.review).toBe('レビューした');
+    expect(t.task().review?.ledger).toEqual({ kind: 'none' });
     expect(t.task().gates?.[0]).toMatchObject({ kind: 'reviewFindings', status: 'awaitingUser' });
   });
 

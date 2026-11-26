@@ -15,6 +15,7 @@
  * キーは`taskId`（`T1`、`T2`…）だけに限る（`__proto__`等の危険なキーが入らない）。
  */
 
+import { digestLedger, type LedgerDigest } from '../secondOpinion/ledger';
 import type { OptimizeSummary } from './optimizeLedger';
 import type { OptimizeRequest } from './optimizeRequest';
 import type { OptimizeLoopState } from './optimizeLoop';
@@ -120,7 +121,22 @@ export interface StageReviewResult {
   remainingFindings: readonly string[];
   /** high・mediumの指摘を残さずに終わった。 */
   passed: boolean;
+  /**
+   * `summary`から読んだ台帳の集計（Issue #2192）。`completeStage`が拡張側で計算する（LLMには書かせない）。
+   * 追加前に保存したrunには無い（`undefined`は「集計していない」で、「台帳なし」とは区別する）。
+   */
+  ledger?: ReviewLedgerState;
 }
+
+/**
+ * review工程の報告から読んだ台帳（Issue #2192）。`kind`で分け、後から状態を足せるようにしてある。
+ * - none: 報告に台帳が無い、または読めなかった（工程は完了として記録する）
+ * - parsed: 台帳を読めた
+ */
+export type ReviewLedgerState = { kind: 'none' } | { kind: 'parsed'; digest: LedgerDigest };
+
+/** タスクに保存する工程報告の`summary`の上限（Issue #2192）。報告の上限より短く切る。 */
+export const MAX_STORED_STAGE_SUMMARY_LENGTH = 1000;
 
 /**
  * 工程の一時停止の段階（Issue #1629）。
@@ -210,6 +226,11 @@ export interface OrchestratedTask {
   branch: string | undefined;
   pullRequest: { number: number; url: string } | undefined;
   review: StageReviewResult | undefined;
+  /**
+   * 工程報告（`done`）の`summary`（Issue #2192）。工程ごとに最後の報告だけを残し、
+   * `MAX_STORED_STAGE_SUMMARY_LENGTH`で切る。外部由来（LLMの出力）のテキスト。追加前に保存したrunには無い。
+   */
+  stageSummaries?: Partial<Record<TaskStage, string>>;
   /**
    * 工程セッションが`ask_orchestrator`で尋ねた質問（新しい順ではなく受け付けた順）。
    * 追加前に保存したrunには無い。操作は`taskRunQuestions.ts`。
@@ -1065,12 +1086,16 @@ export type StageOutput =
  * 工程の完了を確定する。報告の受付（`checkStageReport`）と、Controllerが観測した事実による
  * 完了条件の確認（forgeのIssue・PR、ブランチ）は呼び出し側が先に済ませる前提。
  * mergeとcleanupが終わるとタスクは終わる。
+ *
+ * `summary`（工程報告の要約）があれば工程ごとに切って残す。reviewの成果には`summary`から読んだ
+ * 台帳の集計を添える（Issue #2192）。台帳が読めなくても完了は記録する。
  */
 export function completeStage(
   run: TaskRun,
   ref: StageReportRef,
   output: StageOutput,
   now: Date,
+  summary?: string,
 ): TaskRun {
   const checked = checkStageReport(run, ref);
   if (!checked.ok || output.stage !== ref.stage) {
@@ -1092,15 +1117,41 @@ export function completeStage(
         : output.stage === 'implement'
           ? { ...closed, pullRequest: output.pullRequest }
           : output.stage === 'review'
-            ? { ...closed, review: output.review }
+            ? { ...closed, review: withReviewLedger(output.review) }
             : closed;
+  const trimmed = summary?.trim() ?? '';
+  const withSummary: OrchestratedTask =
+    trimmed === ''
+      ? withOutput
+      : {
+          ...withOutput,
+          stageSummaries: {
+            ...withOutput.stageSummaries,
+            [ref.stage]: trimmed.slice(0, MAX_STORED_STAGE_SUMMARY_LENGTH),
+          },
+        };
   return withTask(run, {
-    ...withOutput,
+    ...withSummary,
     attention: 'none',
     failure: undefined,
     haltCause: undefined,
     updatedAt: at,
   });
+}
+
+/**
+ * reviewの成果に台帳の集計を添える（Issue #2192）。台帳は`reviewSummary`に書かせている（#2065）。
+ * 既に集計を持つ成果（呼び出し側で計算済み）はそのまま返す。
+ */
+function withReviewLedger(review: StageReviewResult): StageReviewResult {
+  if (review.ledger !== undefined) {
+    return review;
+  }
+  const digest = digestLedger(review.summary);
+  return {
+    ...review,
+    ledger: digest === undefined ? { kind: 'none' } : { kind: 'parsed', digest },
+  };
 }
 
 /** 「実装とPR作成」の開始時に作ったworktreeとブランチを記録する。 */

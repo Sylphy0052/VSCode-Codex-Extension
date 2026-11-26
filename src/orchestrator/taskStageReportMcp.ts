@@ -52,7 +52,10 @@ export const REPORT_STAGE_RESULT_DEFINITION: McpToolDefinition = {
       issueNumber: { type: 'integer', minimum: 1, description: 'issueCreate: 起票したIssueの番号' },
       pullRequestNumber: { type: 'integer', minimum: 1, description: 'implement: 作ったPRの番号' },
       pullRequestUrl: { type: 'string', description: 'implement: 作ったPRのURL' },
-      reviewSummary: { type: 'string', description: 'review: レビューの要約' },
+      reviewSummary: {
+        type: 'string',
+        description: 'review: レビューの要約と場面の台帳（拡張機能が台帳を集計する）',
+      },
       remainingFindings: {
         type: 'array',
         items: { type: 'string' },
