@@ -132,6 +132,33 @@ describe('ClaudeUsageProbe', () => {
     expect(gotB).toEqual([undefined]);
   });
 
+  it('他のウィンドウの切り替え後に自分の取得も失敗したら、手元の切り替え前の値を捨てる（Issue #2174）', async () => {
+    const shared = path.join(dir, 'shared');
+    const claude = fakeClaude(REPORT);
+    const a = new ClaudeUsageProbe(() => claude, log, shared);
+    const gotB: (ProbedSlots | undefined)[] = [];
+    const b = new ClaudeUsageProbe(
+      () => claude,
+      log,
+      shared,
+      undefined,
+      (p) => gotB.push(p),
+    );
+    const now = 10_000_000;
+    await a.read(now);
+    // Bは共有の結果を使い、切り替え前のアカウントの値を持つ
+    await b.read(now + 1000);
+    expect(gotB.map((p) => p?.slots.fiveHour?.pct)).toEqual([16]);
+    // Aがアカウントを切り替え、強制取得が読めずに終わる
+    fakeClaude('nothing useful\n');
+    await a.readFresh(() => now + 2000);
+    // Bは共有の結果が古くなってから自分で取得し、読めずに終わる
+    await b.read(now + 24 * 3_600_000);
+    expect(launches()).toBe(3);
+    expect(gotB).toHaveLength(2);
+    expect(gotB[1]).toBeUndefined();
+  });
+
   it('通常の取得に失敗したときは前回の5時間枠と週次を共有に残す（Issue #2174）', async () => {
     const shared = path.join(dir, 'shared');
     const claude = fakeClaude(REPORT);

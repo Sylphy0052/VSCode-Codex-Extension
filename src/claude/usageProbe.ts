@@ -162,7 +162,8 @@ export class ClaudeUsageProbe {
      * 5時間枠と週次の使用率・リセット時刻を読めたら呼ぶ（Issue #2174。Mission Controlの見込み用）。
      * 他のウィンドウの結果を使ったときも呼ぶ。切り替え前のアカウントの値は渡さない。
      * `undefined`は「今の値が無い」で、受け取り先は持っている値を捨てる。`requestFresh`
-     * （アカウントの切り替えの前後）と、5時間枠と週次の無い共有の結果を使ったときに渡す。
+     * （アカウントの切り替えの前後）と、5時間枠と週次の無い共有の結果を使ったとき・自分の取得で
+     * 読めず共有にも残っていなかったときに渡す。
      */
     private readonly onSlots?: (probed: ProbedSlots | undefined) => void,
   ) {}
@@ -352,6 +353,11 @@ export class ClaudeUsageProbe {
       const highestPct = slots === undefined ? undefined : highestOf(slots);
       if (slots !== undefined) {
         this.readSlots = { probed: { slots, readAt: now } };
+      } else if (previous !== undefined && !forced) {
+        // 読めなければ共有に残っていた値に揃える。他のウィンドウがアカウントを切り替えて強制取得した
+        // 後の記録には5時間枠と週次が無いので、手元の切り替え前の値をここで捨てさせる（Issue #2174）。
+        // 強制取得なら`requestFresh`で捨てさせ済み
+        this.readSlots = { probed: carriedSlots };
       }
       // 保存値で代わりに記録できても、新しい値は取れていないので失敗として数え、再試行の
       // 間隔を延ばす。CLIは429を約32分覚えて再要求しないため、短い間隔で取り直しても取れない
