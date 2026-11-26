@@ -11,6 +11,7 @@ import type {
   McProvider,
   McSnapshot,
   McTarget,
+  McWorkUnit,
 } from '../webview/missionControl/protocol';
 import { MISSION_CONTROL_STYLES } from '../webview/missionControl/styles';
 import type { SessionControlResult } from './chatManagerBase';
@@ -105,7 +106,15 @@ export interface McSessionPort {
   history(): Promise<McHistoryItem[]>;
   /** 履歴の1件をこのウィンドウで開き直す。失敗したら理由の文を返す。 */
   historyOpen(provider: McProvider, threadId: string): Promise<string | undefined>;
+  /**
+   * 作業履歴を作業単位にまとめたもの（Issue #2177）。`days`は直近何日分か（0なら保持期間の
+   * 全部）。並べ替えはwebviewが行う。
+   */
+  workUnits?(days: number): Promise<McWorkUnit[]>;
 }
+
+/** 作業単位の集計で受け付ける日数の上限（保持期間の上限と同じ）。 */
+const MAX_WORK_UNIT_DAYS = 3650;
 
 /**
  * Mission Control（Issue #2136）のエディタタブ。
@@ -344,6 +353,7 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'lifecycle':
       case 'history':
       case 'historyOpen':
+      case 'workUnits':
         this.handleSessions(m);
         return;
       case 'runOp':
@@ -486,6 +496,21 @@ export class MissionControlViewManager implements vscode.Disposable {
     const run = async (): Promise<Record<string, unknown>> => {
       if (message.type === 'history') {
         return { ok: true, history: await port.history() };
+      }
+      if (message.type === 'workUnits') {
+        const { days } = message;
+        if (
+          typeof days !== 'number' ||
+          !Number.isInteger(days) ||
+          days < 0 ||
+          days > MAX_WORK_UNIT_DAYS
+        ) {
+          return { ok: false, error: '集計する期間が正しくありません' };
+        }
+        if (port.workUnits === undefined) {
+          return { ok: false, error: '作業単位の集計はこの画面では使えません' };
+        }
+        return { ok: true, workUnits: await port.workUnits(days) };
       }
       if (message.type === 'historyOpen') {
         const { provider, threadId } = message;
