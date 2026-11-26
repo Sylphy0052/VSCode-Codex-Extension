@@ -124,6 +124,50 @@ describe('aggregateWorkUnits', () => {
     expect(unitFor(units, 'issue:30').sessionCount).toBe(1);
   });
 
+  it('番号の無いセッションを挟んでも、別々のIssue番号の単位どうしはつながない', () => {
+    const records: WorkHistoryRecord[] = [
+      sess(T0, 'a', 'start', { issue: 10 }),
+      sess(T0 + MIN, 'a', 'handoff', { childThreadId: 'b', issue: 10 }),
+      sess(T0 + 2 * MIN, 'b', 'start', {}),
+      sess(T0 + 3 * MIN, 'b', 'handoff', { childThreadId: 'c' }),
+      sess(T0 + 4 * MIN, 'c', 'start', { issue: 20 }),
+      sess(T0 + 5 * MIN, 'z', 'start', { issue: 20 }),
+    ];
+    const units = aggregateWorkUnits(records);
+    expect(units).toHaveLength(2);
+    expect(unitFor(units, 'issue:10')).toMatchObject({ issues: [10], sessionCount: 2 });
+    expect(unitFor(units, 'issue:20')).toMatchObject({ issues: [20], sessionCount: 2 });
+  });
+
+  it('期間を渡すと範囲内の記録だけを数え、費用・トークンは期間前の累計を差し引く', () => {
+    const DAY = 24 * 60 * MIN;
+    const since = T0 + 3 * DAY;
+    const records: WorkHistoryRecord[] = [
+      sess(T0, 'a', 'turn', { issue: 1, costUsd: 50, title: '期間前' }),
+      sess(T0 + 5 * DAY, 'a', 'turn', { issue: 1, costUsd: 51 }),
+      sess(T0 + 5 * DAY, 'x', 'turn', { issue: 3, provider: 'codex', tokens: 1000 }),
+      sess(T0 + 6 * DAY, 'x', 'turn', { issue: 3, provider: 'codex', tokens: 1500 }),
+      sess(T0 + 5 * DAY, 'b', 'turn', { issue: 2, costUsd: 10 }),
+      // 期間前だけのセッションは数えない
+      sess(T0, 'old', 'turn', { issue: 9, costUsd: 100 }),
+    ];
+    const units = aggregateWorkUnits(records, { since });
+    expect(units.map((u) => u.key).sort()).toEqual(['issue:1', 'issue:2', 'issue:3']);
+    expect(unitFor(units, 'issue:1').costUsd).toBeCloseTo(1);
+    expect(unitFor(units, 'issue:1').firstAt).toBe(T0 + 5 * DAY);
+    expect(unitFor(units, 'issue:1').title).toBe('');
+    expect(unitFor(units, 'issue:2').costUsd).toBeCloseTo(10);
+    expect(unitFor(units, 'issue:3').tokens).toBe(1500);
+    expect(sortWorkUnits(units, 'cost').map((u) => u.key)).toEqual([
+      'issue:2',
+      'issue:1',
+      'issue:3',
+    ]);
+    // untilより後の記録は数えない
+    const until = aggregateWorkUnits(records, { since, until: T0 + 6 * DAY });
+    expect(unitFor(until, 'issue:3').tokens).toBe(1000);
+  });
+
   it('数字として正しくないIssue番号は使わない', () => {
     const records = [
       sess(T0, 'a', 'start', { issue: 1.5 }),

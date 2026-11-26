@@ -10,8 +10,12 @@ import type { WorkHistoryRecord, WorkHistorySessionRecord } from './workHistory'
  * まとめ方:
  * - セッションはprovider＋threadIdで1つと数える（別のウィンドウで開き直しても同じ）
  * - セッションのIssue番号は、記録のうち最後に付いていたもの。数字として検証してから使う
- * - handoffの親子は同じ単位にまとめる。ただし親子がどちらも別々のIssue番号を持つときはつながない
+ * - handoffの親子は同じ単位にまとめる。ただし別々のIssue番号の単位どうしはつながない（番号の
+ *   無いセッションを挟んでも。1つの単位のIssue番号は高々1つ）
  * - 同じIssue番号のセッションは、handoffでつながっていなくても同じ単位にする
+ *
+ * 期間（`range`）を渡すと、範囲内の記録だけを数える。費用・トークンはセッションの累計値なので、
+ * 範囲より前の記録の最大値を差し引いて範囲内の増分にする（範囲より前の記録も渡すこと）。
  *
  * 利用枠の消費の概算:
  * - provider・窓ごとに使用率の計測値を時刻順に並べ、隣り合う計測の間の増分を、その間に
@@ -20,8 +24,7 @@ import type { WorkHistoryRecord, WorkHistorySessionRecord } from './workHistory'
  * - リセット（リセット時刻が先へ進んだ・前の窓のリセット時刻を過ぎた）をまたぐときは、後の
  *   計測値そのものを増分とする
  *
- * vscodeに依らない。後続の作業履歴カレンダー（Issue #2179）も、範囲を絞った記録をこの関数へ
- * 渡して使う。
+ * vscodeに依らない。後続の作業履歴カレンダー（Issue #2179）も、`range`で期間を指定して使う。
  */
 
 /** Issue番号として受け付ける上限（GitHubの番号の桁を大きく超える値は捨てる）。 */
@@ -98,16 +101,55 @@ class UnionFind {
     return root;
   }
 
-  union(a: string, b: string): void {
+  /** 2つをまとめ、まとめた後のrootを返す。 */
+  union(a: string, b: string): string {
     const ra = this.find(a);
     const rb = this.find(b);
     if (ra !== rb) {
       this.parent.set(rb, ra);
     }
+    return ra;
   }
 }
 
-function collectSessions(records: readonly WorkHistoryRecord[]): Map<string, SessionAcc> {
+/** 集計する期間（ms）。`since`は含み、`until`は含まない。 */
+export interface WorkUnitRange {
+  since?: number | undefined;
+  until?: number | undefined;
+}
+
+interface CumulativeBase {
+  costUsd: number | undefined;
+  tokens: number | undefined;
+}
+
+/** 範囲より前の記録から、セッションごとの累計値（費用・トークン）の最大値を取る。 */
+function collectBaselines(
+  records: readonly WorkHistoryRecord[],
+  since: number | undefined,
+): Map<string, CumulativeBase> {
+  const bases = new Map<string, CumulativeBase>();
+  if (since === undefined) return bases;
+  for (const record of records) {
+    if (record.kind !== 'session' || record.at >= since) continue;
+    const key = sessionKey(record.provider, record.threadId);
+    const base = bases.get(key) ?? { costUsd: undefined, tokens: undefined };
+    base.costUsd = maxDefined(base.costUsd, record.costUsd);
+    base.tokens = maxDefined(base.tokens, record.tokens);
+    bases.set(key, base);
+  }
+  return bases;
+}
+
+/** 範囲内の累計値の最大値から、範囲より前の最大値を引いた増分。 */
+function increment(max: number | undefined, base: number | undefined): number | undefined {
+  return max === undefined ? undefined : Math.max(0, max - (base ?? 0));
+}
+
+function collectSessions(
+  records: readonly WorkHistoryRecord[],
+  baselines: ReadonlyMap<string, CumulativeBase>,
+): Map<string, SessionAcc> {
   const sessions = new Map<string, SessionAcc>();
   const touch = (provider: McProvider, threadId: string, at: number): SessionAcc => {
     const key = sessionKey(provider, threadId);
@@ -152,6 +194,11 @@ function collectSessions(records: readonly WorkHistoryRecord[]): Map<string, Ses
     acc.costUsd = maxDefined(acc.costUsd, record.costUsd);
     acc.tokens = maxDefined(acc.tokens, record.tokens);
   }
+  for (const acc of sessions.values()) {
+    const base = baselines.get(acc.key);
+    acc.costUsd = increment(acc.costUsd, base?.costUsd);
+    acc.tokens = increment(acc.tokens, base?.tokens);
+  }
   // handoffの子でも、範囲の中に子自身の記録が無ければ数えない（数えるのは記録のあるセッションだけ）
   return sessions;
 }
@@ -162,26 +209,35 @@ function groupSessions(
 ): Map<string, SessionAcc[]> {
   const uf = new UnionFind();
   for (const key of sessions.keys()) uf.find(key);
-  for (const record of records) {
-    if (record.kind !== 'session' || record.event !== 'handoff') continue;
-    if (record.childThreadId === undefined) continue;
-    const parent = sessions.get(sessionKey(record.provider, record.threadId));
-    const child = sessions.get(sessionKey(record.provider, record.childThreadId));
-    if (parent === undefined || child === undefined) continue;
-    if (parent.issue !== undefined && child.issue !== undefined && parent.issue !== child.issue) {
-      continue;
-    }
-    uf.union(parent.key, child.key);
-  }
+  // 単位のroot → その単位のIssue番号。1つの単位に別々のIssue番号を入れない
+  const issueOfRoot = new Map<string, number>();
   const byIssue = new Map<number, string>();
   for (const acc of sessions.values()) {
     if (acc.issue === undefined) continue;
     const first = byIssue.get(acc.issue);
     if (first === undefined) {
       byIssue.set(acc.issue, acc.key);
+      issueOfRoot.set(acc.key, acc.issue);
     } else {
       uf.union(first, acc.key);
     }
+  }
+  // handoffは時刻順につなぐ。番号の無いセッションを挟んでも、別々のIssue番号の単位どうしは
+  // つながない（番号の無い子は先につながった親の単位に入る）
+  for (const record of records) {
+    if (record.kind !== 'session' || record.event !== 'handoff') continue;
+    if (record.childThreadId === undefined) continue;
+    const parent = sessions.get(sessionKey(record.provider, record.threadId));
+    const child = sessions.get(sessionKey(record.provider, record.childThreadId));
+    if (parent === undefined || child === undefined) continue;
+    const parentIssue = issueOfRoot.get(uf.find(parent.key));
+    const childIssue = issueOfRoot.get(uf.find(child.key));
+    if (parentIssue !== undefined && childIssue !== undefined && parentIssue !== childIssue) {
+      continue;
+    }
+    const root = uf.union(parent.key, child.key);
+    const issue = parentIssue ?? childIssue;
+    if (issue !== undefined) issueOfRoot.set(root, issue);
   }
   const groups = new Map<string, SessionAcc[]>();
   for (const acc of sessions.values()) {
@@ -331,11 +387,19 @@ function sumDefined(values: ReadonlyArray<number | undefined>): number | undefin
 
 /**
  * 作業履歴を作業単位にまとめる。並び順は最後の記録の新しい順（並べ替えは`sortWorkUnits`）。
- * 文字列は表示できる形（1行・長さ制限）へ直してから載せる。
+ * 文字列は表示できる形（1行・長さ制限）へ直してから載せる。`range`を渡すと範囲内の記録だけを
+ * 数え、範囲より前の記録は費用・トークンの差し引きにだけ使う。
  */
-export function aggregateWorkUnits(records: readonly WorkHistoryRecord[]): McWorkUnit[] {
-  const ordered = [...records].sort((a, b) => a.at - b.at);
-  const sessions = collectSessions(ordered);
+export function aggregateWorkUnits(
+  records: readonly WorkHistoryRecord[],
+  range: WorkUnitRange = {},
+): McWorkUnit[] {
+  const { since, until } = range;
+  const all = [...records].sort((a, b) => a.at - b.at);
+  const ordered = all.filter(
+    (r) => (since === undefined || r.at >= since) && (until === undefined || r.at < until),
+  );
+  const sessions = collectSessions(ordered, collectBaselines(all, since));
   const groups = groupSessions(ordered, sessions);
   const rootOf = new Map<string, string>();
   for (const [root, members] of groups) {

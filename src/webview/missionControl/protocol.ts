@@ -473,15 +473,17 @@ export interface McWorkUnitUsage {
  * `aggregateWorkUnits`（`src/view/workUnits.ts`）が作る。
  *
  * - 単位はIssue番号。Issue番号の無いセッションは、handoffの連鎖でつながったセッションと
- *   同じ単位に入る（連鎖のどこかにIssue番号があればその番号の単位、無ければ連鎖で1単位）
- * - 費用・トークンはセッションごとの最大値（どちらも累計値の記録のため）を合計したもの
+ *   同じ単位に入る（連鎖のどこかにIssue番号があればその番号の単位、無ければ連鎖で1単位）。
+ *   別々のIssue番号の単位どうしは、番号の無いセッションを挟んでもつながない
+ * - 費用・トークンはセッションの累計値の記録なので、セッションごとに「集計する期間内の最大値
+ *   − 期間より前の最大値」を出して合計したもの
  */
 export interface McWorkUnit {
   /** `issue:<番号>`か、Issue番号の無い連鎖なら`chain:<provider>:<最初のthreadId>`。 */
   key: string;
   /** 代表のIssue番号（単位の中で最も多くのセッションが持つ番号）。無ければ無い。 */
   issue?: number | undefined;
-  /** 単位に含まれるIssue番号（昇順）。handoffの連鎖で別のIssueとつながったときに2つ以上になる。 */
+  /** 単位に含まれるIssue番号（昇順）。1つの単位に別々の番号は入れないので、要素は高々1つ。 */
   issues: number[];
   /** 最後に記録されたタイトル（1行化済み）。無ければ空文字。 */
   title: string;
