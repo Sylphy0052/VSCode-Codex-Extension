@@ -14,6 +14,7 @@ import {
 } from '../../src/view/workHistory';
 import {
   extractIssueNumber,
+  PRUNE_INTERVAL_MS,
   reportWorkHistoryHandoff,
   setWorkHistoryHandoffSink,
   USAGE_DUPLICATE_WINDOW_MS,
@@ -124,13 +125,28 @@ describe('WorkHistoryRecorder: セッションのイベント', () => {
     expect(errors).toEqual([]);
   });
 
-  it('記録済みのskillは二度書かない', async () => {
+  it('記録済みのskillは二度書かない（閉じて開き直しても）', async () => {
     const r = recorder();
-    const skills = [{ name: 'a', at: NOW - 5 }];
+    now += 100;
+    const skills = [{ name: 'a', at: now - 5 }];
     r.observeSessions([session({ skills })]);
     r.observeSessions([session({ skills })]);
+    now += 100;
+    r.observeSessions([]);
+    now += 100;
+    // 開き直した会話は、会話記録から同じskillを起動時刻付きで戻してくる
+    r.observeSessions([session({ skills: [...skills, { name: 'b', at: now - 1 }] })]);
     await store.flush();
-    expect((await sessionRecords()).filter((rec) => rec.event === 'skill')).toHaveLength(1);
+    expect(
+      (await sessionRecords()).filter((rec) => rec.event === 'skill').map((rec) => rec.skill),
+    ).toEqual(['a', 'b']);
+  });
+
+  it('Reload後に復元した会話の、記録係を始める前のskillは書かない', async () => {
+    const r = recorder();
+    r.observeSessions([session({ skills: [{ name: 'old', at: NOW - 60_000 }] })]);
+    await store.flush();
+    expect((await sessionRecords()).map((rec) => rec.event)).toEqual(['start']);
   });
 
   it('stopで開いていたセッションのendを同期で書き、以降は記録しない', async () => {
@@ -247,6 +263,20 @@ describe('保持期間', () => {
     const results = await Promise.all([store.prune(NOW, 5), other.prune(NOW, 5)]);
     expect(results.reduce((sum, n) => sum + n, 0)).toBe(2);
     expect(errors).toEqual([]);
+    expect(await readdir(join(dir, WORK_HISTORY_DIR_NAME))).toEqual([]);
+  });
+
+  it('新しい記録が無い見回りでも、期限が来れば古い記録を消す', async () => {
+    await store.append([startRecord(NOW - 10 * DAY, 'old')]);
+    const r = recorder(5);
+    await r.pruneIfDue(true);
+    await store.append([startRecord(NOW - 6 * DAY, 'old2')]);
+    r.observeSessions([]);
+    await store.flush();
+    expect(await readdir(join(dir, WORK_HISTORY_DIR_NAME))).toHaveLength(1);
+    now += PRUNE_INTERVAL_MS;
+    r.observeSessions([]);
+    await store.flush();
     expect(await readdir(join(dir, WORK_HISTORY_DIR_NAME))).toEqual([]);
   });
 

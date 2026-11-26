@@ -23,6 +23,8 @@ export const USAGE_DUPLICATE_WINDOW_MS = 60_000;
  * 状態の変化の通知に乗らないことがあるため。
  */
 export const WORK_HISTORY_OBSERVE_INTERVAL_MS = 60_000;
+/** 閉じた会話のskillの境目を覚えておく件数の上限（古い方から捨てる）。 */
+const MAX_SKILL_WATERMARKS = 1000;
 /** 古い記録の削除を試す間隔。 */
 export const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -94,10 +96,30 @@ export interface WorkHistoryRecorderDeps {
 export class WorkHistoryRecorder {
   private readonly sessions = new Map<string, SessionMemo>();
   private readonly lastUsage = new Map<WorkHistoryProvider, { at: number; json: string }>();
+  /** 閉じた会話の、記録済みのskillの境目（開き直したときに同じskillを二度書かないため）。 */
+  private readonly skillWatermarks = new Map<string, number>();
   private lastPruneAt = Number.NEGATIVE_INFINITY;
   private stopped = false;
+  /** 記録係を始めた時刻（ms）。これより前に起動したskillは、復元した会話の過去の分として書かない。 */
+  private readonly startedAt: number;
 
-  constructor(private readonly deps: WorkHistoryRecorderDeps) {}
+  constructor(private readonly deps: WorkHistoryRecorderDeps) {
+    this.startedAt = this.now();
+  }
+
+  private rememberSkillWatermark(key: string, at: number): void {
+    if (!Number.isFinite(at)) {
+      return;
+    }
+    this.skillWatermarks.delete(key);
+    this.skillWatermarks.set(key, at);
+    if (this.skillWatermarks.size > MAX_SKILL_WATERMARKS) {
+      const oldest = this.skillWatermarks.keys().next().value;
+      if (oldest !== undefined) {
+        this.skillWatermarks.delete(oldest);
+      }
+    }
+  }
 
   private now(): number {
     return this.deps.now?.() ?? Date.now();
@@ -148,14 +170,12 @@ export class WorkHistoryRecorder {
       const next = toMemo(session);
       const prev = this.sessions.get(key);
       this.sessions.set(key, next);
+      // 記録済みのskillの境目。開き直した会話・Reload後に復元した会話は、会話記録から過去の
+      // skillも起動時刻付きで戻ってくるので、閉じたときの境目か、記録係を始めた時刻より前は書かない
+      const watermark = prev?.lastSkillAt ?? this.skillWatermarks.get(key) ?? this.startedAt - 1;
       if (prev === undefined) {
         records.push(this.base(next, 'start', at));
-        for (const skill of session.skills ?? []) {
-          records.push({ ...this.base(next, 'skill', skill.at), skill: skill.name });
-        }
-        continue;
-      }
-      if (
+      } else if (
         prev.title !== next.title ||
         prev.purpose !== next.purpose ||
         prev.branch !== next.branch ||
@@ -164,21 +184,22 @@ export class WorkHistoryRecorder {
         records.push(this.base(next, 'update', at));
       }
       for (const skill of session.skills ?? []) {
-        if (skill.at > prev.lastSkillAt) {
+        if (skill.at > watermark) {
           records.push({ ...this.base(next, 'skill', skill.at), skill: skill.name });
         }
       }
-      if (next.lastSkillAt < prev.lastSkillAt) {
+      if (next.lastSkillAt < watermark) {
         // skillの一覧が上限で切られて古い方が落ちても、記録済みの時刻は戻さない
-        next.lastSkillAt = prev.lastSkillAt;
+        next.lastSkillAt = watermark;
       }
-      if (prev.running && !next.running) {
+      if (prev !== undefined && prev.running && !next.running) {
         records.push(this.base(next, 'turn', at));
       }
     }
     for (const [key, memo] of this.sessions) {
       if (!seen.has(key)) {
         this.sessions.delete(key);
+        this.rememberSkillWatermark(key, memo.lastSkillAt);
         records.push({ ...this.base(memo, 'end', at), reason: 'closed' });
       }
     }
@@ -305,10 +326,11 @@ export class WorkHistoryRecorder {
   }
 
   private write(records: WorkHistoryRecord[], at: number): void {
-    if (records.length === 0) {
-      return;
+    if (records.length > 0) {
+      void this.deps.store.append(records);
     }
-    void this.deps.store.append(records);
+    // 新しい記録が無くても（60秒ごとの見回りだけでも）削除の期限は見る。動きの無いウィンドウで
+    // 古い記録が残り続けないようにする
     if (at - this.lastPruneAt >= PRUNE_INTERVAL_MS) {
       void this.pruneIfDue();
     }

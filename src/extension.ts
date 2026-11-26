@@ -2077,6 +2077,7 @@ export function activate(context: vscode.ExtensionContext): ExtensionTestApi {
       ),
   });
   void workHistory.pruneIfDue(true);
+  stopWorkHistoryOnDeactivate = () => workHistory.stop();
   setWorkHistoryHandoffSink((provider, parentThreadId, childThreadId) => {
     workHistory.recordHandoff(provider, parentThreadId, childThreadId);
   });
@@ -5278,8 +5279,15 @@ function debounce(fn: () => void, delayMs: number): () => void {
 }
 
 export function deactivate(): void {
-  // subscriptions で破棄されるため個別の後始末は不要。
+  // subscriptions で破棄されるため個別の後始末は不要。ただし作業履歴（Issue #2175）は、
+  // チャットの管理が破棄されてセッションが一覧から消える（`closed`として記録される）より前に
+  // 止めて`shutdown`を書く。VS Codeは`deactivate`をsubscriptionsの破棄より先に呼ぶ
+  stopWorkHistoryOnDeactivate?.();
+  stopWorkHistoryOnDeactivate = undefined;
 }
+
+/** `deactivate`で作業履歴の記録係を止める口（Issue #2175）。`activate`が設定する。 */
+let stopWorkHistoryOnDeactivate: (() => void) | undefined;
 
 /**
  * CLIの実行ファイルを解決するクロージャを作る（issue #305）。
