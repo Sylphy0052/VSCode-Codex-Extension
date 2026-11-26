@@ -235,6 +235,22 @@ body.vscode-high-contrast .run-progress, body.vscode-high-contrast-light .run-pr
 @keyframes mc-spin { to { transform: rotate(360deg); } }
 @keyframes mc-enter { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
 @keyframes mc-pop { from { opacity: .4; transform: scale(.92); } to { opacity: 1; transform: none; } }
+/* 作業履歴カレンダー（Issue #2179）。作業量の段階はセッション数の比で0〜4 */
+.calendar-box { width: min(820px, 96vw); max-height: 92vh; overflow: auto; }
+.calendar { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.calendar th { padding: 2px; font-weight: 400; color: var(--vscode-descriptionForeground); }
+.calendar-cell { height: 46px; padding: 3px 4px; vertical-align: top; border: 1px solid var(--vscode-panel-border); cursor: pointer; }
+.calendar-cell.outside { cursor: default; border-color: transparent; }
+.calendar-date { display: block; font-variant-numeric: tabular-nums; }
+.calendar-summary { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.calendar-cell.level-1 { background: color-mix(in srgb, var(--vscode-charts-green, var(--vscode-charts-blue)) 12%, transparent); }
+.calendar-cell.level-2 { background: color-mix(in srgb, var(--vscode-charts-green, var(--vscode-charts-blue)) 24%, transparent); }
+.calendar-cell.level-3 { background: color-mix(in srgb, var(--vscode-charts-green, var(--vscode-charts-blue)) 38%, transparent); }
+.calendar-cell.level-4 { background: color-mix(in srgb, var(--vscode-charts-green, var(--vscode-charts-blue)) 54%, transparent); }
+.calendar-cell.today .calendar-date { font-weight: 700; text-decoration: underline; }
+.calendar-cell.selected { outline: 2px solid var(--vscode-focusBorder); outline-offset: -2px; }
+.calendar-units { margin: 0; padding-left: 18px; font-size: 12px; }
+body.vscode-high-contrast .calendar-cell[class*="level-"]:not(.level-0), body.vscode-high-contrast-light .calendar-cell[class*="level-"]:not(.level-0) { border-style: dashed; }
 /* 動きを減らす設定では、アニメーションと遷移をすべて止める（スピナーは弧の形だけが残る） */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }

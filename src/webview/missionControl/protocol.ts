@@ -510,6 +510,62 @@ export interface McWorkUnit {
 /** 作業単位の並べ替えの基準。どれも多い順（`recent`は新しい順）。 */
 export type McWorkUnitSort = 'cost' | 'tokens' | 'usage' | 'sessions' | 'period' | 'recent';
 
+/** 作業履歴カレンダーの1日に記録のあったセッション1つ（Issue #2179）。 */
+export interface McCalendarSession {
+  provider: McProvider;
+  threadId: string;
+  /** 最後に記録されたタイトル（1行化済み）。無ければ空文字。 */
+  title: string;
+  issue?: number | undefined;
+  branch?: string | undefined;
+  /** その日の最初と最後の記録の時刻（ms）。 */
+  firstAt: number;
+  lastAt: number;
+  /** その日の最後の記録がセッションの終了（閉じた・ウィンドウの終了）か。 */
+  ended: boolean;
+  /** その日に終えたターンの数。 */
+  turns: number;
+  /** その日に使ったskill（1行化済み、名前順）。 */
+  skills: string[];
+  /** その日の費用・トークンの増分（累計値の差し引き）。記録が無ければ無い。 */
+  costUsd?: number | undefined;
+  tokens?: number | undefined;
+}
+
+/** 作業履歴カレンダーで使ったskill1つと、その日に使った回数。 */
+export interface McCalendarSkill {
+  name: string;
+  count: number;
+}
+
+/**
+ * 作業履歴カレンダーの1日（Issue #2179）。日の境目はローカル時刻の0時（`localDay`と同じ）。
+ * 費用・トークン・利用枠は`aggregateWorkUnits`をその日の範囲で呼んだ結果の合計。
+ */
+export interface McCalendarDay {
+  /** ローカル時刻の`YYYY-MM-DD`。 */
+  day: string;
+  sessionCount: number;
+  /** その日の作業単位（範囲をその日に絞った`aggregateWorkUnits`の結果）。 */
+  units: McWorkUnit[];
+  /** その日に使ったskill（回数の多い順）。 */
+  skills: McCalendarSkill[];
+  costUsd?: number | undefined;
+  tokens?: number | undefined;
+  /** 利用枠の消費の概算（provider・窓ごとに作業単位の分を合計。多い順）。 */
+  usage: McWorkUnitUsage[];
+  /** その日に記録のあった全セッション（閉じたものを含む。最初の記録の古い順）。 */
+  sessions: McCalendarSession[];
+}
+
+/** 作業履歴カレンダーの1か月分。記録の無い日は`days`に入れない。 */
+export interface McWorkCalendar {
+  year: number;
+  /** 1〜12。 */
+  month: number;
+  days: McCalendarDay[];
+}
+
 /** AskUserQuestionの質問1件（`SharedAskUserQuestion`と同じ形）。 */
 export interface McQuestion {
   question: string;
@@ -622,6 +678,8 @@ export type McHostMessage =
       history?: McHistoryItem[] | undefined;
       /** `workUnits`の応答（Issue #2177）。並べ替えはwebviewが行う。 */
       workUnits?: McWorkUnit[] | undefined;
+      /** `workCalendar`の応答（Issue #2179）。 */
+      calendar?: McWorkCalendar | undefined;
       /** `issueList`の応答（Issue #2150）。 */
       issues?: McIssueListing | undefined;
       /** run・roadmapの操作の結果の説明（Issue #2150）。 */
@@ -765,6 +823,8 @@ export type McWebviewMessage =
   | { type: 'historyOpen'; seq: number; provider: McProvider; threadId: string }
   /** 作業単位の集計（Issue #2177）。`days`は直近何日分か（0なら保持期間の全部）。 */
   | { type: 'workUnits'; seq: number; days: number }
+  /** 作業履歴カレンダーの1か月分（Issue #2179）。`month`は1〜12。 */
+  | { type: 'workCalendar'; seq: number; year: number; month: number }
   /** ライブtailの対象。`target`が無ければ止める。 */
   | { type: 'watch'; target?: McTarget | undefined }
   /** レビュー待ちの1ファイルをdiffエディタで開く（Issue #2138の1）。 */

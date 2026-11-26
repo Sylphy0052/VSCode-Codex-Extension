@@ -24,6 +24,7 @@ import type {
   McSnapshot,
   McTarget,
   McTurn,
+  McWorkCalendar,
   McWorkUnit,
 } from './protocol';
 
@@ -63,6 +64,7 @@ export interface ReplyResult {
   outcomes?: McLifecycleOutcome[] | undefined;
   history?: McHistoryItem[] | undefined;
   workUnits?: McWorkUnit[] | undefined;
+  calendar?: McWorkCalendar | undefined;
   issues?: McIssueListing | undefined;
   message?: string | undefined;
   attachments?: McAttachment[] | undefined;
@@ -94,6 +96,8 @@ export interface Bridge {
   historyOpen(provider: McProvider, threadId: string): Promise<ReplyResult>;
   /** 作業単位の集計を取り寄せる（Issue #2177）。`days`は直近何日分か（0なら全部）。 */
   workUnits(days: number): Promise<ReplyResult>;
+  /** 作業履歴カレンダーの1か月分を取り寄せる（Issue #2179）。`month`は1〜12。 */
+  workCalendar(year: number, month: number): Promise<ReplyResult>;
   /** レビュー待ちの1ファイルをdiffエディタで開かせる（Issue #2138の1）。 */
   openDiff(target: McTarget, path: string): Promise<ReplyResult>;
   /** レビュー待ちを「確認済み」にする。 */
@@ -223,6 +227,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
           outcomes: message.outcomes,
           history: message.history,
           workUnits: message.workUnits,
+          calendar: message.calendar,
           issues: message.issues,
           message: message.message,
           attachments: message.attachments,
@@ -309,6 +314,7 @@ export function createBridge(api: VsCodeApi, target: MessageTarget): Bridge {
     history: () => call({ type: 'history' }),
     historyOpen: (provider, threadId) => call({ type: 'historyOpen', provider, threadId }),
     workUnits: (days) => call({ type: 'workUnits', days }),
+    workCalendar: (year, month) => call({ type: 'workCalendar', year, month }),
     openDiff: (to, file) => call({ type: 'openDiff', ...targetOnly(to), path: file }),
     reviewAck: (to) => call({ type: 'reviewAck', ...targetOnly(to) }),
     resume: (to) => call({ type: 'resume', ...targetOnly(to) }),

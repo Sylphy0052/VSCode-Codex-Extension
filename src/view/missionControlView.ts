@@ -11,8 +11,10 @@ import type {
   McProvider,
   McSnapshot,
   McTarget,
+  McWorkCalendar,
   McWorkUnit,
 } from '../webview/missionControl/protocol';
+import { validCalendarMonth } from './workCalendar';
 import { MISSION_CONTROL_STYLES } from '../webview/missionControl/styles';
 import type { SessionControlResult } from './chatManagerBase';
 import { parseLaunchRequest, type McLaunchResult } from './missionControlLaunch';
@@ -111,6 +113,8 @@ export interface McSessionPort {
    * 全部）。並べ替えはwebviewが行う。
    */
   workUnits?(days: number): Promise<McWorkUnit[]>;
+  /** 作業履歴カレンダーの1か月分（Issue #2179）。`month`は1〜12。 */
+  workCalendar?(year: number, month: number): Promise<McWorkCalendar>;
 }
 
 /** 作業単位の集計で受け付ける日数の上限（保持期間の上限と同じ）。 */
@@ -354,6 +358,7 @@ export class MissionControlViewManager implements vscode.Disposable {
       case 'history':
       case 'historyOpen':
       case 'workUnits':
+      case 'workCalendar':
         this.handleSessions(m);
         return;
       case 'runOp':
@@ -511,6 +516,16 @@ export class MissionControlViewManager implements vscode.Disposable {
           return { ok: false, error: '作業単位の集計はこの画面では使えません' };
         }
         return { ok: true, workUnits: await port.workUnits(days) };
+      }
+      if (message.type === 'workCalendar') {
+        const { year, month } = message;
+        if (!validCalendarMonth(year, month)) {
+          return { ok: false, error: 'カレンダーの年月が正しくありません' };
+        }
+        if (port.workCalendar === undefined) {
+          return { ok: false, error: '作業履歴カレンダーはこの画面では使えません' };
+        }
+        return { ok: true, calendar: await port.workCalendar(year as number, month as number) };
       }
       if (message.type === 'historyOpen') {
         const { provider, threadId } = message;
