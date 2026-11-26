@@ -539,10 +539,14 @@ export function App(props: { bridge: Bridge }): JSX.Element {
   }, [selectedPendingId, detailKey]);
 
   // ライブtail（Issue #2137の3）。詳細で選んでいるセッションを拡張ホストへ伝え、届いた
-  // やり取りで差し替える。取り直しの間隔・止めどきは拡張ホストが持つ
+  // やり取りで差し替える。取り直しの間隔・止めどきは拡張ホストが持つ。
+  // 詳細ペインはSessionsタブにしか無い。Runsタブの間も伝えたままだと、拡張ホストは表示中と
+  // みなして返事待ちを既読にしてしまう（Issue #2171）ので、Sessionsタブの間だけ伝える
+  const watchTarget = tab === 'sessions' ? detailTarget : undefined;
+  const watchKey = watchTarget === undefined ? undefined : targetKey(watchTarget);
   useEffect(() => {
-    bridge.watch(detailTarget);
-  }, [detailKey]);
+    bridge.watch(watchTarget);
+  }, [watchKey]);
   useEffect(() => {
     const off = bridge.onLiveTurns((live) => {
       const key = targetKey(live.target);
