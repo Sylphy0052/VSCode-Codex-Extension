@@ -284,6 +284,8 @@ export class WorkHistoryRecorder {
         label: w.label,
         usedPercent: w.usedPercent,
         resetsAt: w.resetsAt,
+        windowMs: w.windowMs,
+        sampledAt: w.sampledAt,
         limited: w.limited,
       })),
       capturedAt: source.capturedAt,

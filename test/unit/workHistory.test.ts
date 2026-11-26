@@ -242,6 +242,32 @@ describe('WorkHistoryRecorder: 利用枠', () => {
       windows: [{ label: '週次', usedPercent: 40, resetsAt: NOW + DAY, limited: false }],
     });
   });
+
+  it('窓の長さと使用率の計測時刻（Issue #2174）も残す', async () => {
+    const r = recorder();
+    const sampledAt = NOW - 120_000;
+    r.observeUsage({
+      claude: {
+        windows: [
+          {
+            label: '5時間',
+            usedPercent: 42,
+            resetsAt: NOW + 3_600_000,
+            windowMs: 5 * 3_600_000,
+            sampledAt,
+            limited: false,
+            stale: false,
+          },
+        ],
+        capturedAt: sampledAt,
+      },
+    });
+    await store.flush();
+    const [record] = await readWorkHistory(dir, { kind: 'usage' });
+    expect(record).toMatchObject({
+      windows: [{ label: '5時間', windowMs: 5 * 3_600_000, sampledAt }],
+    });
+  });
 });
 
 describe('保持期間', () => {
@@ -255,6 +281,18 @@ describe('保持期間', () => {
     expect(await recorder(5).pruneIfDue(true)).toBe(1);
     expect((await sessionRecords()).map((rec) => rec.threadId)).toEqual(['mid', 'new']);
     expect(await readdir(join(dir, WORK_HISTORY_DIR_NAME))).toHaveLength(2);
+  });
+
+  it('記録の日付の名前に戻らないファイル（月日0・2桁年など）は消さない', async () => {
+    const historyDir = join(dir, WORK_HISTORY_DIR_NAME);
+    await mkdir(historyDir, { recursive: true });
+    const odd = ['2026-00-00.jsonl', '0050-01-01.jsonl', '2026-13-45.jsonl', 'notes.txt'];
+    for (const name of odd) {
+      await writeFile(join(historyDir, name), '');
+    }
+    await store.append([startRecord(NOW - 10 * DAY, 'old')]);
+    expect(await recorder(5).pruneIfDue(true)).toBe(1);
+    expect((await readdir(historyDir)).sort()).toEqual([...odd].sort());
   });
 
   it('複数のウィンドウが同時に消しても失敗にしない', async () => {

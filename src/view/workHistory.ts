@@ -103,6 +103,13 @@ export interface WorkHistoryUsageWindow {
   usedPercent?: number | undefined;
   /** リセット時刻（ms）。 */
   resetsAt?: number | undefined;
+  /** 窓の長さ（ms。Issue #2174の`McUsageWindow.windowMs`）。長さが決まらない窓では無い。 */
+  windowMs?: number | undefined;
+  /**
+   * 使用率を計測した時刻（ms。Issue #2174の`McUsageWindow.sampledAt`）。推移は`at`ではなく
+   * この時刻で並べる（同じ計測値が後の通知で何度も書かれるため）。分からなければ無い。
+   */
+  sampledAt?: number | undefined;
   limited: boolean;
 }
 
@@ -242,6 +249,10 @@ function normalizeUsageRecord(
     if (usedPercent !== undefined) window.usedPercent = usedPercent;
     const resetsAt = finiteOrUndefined(w.resetsAt);
     if (resetsAt !== undefined) window.resetsAt = resetsAt;
+    const windowMs = finiteOrUndefined(w.windowMs);
+    if (windowMs !== undefined && windowMs > 0) window.windowMs = windowMs;
+    const sampledAt = finiteOrUndefined(w.sampledAt);
+    if (sampledAt !== undefined) window.sampledAt = sampledAt;
     windows.push(window);
   }
   if (windows.length === 0) {
@@ -265,14 +276,19 @@ export function dayFileName(at: number): string {
   return `${String(d.getFullYear())}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}.jsonl`;
 }
 
-/** ファイル名の日付の0時（ローカル時刻、ms）。日付のファイルでなければ`undefined`。 */
+/**
+ * ファイル名の日付の0時（ローカル時刻、ms）。日付のファイルでなければ`undefined`。
+ * `dayFileName`が作る名前に戻らないもの（`2026-00-00`・`0050-01-01`など。`Date`は月日を
+ * 繰り上げ、0〜99年を1900年代として読む）も日付のファイルとみなさず、消さない・読まない。
+ */
 function dayStartOf(fileName: string): number | undefined {
   const m = DAY_FILE_PATTERN.exec(fileName);
   if (m === null) {
     return undefined;
   }
   const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  return Number.isNaN(d.getTime()) ? undefined : d.getTime();
+  const start = d.getTime();
+  return Number.isNaN(start) || dayFileName(start) !== fileName ? undefined : start;
 }
 
 /** 保持の境目（ms）。これより前の記録は消す・読まない。 */
