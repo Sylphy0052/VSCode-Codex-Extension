@@ -93,10 +93,50 @@ export function filterSessions(
       matchesBase(session, filter) &&
       (filter.activity === undefined || session.activity === filter.activity) &&
       matchesQuery(
-        [session.title, session.cwdLabel, repoLabelOf(repos, session.repoKey)],
+        [
+          session.title,
+          session.cwdLabel,
+          repoLabelOf(repos, session.repoKey),
+          session.purpose ?? '',
+        ],
         filter.query,
       ),
   );
+}
+
+/** 似た要約かどうかを見比べるための形。空白・記号の違いと大文字小文字を無視する。 */
+function purposeFingerprint(purpose: string): string {
+  return purpose.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+}
+
+/**
+ * カードと詳細ペインに出す目的の1文（Issue #2172）を、セッションのkeyごとに返す。要約が無い
+ * セッションは載せない。同じ（空白・記号を除いて一致する）要約が2件以上並ぶときは、
+ * ブランチ名が分かるものに限って`（ブランチ名）`を添えて見分けられるようにする。
+ */
+export function purposeLabels(
+  sessions: readonly Pick<McSession, 'key' | 'purpose' | 'branch'>[],
+): Map<string, string> {
+  const counts = new Map<string, number>();
+  for (const session of sessions) {
+    if (session.purpose !== undefined && session.purpose !== '') {
+      const fp = purposeFingerprint(session.purpose);
+      counts.set(fp, (counts.get(fp) ?? 0) + 1);
+    }
+  }
+  const labels = new Map<string, string>();
+  for (const session of sessions) {
+    const { purpose, branch } = session;
+    if (purpose === undefined || purpose === '') {
+      continue;
+    }
+    const similar = (counts.get(purposeFingerprint(purpose)) ?? 0) > 1;
+    labels.set(
+      session.key,
+      similar && branch !== undefined && branch !== '' ? `${purpose}（${branch}）` : purpose,
+    );
+  }
+  return labels;
 }
 
 /** 状態ごとのセッション数（Railの「状態」一覧用。状態以外の絞り込みは掛けて数える）。 */

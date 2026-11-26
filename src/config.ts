@@ -75,6 +75,7 @@ import { DEFAULT_ADVISOR_IDLE_TIMEOUT_MS } from './secondOpinion/advisorSession'
 import { DEFAULT_TURN_SUMMARY_INSTRUCTION, type TurnSummaryConfig } from './view/turnSummary';
 import { DEFAULT_PROS_CONS_INSTRUCTION, type ProsConsConfig } from './view/prosCons';
 import type { EndSummarySettings } from './view/endSummary';
+import type { SessionPurposeSettings } from './view/sessionPurpose';
 import {
   DEFAULT_LOOP_ENGINEERING_CONTINUE_INSTRUCTION,
   DEFAULT_LOOP_ENGINEERING_INITIAL_INSTRUCTION,
@@ -540,6 +541,20 @@ export function readChatEndSummaryConfig(): EndSummarySettings {
     provider: normalizeEvaluatorProvider(c.get<string>('chat.endSummary.provider')),
     model: str(c, 'chat.endSummary.model', 'auto'),
     effort: str(c, 'chat.endSummary.effort', 'low'),
+  };
+}
+
+/**
+ * セッションの目的の1文要約（`agent.missionControl.sessionPurpose.enabled`、Issue #2172）。
+ * 既定は有効（`package.json`の既定値`true`をVS Codeが返す）。値が読めないとき（`true`以外）は
+ * 追加のCLIを起動しない側へ倒す。起動するCLI・model・effortは要約エージェントの設定に従う。
+ */
+export function readSessionPurposeConfig(): SessionPurposeSettings {
+  const c = vscode.workspace.getConfiguration('agent');
+  const { provider, model, effort } = readChatEndSummaryConfig();
+  return {
+    enabled: c.get<boolean>('missionControl.sessionPurpose.enabled') === true,
+    runner: { provider, model, effort },
   };
 }
 

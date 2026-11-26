@@ -22,6 +22,7 @@ import {
   generateWindowId,
   isSharedApprovalDecision,
   isSharedHandoffDecision,
+  MAX_SHARED_PURPOSE_CHARS,
   SessionHubReader,
   SessionHubRequestPort,
   SessionHubRequestWatcher,
@@ -387,6 +388,25 @@ describe('SessionHubReader', () => {
     expect(sessions[1]?.taskManaged).toBeUndefined();
     expect(sessions[1]?.handoffKept).toBeUndefined();
     expect(sessions[1]?.unread).toBeUndefined();
+  });
+
+  it('目的の要約とブランチ名は1行へ畳んで長さを切り、文字列以外は落とす（Issue #2172）', async () => {
+    const { reader, internals } = makeReader();
+    const other = randomUUID();
+    await putSessionFile(
+      other,
+      fileBody(other, [
+        session('ok', { purpose: `行1\n行2${'あ'.repeat(200)}`, branch: 'feature/1/x' }),
+        session('junk', { purpose: 1, branch: '  ' } as never),
+      ]),
+    );
+    await internals.reconcileAll();
+    const sessions = reader.getOthers()[0]?.sessions ?? [];
+    expect(sessions[0]?.purpose?.startsWith('行1 行2')).toBe(true);
+    expect(sessions[0]?.purpose?.length).toBe(MAX_SHARED_PURPOSE_CHARS);
+    expect(sessions[0]?.branch).toBe('feature/1/x');
+    expect(sessions[1]?.purpose).toBeUndefined();
+    expect(sessions[1]?.branch).toBeUndefined();
   });
 
   it('stale（mtimeまたはupdatedAtが45秒超）のウィンドウは除外する', async () => {

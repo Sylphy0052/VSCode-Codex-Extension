@@ -1012,6 +1012,12 @@
           "scope": "window",
           "markdownDescription": "Mission Controlで、返事待ち（通常のチャットのターンが終わって人の指示を待っている状態）がこの分数を超えたセッションを色と破線で強調する（Issue #2171）。オーケストレータ配下のセッションと、引き継ぎ後に残った旧タブは返事待ちに数えない。範囲外の値と数値でない値は既定の30へ丸める。"
         },
+        "agent.missionControl.sessionPurpose.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "markdownDescription": "利用者の発話（最初の1件と直近の3件）から、セッションの目的を別のAIに1文で要約させ、Mission Controlのカードと詳細ペインに出す（Issue #2172）。呼び出しはターンが終わるたびに最大1回で、発話が前回より増えたときだけ。1つの会話で呼ぶのは10回まで。起動するCLI・model・effortは `agent.chat.endSummary.provider` / `model` / `effort` に従う（`agent.chat.endSummary.enabled` は見ない）。送る前に資格情報らしい文字列を伏せる。ループ・ワークフロー（オーケストレータ配下）・自動返信の実行中は動かない。OFFにすると追加のCLIを起動しない。"
+        },
         "agent.sessionAutoName.enabled": {
           "type": "boolean",
           "default": true,
