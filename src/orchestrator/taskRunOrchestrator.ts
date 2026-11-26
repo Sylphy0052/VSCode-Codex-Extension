@@ -1919,7 +1919,8 @@ export function buildIntroPrompt(
             'タスクの完了前）、またはrunFinishedを受けたときに記録する',
         ]),
     '- runの目的（goal）と完了条件はget_run_stateに出る。完了条件はmergeのたびに照らす拠り所になる。' +
-      `ユーザーが会話で目的を示したとき、今のgoalが無い・観測できない・実態と合わないと分かったときは、set_goalで直す（reasonに理由を書く）。${GOAL_CRITERIA_GUIDANCE}`,
+      `ユーザーが会話で目的を示したとき、今のgoalが無い・観測できない・実態と合わないと分かったときは、set_goalで直す（reasonに理由を書く）。${GOAL_CRITERIA_GUIDANCE}。` +
+      '完了条件を緩める・外す修正は受入基準を下げる判断なので、ユーザーが会話で示したとき以外は先にユーザーへ確かめる',
     ...(run.roadmap === undefined ? [] : buildRoadmapLines(run.roadmap.issueNumber)),
     ...(run.optimizeRequest === undefined ? [] : buildOptimizeRequestLines(run)),
     '',

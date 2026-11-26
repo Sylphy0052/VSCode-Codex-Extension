@@ -38,6 +38,8 @@ const hoisted = vi.hoisted(() => {
       finishRun: fn(),
       suspendRun: fn(),
       resumeRun: fn(),
+      findRoadmapRun: fn(),
+      setGoal: fn(),
     },
     orchestrator: {
       canDecide: fn(),
@@ -1229,6 +1231,26 @@ describe('コマンド: agent.taskRun.startFromRoadmap', () => {
       'オーケストレータモード: フォルダを開いてから実行してください',
     ]);
     expect(hoisted.startRoadmapRunCommand).not.toHaveBeenCalled();
+  });
+
+  it('チャットからの起動コマンドは不正なgoalを断り、runに触れない（Issue #2193）', async () => {
+    __mock.setWorkspaceFolder(ROOT);
+    setup();
+    // 断るときは同期で返すので、Promiseでくるんで受ける
+    const handler = command('agent.taskRun.startRoadmapFromChat') as (raw: unknown) => unknown;
+    const start = (raw: unknown): Promise<unknown> => Promise.resolve(handler(raw));
+    const base = { folder: ROOT, engine: 'claude', issueNumber: 1, reason: '起動' };
+    for (const goal of [
+      '目的だけの文字列',
+      { objective: '目的' },
+      { objective: 'あ'.repeat(501), completionCriteria: '条件' },
+      { objective: '😀'.repeat(251), completionCriteria: '条件' },
+      { objective: ' \n ', completionCriteria: '条件' },
+    ]) {
+      await expect(start({ ...base, goal })).resolves.toMatchObject({ accepted: false });
+    }
+    expect(fakes.controller.findRoadmapRun).not.toHaveBeenCalled();
+    expect(fakes.controller.setGoal).not.toHaveBeenCalled();
   });
 
   it('Issue番号を検証して渡す（正の安全な整数だけ）', async () => {

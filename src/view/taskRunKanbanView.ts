@@ -1024,7 +1024,7 @@ const script = `
       const goalEl = el('span', 'status', goalText + (goal.revisionCount > 0 ? '（' + goal.revisionCount + '回修正）' : ''));
       goalEl.title = [goalText].concat(goal.revisions.map(function (r) {
         const at = new Date(r.at);
-        return (isNaN(at.getTime()) ? r.at : at.toLocaleString()) + ' 修正の理由: ' + r.reason;
+        return (isNaN(at.getTime()) ? r.at : at.toLocaleString()) + ' 修正の理由: ' + r.reason + '（直す前: ' + r.previous + '）';
       })).join(String.fromCharCode(10));
       controls.appendChild(goalEl);
     }

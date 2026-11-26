@@ -98,6 +98,28 @@ describe('parseGoalInput', () => {
       ).ok,
     ).toBe(true);
   });
+
+  it('サロゲートペアの文は切り詰めずに長さを確かめ、受け付けた文は片割れを残さない', () => {
+    // 501個の絵文字（1002コード単位）は、先に切ると252コードポイントに縮んで通ってしまっていた
+    expect(
+      parseGoalInput({ objective: '😀'.repeat(501), completionCriteria: 'x' }, 'start').ok,
+    ).toBe(false);
+    expect(
+      parseGoalInput({ objective: '😀'.repeat(251), completionCriteria: 'x' }, 'start').ok,
+    ).toBe(false);
+    const accepted = parseGoalInput(
+      { objective: '😀'.repeat(GOAL_TEXT_MAX_LENGTH / 2), completionCriteria: 'x' },
+      'start',
+    );
+    expect(accepted).toEqual({
+      ok: true,
+      value: {
+        objective: '😀'.repeat(GOAL_TEXT_MAX_LENGTH / 2),
+        completionCriteria: 'x',
+        source: 'start',
+      },
+    });
+  });
 });
 
 describe('extractRoadmapGoal', () => {
@@ -272,8 +294,32 @@ describe('set_goal（Issue #2193）', () => {
       objective: '後',
       completionCriteria: '後の条件',
       revisionCount: 1,
-      revisions: [{ reason: '観測できる条件にした', at: '2026-11-26T01:00:00.000Z' }],
+      revisions: [
+        {
+          reason: '観測できる条件にした',
+          at: '2026-11-26T01:00:00.000Z',
+          previous: '目的: 前 / 完了条件: 前の条件',
+        },
+      ],
     });
+  });
+
+  it('記録のpreviousが壊れた保存データでも、get_run_stateとKanbanは落ちず前はgoalなしと読む', () => {
+    const run = makeRun({
+      goal: { objective: '今', completionCriteria: '今の条件', source: 'orchestrator' },
+      goalRevisions: [
+        { reason: 'nullのprevious', at: '2026-11-26T01:00:00.000Z', previous: null },
+        { reason: '数値のobjective', at: '2026-11-26T02:00:00.000Z', previous: { objective: 5 } },
+      ] as unknown as NonNullable<TaskRun['goalRevisions']>,
+    });
+    expect(readTaskRunGoalRevisions(run)).toEqual([
+      { reason: 'nullのprevious', at: '2026-11-26T01:00:00.000Z' },
+      { reason: '数値のobjective', at: '2026-11-26T02:00:00.000Z' },
+    ]);
+    const { text } = formatTaskRunState(run, none);
+    expect(text).toContain('理由: 数値のobjective（前はgoalなし）');
+    const kanban = buildTaskRunKanban([run], 'run-1', ['/ws']).run?.goal;
+    expect(kanban?.revisions.map((r) => r.previous)).toEqual(['なし', 'なし']);
   });
 
   it('記録は上限の件数まで残す', () => {

@@ -7,7 +7,7 @@ import { sanitizeInlineText } from './untrustedText';
  * 読む側は`readTaskRunGoal`を通し、壊れた保存データと以前の版の固定文を目的なしとして扱う。
  */
 
-/** 目的・完了条件それぞれの長さの上限（コードポイント数）。 */
+/** 目的・完了条件それぞれの長さの上限（UTF-16のコード単位数。`sanitizeInlineText`と同じ数え方）。 */
 export const GOAL_TEXT_MAX_LENGTH = 500;
 /** `set_goal`の理由の長さの上限。 */
 export const GOAL_REASON_MAX_LENGTH = 300;
@@ -55,7 +55,7 @@ export function isLegacyFixedGoal(goal: unknown): boolean {
  * runのgoalを読む。項目が無い・形が壊れている・以前の版の固定文なら`undefined`。
  * 文は保存前に均してあるが、壊れた保存データに備えてもう一度均す。
  */
-export function readTaskRunGoal(run: Pick<TaskRun, 'goal'>): TaskRunGoal | undefined {
+export function readTaskRunGoal(run: { readonly goal?: unknown }): TaskRunGoal | undefined {
   const raw: unknown = run.goal;
   if (!isPlainRecord(raw) || typeof raw.objective !== 'string' || isLegacyFixedGoal(raw)) {
     return undefined;
@@ -87,10 +87,14 @@ export function readTaskRunGoalRevisions(
   if (!Array.isArray(raw)) {
     return [];
   }
-  return raw.filter(
-    (r): r is TaskRunGoalRevision =>
-      isPlainRecord(r) && typeof r.reason === 'string' && typeof r.at === 'string',
-  );
+  return raw.flatMap((r: unknown): TaskRunGoalRevision[] => {
+    if (!isPlainRecord(r) || typeof r.reason !== 'string' || typeof r.at !== 'string') {
+      return [];
+    }
+    // 直す前のgoalも形を確かめて読み直す。壊れていれば前はgoalなしとして扱う
+    const previous = readTaskRunGoal({ goal: r.previous });
+    return [{ reason: r.reason, at: r.at, ...(previous === undefined ? {} : { previous }) }];
+  });
 }
 
 export type GoalInputResult =
@@ -115,13 +119,16 @@ export function parseGoalInput(raw: unknown, source: TaskRunGoalSource): GoalInp
   if (typeof objective !== 'string' || typeof completionCriteria !== 'string') {
     return invalid;
   }
-  const o = inlineGoalText(objective, GOAL_TEXT_MAX_LENGTH + 1);
-  const c = inlineGoalText(completionCriteria, GOAL_TEXT_MAX_LENGTH + 1);
+  // 切り詰めずに均してから長さを確かめる。`sanitizeInlineText`はUTF-16のコード単位で切るため、
+  // 先に切ると上限を超えた入力が通り、サロゲートペアの片割れが残る。上限もコード単位で数え、
+  // 表示側の`sanitizeInlineText(…, GOAL_TEXT_MAX_LENGTH)`が受け付けた文を切らないようにする
+  const o = inlineGoalText(objective, Number.MAX_SAFE_INTEGER);
+  const c = inlineGoalText(completionCriteria, Number.MAX_SAFE_INTEGER);
   if (
     o === undefined ||
     c === undefined ||
-    [...o].length > GOAL_TEXT_MAX_LENGTH ||
-    [...c].length > GOAL_TEXT_MAX_LENGTH
+    o.length > GOAL_TEXT_MAX_LENGTH ||
+    c.length > GOAL_TEXT_MAX_LENGTH
   ) {
     return invalid;
   }
