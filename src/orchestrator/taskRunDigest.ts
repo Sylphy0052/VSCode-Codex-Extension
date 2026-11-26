@@ -154,6 +154,12 @@ export function formatUnsettledSceneLines(
 }
 
 /**
+ * taskIdsで返す残った指摘の件数の上限。報告は1件1000文字・50件まで受け付けるため、全件を載せると
+ * 1タスクだけで`get_run_state`の本文の上限を超え、そのタスクがtaskIdsで指定しても毎回省かれる。
+ */
+export const MAX_DETAIL_FINDINGS = 20;
+
+/**
  * タスクの工程の要約・reviewの結果の全項目（`get_run_state`でtaskIdsを指定したとき）。
  * 外部由来の文はすべて`sanitizeInlineText`で1行に均す。呼び出し側は一覧ごと`formatUntrusted`で囲む。
  */
@@ -174,8 +180,12 @@ export function formatTaskResultDetailLines(task: OrchestratedTask, maxLength: n
   lines.push(`    reviewの要約: ${sanitizeInlineText(review.summary, maxLength)}`);
   if (review.remainingFindings.length > 0) {
     lines.push('    残った指摘:');
-    for (const finding of review.remainingFindings) {
+    for (const finding of review.remainingFindings.slice(0, MAX_DETAIL_FINDINGS)) {
       lines.push(`      - ${sanitizeInlineText(finding, maxLength)}`);
+    }
+    const rest = review.remainingFindings.length - MAX_DETAIL_FINDINGS;
+    if (rest > 0) {
+      lines.push(`      - ほか${String(rest)}件`);
     }
   }
   const scenes = formatUnsettledSceneLines(review, '      - ', maxLength);

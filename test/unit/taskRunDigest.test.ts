@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { digestLedger, MAX_DIGEST_SCENES } from '../../src/secondOpinion/ledger';
 import { mergeReviewBody } from '../../src/orchestrator/taskRunOrchestrator';
 import { formatTaskRunState } from '../../src/orchestrator/taskRunOrchestratorTools';
-import { tallyTaskRun } from '../../src/orchestrator/taskRunDigest';
+import { MAX_DETAIL_FINDINGS, tallyTaskRun } from '../../src/orchestrator/taskRunDigest';
 import {
   approveTaskPlan,
   completeStage,
@@ -315,6 +315,49 @@ describe('get_run_stateへの表示（Issue #2192）', () => {
     const { text } = formatTaskRunState(run, none);
     expect(text).toContain('review: 合格 / 残った指摘0件 / 台帳: なし');
     expect(text).toContain('台帳なし1件');
+  });
+
+  it('追加前に保存したrun（stageSummaries・ledgerが無い）でも壊れず、「台帳: 未集計」と出す', () => {
+    const fresh = implementAndReview(makeRun(), 'T1', {
+      summary: LEDGER,
+      remainingFindings: ['残り'],
+      passed: false,
+    });
+    // 保存済みのJSONから項目を消して、追加前の形を作る
+    const run = JSON.parse(JSON.stringify(fresh)) as TaskRun;
+    const t1 = task(run) as { stageSummaries?: unknown; review?: { ledger?: unknown } };
+    delete t1.stageSummaries;
+    delete t1.review?.ledger;
+    expect(task(run).stageSummaries).toBeUndefined();
+    expect(task(run).review?.ledger).toBeUndefined();
+    expect(tallyTaskRun(run)).toMatchObject({
+      reviewedTaskCount: 1,
+      remainingFindingCount: 1,
+      unsettledSceneCount: 0,
+      missingLedgerCount: 0,
+    });
+    const { text } = formatTaskRunState(run, none);
+    expect(text).toContain('review: 不合格 / 残った指摘1件 / 台帳: 未集計');
+    expect(text).not.toContain('工程の要約あり');
+    const detail = formatTaskRunState(run, none, [], { full: false, taskIds: ['T1'] }).text;
+    expect(detail).toContain('- T1 タスクT1');
+    expect(detail).not.toContain('工程の要約 ');
+    expect(mergeReviewBody(run, task(run), 'T1 タスクT1')).toContain(
+      'このタスクのreview: 不合格 / 残った指摘1件 / 台帳: 未集計',
+    );
+  });
+
+  it('taskIdsの残った指摘は上限の件数で切り、本文の上限でタスクごと省かれない', () => {
+    const big = 'あ'.repeat(MAX_STORED_STAGE_SUMMARY_LENGTH);
+    const run = implementAndReview(makeRun(), 'T1', {
+      summary: `${big}\n${LEDGER}`,
+      remainingFindings: Array.from({ length: 50 }, (_, i) => `${String(i)}${'う'.repeat(999)}`),
+      passed: false,
+    });
+    const { text } = formatTaskRunState(run, none, [], { full: false, taskIds: ['T1'] });
+    expect(text).not.toContain('省いたタスク');
+    expect(text).toContain('- T1 タスクT1');
+    expect(text).toContain(`- ほか${String(50 - MAX_DETAIL_FINDINGS)}件`);
   });
 });
 
