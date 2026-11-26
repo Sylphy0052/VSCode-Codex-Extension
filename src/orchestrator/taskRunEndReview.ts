@@ -181,6 +181,13 @@ export type EndReviewVerdict =
       readonly reason: string;
     };
 
+/**
+ * 判定全体（順番待ちを含む）の期限。`judge`の時間切れはCLIの実行にしか掛からず、背景の優先度の
+ * 要求は順番待ちで後回し・打ち切り後の並び直しが続くと際限なく待つ。終了レビューは判定を待ってから
+ * 送るので、期限を過ぎたら「判定なし」で送る。
+ */
+export const END_REVIEW_JUDGE_DEADLINE_MS = 180_000;
+
 /** 判定の入力の文の長さの上限。 */
 const JUDGE_TEXT_MAX_LENGTH = 300;
 /** 判定へ渡すタスクの件数の上限。`judge`の入力の上限（20000文字）に収める。 */
@@ -244,46 +251,52 @@ function goalForSituation(goal: TaskRunGoal): string {
 }
 
 /**
- * 終了レビューのReflex判定を1回走らせる。goalが無ければ判定しない。例外を投げず、失敗は
- * `unavailable`で返す。
+ * 終了レビューのReflex判定を1回走らせる。goalが無ければ判定しない。例外を投げず、失敗と
+ * 期限切れ（`deadlineMs`、順番待ちを含む）は`unavailable`で返す。
  */
 export async function judgeEndReview(
   deps: ReflexJudgeDeps,
   run: TaskRun,
   threshold: number = END_REVIEW_JUDGE_THRESHOLD,
+  deadlineMs: number = END_REVIEW_JUDGE_DEADLINE_MS,
 ): Promise<EndReviewVerdict> {
   const goal = readTaskRunGoal(run);
   if (goal === undefined) {
     return { kind: 'skipped' };
   }
+  const deadline = AbortSignal.timeout(deadlineMs);
+  const signal = deps.signal === undefined ? deadline : AbortSignal.any([deps.signal, deadline]);
   try {
-    const answers = await judge(deps, {
-      caller: '終了レビュー',
-      priority: 'background',
-      situation:
-        'AIエージェントのオーケストレーターが、承認済みの計画のタスクをすべて終えた。runの目的を達成したかを判断したい。' +
-        goalForSituation(goal),
-      state: buildEndReviewJudgeState(run),
-      questions: [
-        {
-          kind: 'noul',
-          question:
-            'mergeしたPRとreviewの結果、集計から判断して、完了条件は満たされているか。タスクを消化したことだけを根拠にしない。',
-        },
-        {
-          kind: 'choice',
-          question: [
-            '完了条件を満たしたと言うのに最も足りていない点はどれか。',
-            `「${GAP_NONE}」は根拠が揃っている。`,
-            `「${GAP_PARTIAL}」は条件の一部だけを満たしている。`,
-            `「${GAP_NOT_VERIFIED}」は未実測の場面が残り確かめきれていない。`,
-            `「${GAP_FINDINGS}」はreviewで直していない指摘が残っている。`,
-            `「${GAP_NO_BASIS}」はPRにもreviewにも満たした根拠が無い。`,
-          ].join(''),
-          options: GAP_OPTIONS,
-        },
-      ],
-    });
+    const answers = await judge(
+      { ...deps, signal },
+      {
+        caller: '終了レビュー',
+        priority: 'background',
+        situation:
+          'AIエージェントのオーケストレーターが、承認済みの計画のタスクをすべて終えた。runの目的を達成したかを判断したい。' +
+          goalForSituation(goal),
+        state: buildEndReviewJudgeState(run),
+        questions: [
+          {
+            kind: 'noul',
+            question:
+              'mergeしたPRとreviewの結果、集計から判断して、完了条件は満たされているか。タスクを消化したことだけを根拠にしない。',
+          },
+          {
+            kind: 'choice',
+            question: [
+              '完了条件を満たしたと言うのに最も足りていない点はどれか。',
+              `「${GAP_NONE}」は根拠が揃っている。`,
+              `「${GAP_PARTIAL}」は条件の一部だけを満たしている。`,
+              `「${GAP_NOT_VERIFIED}」は未実測の場面が残り確かめきれていない。`,
+              `「${GAP_FINDINGS}」はreviewで直していない指摘が残っている。`,
+              `「${GAP_NO_BASIS}」はPRにもreviewにも満たした根拠が無い。`,
+            ].join(''),
+            options: GAP_OPTIONS,
+          },
+        ],
+      },
+    );
     const met = noulAnswer(answers?.[0]);
     if (met === undefined) {
       return { kind: 'unavailable' };

@@ -269,6 +269,20 @@ describe('終了レビューのReflex判定（Issue #2194）', () => {
     expect(formatEndReviewVerdictLine({ kind: 'unavailable' })).toContain('判定なし');
   });
 
+  it('順番待ちで期限を過ぎたら判定を打ち切り、判定なしで返す', async () => {
+    let received: AbortSignal | undefined;
+    // 実物の順番待ちと同じく、打ち切りの信号が来るまで返らない
+    judgeMock.mockImplementationOnce(
+      (d) =>
+        new Promise((resolve) => {
+          received = d.signal;
+          d.signal?.addEventListener('abort', () => resolve(undefined), { once: true });
+        }),
+    );
+    expect(await judgeEndReview(deps, withGoal, undefined, 20)).toEqual({ kind: 'unavailable' });
+    expect(received?.aborted).toBe(true);
+  });
+
   it('判定の状態の外部由来の文は1行に均す', () => {
     const run = finishedRun({
       tasks: {
