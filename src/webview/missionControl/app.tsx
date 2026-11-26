@@ -61,6 +61,8 @@ import {
   needsApprovalDetail,
   PENDING_KIND_LABELS,
   purposeLabels,
+  recentSkillNames,
+  formatSkillTime,
   reconcileSelection,
   type McCardStatus,
   type McDensity,
@@ -108,6 +110,7 @@ import type {
   McRunTaskOp,
   McResumeItem,
   McSession,
+  McSkillUse,
   McSnapshot,
   McTarget,
 } from './protocol';
@@ -2121,6 +2124,8 @@ function SessionRow(props: {
   const status: McCardStatus = cardStatus(session, props.now, props.stallMs, props.replyWaitMs);
   const attention = needsAttention(session);
   const facts = sessionFacts(session);
+  // 直近に起動したskill（Issue #2173）
+  const recentSkills = recentSkillNames(session.skills);
   const classes = [
     'row',
     'session-row',
@@ -2166,6 +2171,11 @@ function SessionRow(props: {
         </span>
       )}
       {facts.length === 0 ? null : <span class="row-facts">{facts.join(' · ')}</span>}
+      {recentSkills.length === 0 ? null : (
+        <span class="row-skills" title={`直近のskill（新しい順）: ${recentSkills.join(', ')}`}>
+          skill: {recentSkills.join(' ← ')}
+        </span>
+      )}
       {session.lastOutput === undefined ? null : (
         <span class="row-out" title={session.lastOutput}>
           {session.lastOutput}
@@ -2330,6 +2340,31 @@ function PendingDetail(props: {
   );
 }
 
+/** セッションで起動したskillを時刻つきで古い順に全件出す（Issue #2173）。無ければ何も出さない。 */
+function SkillTimeline(props: {
+  skills: readonly McSkillUse[] | undefined;
+  now: number;
+}): JSX.Element | null {
+  const skills = props.skills ?? [];
+  if (skills.length === 0) {
+    return null;
+  }
+  return (
+    <div class="detail-skills">
+      <h3>
+        使ったskill <span class="count">{String(skills.length)}</span>
+      </h3>
+      <ol>
+        {skills.map((skill, index) => (
+          <li key={`${String(skill.at)}:${String(index)}`}>
+            <span class="muted">{formatSkillTime(skill.at, props.now)}</span> {skill.name}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function SessionDetail(props: {
   session: McSession;
   /** 目的の1文要約（Issue #2172）。 */
@@ -2371,6 +2406,7 @@ function SessionDetail(props: {
           <span class="muted">目的:</span> {props.purpose}
         </p>
       )}
+      <SkillTimeline skills={session.skills} now={props.now} />
       <SessionActions
         session={session}
         onSessionAction={props.onSessionAction}

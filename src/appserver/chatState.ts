@@ -163,6 +163,12 @@ export interface ChatItem {
    * で拒否されることを実測で確認した（design.md §14.23）。表示にのみ使う。
    */
   processId?: string | undefined;
+  /**
+   * skillを起動した時刻（ms、Issue #2173）。Claude Codeの`skillContext`のうち、起動そのものに
+   * 当たる項目だけが持つ。圧縮後にCLIが付け直すSkill注入（transcriptの`invoked_skills`）には
+   * 付けない（同じ起動を二重に数えないため）。Mission Controlのskill履歴だけが使う。
+   */
+  skillLaunchedAt?: number | undefined;
 }
 
 /**

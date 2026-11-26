@@ -19,10 +19,13 @@ import type { Logger } from '../../src/log';
 import { readTurnPage } from '../../src/view/chatManagerBase';
 import { parseAction } from '../../src/view/sessionControlMessage';
 import {
+  collectSkillUses,
   generateWindowId,
+  MAX_SHARED_SKILLS,
   isSharedApprovalDecision,
   isSharedHandoffDecision,
   MAX_SHARED_PURPOSE_CHARS,
+  parseSharedSkills,
   SessionHubReader,
   SessionHubRequestPort,
   SessionHubRequestWatcher,
@@ -167,6 +170,63 @@ describe('補助関数', () => {
     }
     expect(isSharedHandoffDecision('abort')).toBe(false);
     expect(isSharedHandoffDecision(1)).toBe(false);
+  });
+
+  it('collectSkillUsesは起動時刻を持つskillContextだけを古い順に集める（Issue #2173）', () => {
+    const items = [
+      { kind: 'skillContext', detail: 'first', skillLaunchedAt: 1 },
+      { kind: 'skillContext', detail: 'reinjected' },
+      { kind: 'userMessage', detail: '', skillLaunchedAt: 2 },
+      { kind: 'skillContext', detail: '', skillLaunchedAt: 3 },
+      { kind: 'skillContext', detail: 'second', skillLaunchedAt: 4 },
+    ];
+    expect(collectSkillUses(items)).toEqual([
+      { name: 'first', at: 1 },
+      { name: 'second', at: 4 },
+    ]);
+    expect(collectSkillUses([])).toBeUndefined();
+  });
+
+  it('collectSkillUsesは新しい方からMAX_SHARED_SKILLS件に絞る（Issue #2173）', () => {
+    const items = Array.from({ length: MAX_SHARED_SKILLS + 5 }, (_, i) => ({
+      kind: 'skillContext',
+      detail: `s${String(i)}`,
+      skillLaunchedAt: i,
+    }));
+    const uses = collectSkillUses(items) ?? [];
+    expect(uses).toHaveLength(MAX_SHARED_SKILLS);
+    expect(uses[0]?.name).toBe('s5');
+    expect(uses.at(-1)?.name).toBe(`s${String(MAX_SHARED_SKILLS + 4)}`);
+  });
+
+  it('parseSharedSkillsは時刻が0以下や未来のものを落とす（Issue #2173）', () => {
+    const now = Date.parse('2026-11-26T12:00:00.000Z');
+    expect(
+      parseSharedSkills(
+        [
+          { name: 'zero', at: 0 },
+          { name: 'past', at: now - 1_000 },
+          { name: 'soon', at: now + 30_000 },
+          { name: 'future', at: now + 3_600_000 },
+        ],
+        now,
+      ),
+    ).toEqual([
+      { name: 'past', at: now - 1_000 },
+      { name: 'soon', at: now + 30_000 },
+    ]);
+  });
+
+  it('parseSharedSkillsは新しい方から有効な要素をMAX_SHARED_SKILLS件集めて止める（Issue #2173）', () => {
+    const valid = Array.from({ length: MAX_SHARED_SKILLS + 10 }, (_, i) => ({
+      name: `s${String(i)}`,
+      at: i + 1,
+    }));
+    // 末尾の壊れた要素は数えず、その手前から上限まで集める
+    const skills = parseSharedSkills([...valid, 'junk', { name: 1, at: 2 }], 1_000) ?? [];
+    expect(skills).toHaveLength(MAX_SHARED_SKILLS);
+    expect(skills[0]?.name).toBe('s10');
+    expect(skills.at(-1)?.name).toBe(`s${String(MAX_SHARED_SKILLS + 9)}`);
   });
 });
 
@@ -430,6 +490,35 @@ describe('SessionHubReader', () => {
     const s = reader.getOthers()[0]?.sessions[0];
     expect(s?.purpose).toBe('A B CDE');
     expect(s?.branch).toBe('x yz');
+  });
+
+  it('起動したskillは要素ごとに確かめ、名前を1行へ均す（Issue #2173）', async () => {
+    const { reader, internals } = makeReader();
+    const other = randomUUID();
+    const rlo = String.fromCodePoint(0x202e);
+    await putSessionFile(
+      other,
+      fileBody(other, [
+        session('ok', {
+          skills: [
+            { name: `a${rlo}b\nc`, at: 10 },
+            { name: 1, at: 20 },
+            { name: 'x', at: -1 },
+            { name: 'y', at: 9e15 },
+            'junk',
+            { name: 'z', at: 30 },
+          ] as never,
+        }),
+        session('junk', { skills: 'nope' as never }),
+      ]),
+    );
+    await internals.reconcileAll();
+    const sessions = reader.getOthers()[0]?.sessions ?? [];
+    expect(sessions[0]?.skills).toEqual([
+      { name: 'ab c', at: 10 },
+      { name: 'z', at: 30 },
+    ]);
+    expect(sessions[1]?.skills).toBeUndefined();
   });
 
   it('stale（mtimeまたはupdatedAtが45秒超）のウィンドウは除外する', async () => {

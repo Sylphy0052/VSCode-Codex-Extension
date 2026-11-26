@@ -92,6 +92,18 @@ export interface McSession {
   purpose?: string | undefined;
   /** 目的を要約したときのブランチ名（Issue #2172）。似た要約が並ぶときだけ添える。 */
   branch?: string | undefined;
+  /**
+   * セッションで起動したskill（Issue #2173。Claude Codeだけ）。古い順。skill名は外部由来の
+   * テキストなので、文字列として描くだけにする。まだ無いとき・古い版のウィンドウでは無い。
+   */
+  skills?: McSkillUse[] | undefined;
+}
+
+/** セッションで起動したskillの1件（Issue #2173）。 */
+export interface McSkillUse {
+  name: string;
+  /** 起動した時刻（ms）。 */
+  at: number;
 }
 
 /** レビュー待ちの変更1ファイル。 */

@@ -358,11 +358,22 @@ function applyUser(received: ChatState, event: Record<string, unknown>): ChatSta
     .map((part) => str(part['text']))
     .join('');
   const images = readClaudeResultImages(content, '送った画像');
-  const launchedSkill = event['isSynthetic'] === true ? launchedSkillName(items) : '';
-  const isSkillContext = isSkillContextEntry(event, text) || launchedSkill !== '';
+  const id = str(event['uuid']) || `user-${items.length}`;
+  // 同じ本文が同じuuidで届き直したら、最初に決めた種類と名前を保つ。届き直した本文は
+  // 受け取り済みの本文として数えられ、`launchedSkillName` が空や別の名前を返すため
+  const delivered = items.find((i) => i.id === id && i.kind === 'skillContext');
+  const launchedSkill =
+    delivered !== undefined
+      ? delivered.detail
+      : event['isSynthetic'] === true
+        ? launchedSkillName(items)
+        : '';
+  const isSkillContext =
+    delivered !== undefined || isSkillContextEntry(event, text) || launchedSkill !== '';
   if (text !== '' || images.length > 0) {
     items = upsert(items, {
-      id: str(event['uuid']) || `user-${items.length}`,
+      ...(isSkillContext ? { skillLaunchedAt: skillLaunchTime(items, id, event) } : {}),
+      id,
       kind: isSkillContext ? 'skillContext' : 'userMessage',
       text,
       // どのskillが動いたかを項目に残す（issue #889）。本文の `Base directory` から取る名前には
@@ -377,6 +388,23 @@ function applyUser(received: ChatState, event: Record<string, unknown>): ChatSta
   }
 
   return items === state.items ? state : { ...state, items };
+}
+
+/**
+ * skillを起動した時刻（ms、Issue #2173）。同じ項目が届き直したら最初の時刻を保つ。イベントに
+ * `timestamp`（ISO 8601）があればそれを、無ければ受け取った時刻を使う。
+ */
+function skillLaunchTime(
+  items: readonly ChatItem[],
+  id: string,
+  event: Record<string, unknown>,
+): number {
+  const existing = items.find((i) => i.id === id)?.skillLaunchedAt;
+  if (existing !== undefined) {
+    return existing;
+  }
+  const stamped = Date.parse(str(event['timestamp']));
+  return Number.isFinite(stamped) ? stamped : Date.now();
 }
 
 /** Skillツールの結果に返る文面（実測、issue #1968）。 */

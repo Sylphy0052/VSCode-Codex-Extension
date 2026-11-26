@@ -331,6 +331,8 @@ export function buildMissionControlSnapshot(input: McSnapshotInput): McSnapshot 
       // セッションの目的の1文要約（Issue #2172）
       purpose: session.purpose,
       branch: session.branch,
+      // 起動したskill（Issue #2173）
+      skills: session.skills,
     });
     for (const item of items) {
       addPending(item);

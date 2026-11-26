@@ -305,15 +305,24 @@ function appendUserEntry(
   //
   // plugin skillの本文は `Base directory for this skill:` で始まらず、`/<名前>` から
   // 起動すると `sourceToolUseID` も付かない（CLI 2.1.296で実測、issue #1968）。
-  // 直前の発言が `/<名前>` だったことを目印に拾い、名前もそちらから取る
+  // 直前の発言が `/<名前>` だったことを目印に拾い、名前もそちらから取る。
+  // Skillツールから起動した場合は `sourceToolUseID` が起動元のSkillツールを指すので、
+  // ストリーム側（streamJson.tsのapplyUser）と同じくそちらの名前を優先する（Issue #2173）
   if (entry['isMeta'] === true) {
     const skillText = cleanText(messageText(entry));
+    // 起動の時刻はMission Controlのskill履歴（Issue #2173）に使う。`invoked_skills`の注入には付けない
+    const launchedAt = entryTime(entry);
     if (skillText !== '' && isSkillContextEntry(entry, skillText)) {
-      items.push(
-        item(entry, 'skillContext', { text: skillText, detail: skillContextName(skillText) }),
-      );
+      const detail = sourceSkillName(entry, items, toolIndex) || skillContextName(skillText);
+      items.push({
+        ...item(entry, 'skillContext', { text: skillText, detail }),
+        ...(launchedAt === undefined ? {} : { skillLaunchedAt: launchedAt }),
+      });
     } else if (isSlashSkillBody(entry, skillText, slashCommand)) {
-      items.push(item(entry, 'skillContext', { text: skillText, detail: slashCommand }));
+      items.push({
+        ...item(entry, 'skillContext', { text: skillText, detail: slashCommand }),
+        ...(launchedAt === undefined ? {} : { skillLaunchedAt: launchedAt }),
+      });
     }
     return '';
   }
@@ -330,6 +339,42 @@ function appendUserEntry(
   }
   items.push(item(entry, 'userMessage', { text }));
   return slashCommandName(raw);
+}
+
+/** Skillツールの結果に返る文面（実測、issue #1968）。streamJson.tsと同じ。 */
+const SKILL_LAUNCH_PREFIX = 'Launching skill:';
+
+/** `describeTool` がSkillツールに付ける見出しの書き出し。 */
+const SKILL_TOOL_DETAIL_PREFIX = 'Skill: ';
+
+/**
+ * 注入本文の `sourceToolUseID` が指すSkillツールの項目からskill名を取る（Issue #2173）。
+ *
+ * plugin skillの本文は `Base directory for this skill:` で始まらず、本文からは名前が取れない。
+ * 結果の `Launching skill: <名前>` を優先し、結果がまだ無ければ呼び出しの見出しから取る。
+ * どちらも名前空間（`<plugin>:`）付きで、ストリーム側の名前と揃う。指す先が無ければ空文字。
+ */
+function sourceSkillName(
+  entry: Record<string, unknown>,
+  items: readonly ChatItem[],
+  toolIndex: ReadonlyMap<string, number>,
+): string {
+  const index = toolIndex.get(str(entry['sourceToolUseID']));
+  const tool = index === undefined ? undefined : items[index];
+  if (
+    tool === undefined ||
+    tool.kind !== 'mcpToolCall' ||
+    !tool.detail.startsWith(SKILL_TOOL_DETAIL_PREFIX)
+  ) {
+    return '';
+  }
+  if (tool.text.startsWith(SKILL_LAUNCH_PREFIX)) {
+    const launched = (tool.text.slice(SKILL_LAUNCH_PREFIX.length).split('\n', 1)[0] ?? '').trim();
+    if (launched !== '') {
+      return launched;
+    }
+  }
+  return tool.detail.slice(SKILL_TOOL_DETAIL_PREFIX.length).trim();
 }
 
 /**
@@ -767,6 +812,12 @@ function reinvocationSkillName(head: string): string {
     }
   }
   return '';
+}
+
+/** 行の`timestamp`（ISO 8601）をmsにしたもの。無い・読めないときは`undefined`。 */
+function entryTime(entry: Record<string, unknown>): number | undefined {
+  const time = Date.parse(str(entry['timestamp']));
+  return Number.isFinite(time) ? time : undefined;
 }
 
 function item(
