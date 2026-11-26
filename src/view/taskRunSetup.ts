@@ -24,6 +24,7 @@ import {
   readTaskRunPlanAutoApproveEnabled,
   readTaskRunResourceIntervalMs,
   readTaskRunResourceThresholds,
+  readToolUsageMetricsEnabled,
 } from '../config';
 import type { Logger } from '../log';
 import type { CliCommandRunner } from '../orchestrator/forge';
@@ -323,7 +324,11 @@ export function setupTaskRun(deps: TaskRunSetupDeps): vscode.Disposable[] {
     );
   };
 
-  const questionServer = new RoadmapQuestionMcpServer({ logWarn: warn });
+  // オーケストレータモードの接続もツールの実利用率を数える（Issue #2188。通常の会話と同じ形）
+  const questionServer = new RoadmapQuestionMcpServer({
+    logWarn: warn,
+    toolUsageMetrics: { enabled: readToolUsageMetricsEnabled, log: (line) => log.info(line) },
+  });
 
   const observation = createStageObservationPorts(ports);
 

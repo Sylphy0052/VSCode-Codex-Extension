@@ -172,6 +172,11 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
     const orch = new TaskRunOrchestrator(deps);
 
     await orch.open('run-1');
+    // ツール利用の計測の見出しに世代を入れる（Issue #2188）
+    expect(vi.mocked(deps.server.registerTools).mock.calls[0]?.[3]).toEqual({
+      runId: 'run-1',
+      connection: 'orchestrator-1',
+    });
     // 第1世代で498件送る（上限500まで残り2件）
     const gen1Events = Array.from({ length: 498 }, (_, i) => taskFailed(`E${String(i + 1)}`));
     for (const e of gen1Events) {
@@ -205,6 +210,22 @@ describe('TaskRunOrchestratorの引き継ぎ（Issue #1580）', () => {
     expect(sent).not.toContain('E502');
     expect((sent.match(/イベント通知が上限/g) ?? []).length).toBe(1);
     expect(sent).toContain(`（${String(MAX_ORCHESTRATOR_EVENTS_PER_RUN)}件/run）`);
+  });
+
+  it('runの終了・中断（close）と拡張の終了（dispose）でトークンを外す（計測の行を出す時点。Issue #2188）', async () => {
+    const runBox = { current: makeRun() };
+    const openTaskSession = vi
+      .fn()
+      .mockResolvedValueOnce(makeFakeSession('s1').session)
+      .mockResolvedValueOnce(makeFakeSession('s2').session);
+    const deps = makeDeps({ openTaskSession }, runBox);
+    const orch = new TaskRunOrchestrator(deps);
+    await orch.open('run-1');
+    await orch.close('run-1');
+    expect(deps.server.unregister).toHaveBeenCalledWith('token-1');
+    await orch.open('run-1');
+    orch.dispose();
+    expect(deps.server.unregister).toHaveBeenCalledWith('token-2');
   });
 
   it('自動引き継ぎで次の世代を開けなかったら、前の世代でrearmAutoHandoffを呼び使い続ける', async () => {

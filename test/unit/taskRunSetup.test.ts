@@ -441,6 +441,19 @@ describe('setupTaskRun: 組み立てと破棄', () => {
     expect(fakes.view.dispose).toHaveBeenCalledTimes(1);
   });
 
+  it('質問用MCPサーバへツール利用の計測の口を渡し、行は拡張のログへ出す（Issue #2188）', () => {
+    setup();
+    const metrics = opt('questionServer', 'toolUsageMetrics') as {
+      enabled: () => boolean;
+      log: (line: string) => void;
+    };
+    expect(typeof metrics.enabled).toBe('function');
+    metrics.log('[toolUsageMetrics task-run:r1/orchestrator-1] calls=1 kinds=1 tools=a:1');
+    expect(log.infos).toContain(
+      '[toolUsageMetrics task-run:r1/orchestrator-1] calls=1 kinds=1 tools=a:1',
+    );
+  });
+
   it('Orchestratorは工程セッションの後ろのトークンを外すためサーバより先に破棄する', () => {
     const order: string[] = [];
     fakes.orchestrator.dispose.mockImplementation(() => order.push('orchestrator'));

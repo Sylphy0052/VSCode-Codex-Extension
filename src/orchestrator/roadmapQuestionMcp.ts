@@ -15,6 +15,7 @@ import {
 } from './messaging';
 import { type HttpMcpServerHandle, startHttpMcpServer, type McpHttpTarget } from './mcpHttpServer';
 import { ROADMAP_QUESTION_ESCALATIONS, type RoadmapQuestionEscalation } from './roadmapShared';
+import { formatToolUsageMetricsLine, ToolUsageCounter } from './toolUsageMetrics';
 import { sanitizeInlineText } from './untrustedText';
 
 /**
@@ -429,7 +430,24 @@ export interface RoadmapQuestionMcpDeps {
     resolve: (token: string) => McpHttpTarget | undefined,
   ) => Promise<HttpMcpServerHandle>;
   logWarn?: (message: string) => void;
+  /**
+   * ツールの実利用率を数える口（Issue #2188。#1324の受入基準2の判断材料）。無ければ数えない。
+   * 有効かどうかは呼び出しのたびと出力の時点で読む（通常の会話の`sessionMessagingHost.ts`と同じ）。
+   */
+  toolUsageMetrics?: { enabled: () => boolean; log: (line: string) => void };
 }
+
+/**
+ * 計測の行の見出しに使うラベル。行は`[toolUsageMetrics task-run:<runId>/<connection>]`になる。
+ * `connection`は接続の種類（例: `orchestrator-3`、`stage-implement:T16`）。
+ */
+export interface RoadmapToolUsageLabel {
+  runId: string;
+  connection: string;
+}
+
+/** ラベルの各部分として行へ出す最大長。runIdはUUID、接続の種類は工程名とtaskIdなので当たらない。 */
+const MAX_TOOL_USAGE_LABEL_LENGTH = 120;
 
 /**
  * 1つのトークンに結び付けた接続先。見せるツールの組はトークンを登録するときに決める
@@ -441,6 +459,10 @@ interface Registration {
   tools: readonly McpToolDefinition[];
   /** ツール名は`tools`のどれかであることを確かめてから呼ぶ。 */
   call: (name: string, rawArgs: unknown) => Promise<RoadmapAskOutcome>;
+  /** 計測の行の見出し。無ければこの登録は数えない。 */
+  usageLabel?: RoadmapToolUsageLabel | undefined;
+  /** 最初に数えるときに作る（1度も呼ばれなかった登録は行を出さない）。 */
+  usage?: ToolUsageCounter | undefined;
 }
 
 export class RoadmapQuestionMcpServer {
@@ -457,6 +479,7 @@ export class RoadmapQuestionMcpServer {
   register(
     connectionId: string,
     handler: RoadmapAskHandler,
+    usageLabel?: RoadmapToolUsageLabel,
   ): Promise<{ url: string; token: string }> {
     return this.add({
       connectionId,
@@ -465,6 +488,7 @@ export class RoadmapQuestionMcpServer {
         const parsed = parseRoadmapAskArgs(rawArgs);
         return parsed.ok ? handler(parsed.args) : { text: parsed.message, isError: true };
       },
+      usageLabel,
     });
   }
 
@@ -476,8 +500,9 @@ export class RoadmapQuestionMcpServer {
     connectionId: string,
     tools: readonly McpToolDefinition[],
     call: (name: string, rawArgs: unknown) => Promise<RoadmapAskOutcome>,
+    usageLabel?: RoadmapToolUsageLabel,
   ): Promise<{ url: string; token: string }> {
-    return this.add({ connectionId, tools, call });
+    return this.add({ connectionId, tools, call, usageLabel });
   }
 
   private async add(registration: Registration): Promise<{ url: string; token: string }> {
@@ -498,12 +523,24 @@ export class RoadmapQuestionMcpServer {
     return { url: handle.urlForToken(token), token };
   }
 
+  /**
+   * 登録を解除する。数えた利用があれば、ここで1行出す（工程1回・Orchestratorの世代1回ごと。
+   * run終了時だけにすると、長いrunの途中で拡張が落ちたときに失われる）。
+   */
   unregister(token: string): void {
+    const registration = this.registrations.get(token);
     this.registrations.delete(token);
+    if (registration !== undefined) {
+      this.emitToolUsage(registration);
+    }
   }
 
   dispose(): void {
     this.disposed = true;
+    // 拡張の終了・Reloadで解除されずに残っている登録の分も出す
+    for (const registration of this.registrations.values()) {
+      this.emitToolUsage(registration);
+    }
     this.registrations.clear();
     const server = this.server;
     this.server = undefined;
@@ -568,7 +605,56 @@ export class RoadmapQuestionMcpServer {
     if (typeof name !== 'string' || !registration.tools.some((t) => t.name === name)) {
       return failure(request.id, -32602, `未知のツールです: ${String(name)}`);
     }
+    this.recordToolUsage(registration, name);
     const outcome = await registration.call(name, params.arguments);
     return success(request.id, toolTextResult(outcome.text, outcome.isError));
+  }
+
+  /** 登録済みのツール名だと確かめた後に呼ぶ。計測の失敗はツール呼び出しを止めない。 */
+  private recordToolUsage(registration: Registration, name: string): void {
+    const metrics = this.deps.toolUsageMetrics;
+    if (metrics === undefined || registration.usageLabel === undefined) {
+      return;
+    }
+    try {
+      if (!metrics.enabled()) {
+        return;
+      }
+      registration.usage ??= new ToolUsageCounter();
+      registration.usage.record(
+        sanitizeInlineText(registration.usageLabel.connection, MAX_TOOL_USAGE_LABEL_LENGTH),
+        name,
+      );
+    } catch (e) {
+      this.deps.logWarn?.(
+        `[roadmap question] ツール利用の計測に失敗: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /**
+   * 登録1つ分の利用を1行出す。出力の時点で無効なら途中まで数えた分も出さない。
+   * 失敗しても登録の解除・サーバの終了を止めないよう、例外はここで握る
+   * （`runnerMessaging.ts`の`emitToolUsageMetrics`と同じ）。
+   */
+  private emitToolUsage(registration: Registration): void {
+    const metrics = this.deps.toolUsageMetrics;
+    const usage = registration.usage;
+    const label = registration.usageLabel;
+    registration.usage = undefined;
+    if (metrics === undefined || usage === undefined || label === undefined || usage.isEmpty()) {
+      return;
+    }
+    try {
+      if (!metrics.enabled()) {
+        return;
+      }
+      const runLabel = `task-run:${sanitizeInlineText(label.runId, MAX_TOOL_USAGE_LABEL_LENGTH)}`;
+      for (const counts of usage.snapshot()) {
+        metrics.log(formatToolUsageMetricsLine(runLabel, counts));
+      }
+    } catch {
+      // 計測の失敗は後始末に影響させない
+    }
   }
 }
