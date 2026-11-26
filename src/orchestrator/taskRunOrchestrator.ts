@@ -11,7 +11,7 @@ import {
   RESOURCE_RELEASE_NOTIFY_DELAY_MS,
   type StartPolicy,
 } from './resourceMonitor';
-import type { RoadmapAskOutcome } from './roadmapQuestionMcp';
+import type { RoadmapAskOutcome, RoadmapToolUsageLabel } from './roadmapQuestionMcp';
 import {
   MAX_RECORD_LESSON_CALLS_PER_RUN,
   withLessonReminder,
@@ -181,6 +181,8 @@ export interface TaskRunOrchestratorDeps {
       connectionId: string,
       tools: readonly McpToolDefinition[],
       call: (name: string, rawArgs: unknown) => Promise<RoadmapAskOutcome>,
+      /** ツール利用の計測の行の見出し（Issue #2188）。 */
+      usageLabel?: RoadmapToolUsageLabel,
     ): Promise<{ url: string; token: string }>;
     unregister(token: string): void;
   };
@@ -657,6 +659,7 @@ export class TaskRunOrchestrator {
             (tool.name !== 'start_self_improve_run' || this.deps.startSelfImproveRun !== undefined),
         ),
         (name, rawArgs) => this.callTool(runId, generation, name, rawArgs),
+        { runId, connection: `orchestrator-${String(generation)}` },
       );
       session = await this.deps.hosts[run.engine].openTaskSession({
         role: 'orchestrator',
