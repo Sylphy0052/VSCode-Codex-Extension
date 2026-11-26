@@ -68,8 +68,14 @@ export async function loadUsageHistory(
 /**
  * 利用枠の記録から推移を組む。
  *
- * - 時刻は窓の計測時刻（`sampledAt`）、無ければ値を受け取った時刻（`capturedAt`）、それも
- *   無ければ記録した時刻を使う。複数のウィンドウが同じ値を残すので、同じ時刻・同じ値は1点にする
+ * - 時刻は窓の計測時刻（`sampledAt`）を使う。複数のウィンドウが同じ値を残すので、同じ時刻・
+ *   同じ値は1点にする
+ * - 計測時刻の無い窓（Claudeの「セッション」など）は、そのウィンドウで値が変わった記録の時刻
+ *   （`at`）を使い、変わっていない記録は捨てる。記録は値が届くたびに書くので、値が変わった記録の
+ *   時刻が受け取った時刻に当たる。`capturedAt`は全部の枠のうち最も古い受け取り時刻なので、
+ *   この窓の時刻には使えない（古い枠が残っていると、全部の点がその時刻へ寄る）。変わっていない
+ *   記録を捨てるのは、ほかの枠が変わったときに古い値が新しい時刻で書き直され、別のウィンドウの
+ *   新しい値と交互に並んでリセットに見えるのを防ぐため
  * - リセット時刻を過ぎてから残った値は今の値ではないので捨てる
  * - 日別の使用量は、リセットまでの区切りの中で使用率が最大値を更新した分を、その点の日に足す。
  *   リセットの後は0から数える。期間の最初の点は、それより前の使用量が分からないので数えない
@@ -82,7 +88,10 @@ export function buildUsageHistory(
   const dayStarts = dayStartsOf(now, days);
   const since = dayStarts[0] ?? now;
   const drafts = new Map<string, SeriesDraft>();
-  for (const record of records) {
+  /** 計測時刻の無い窓の、ウィンドウごとの直前の値。 */
+  const lastUnsampled = new Map<string, number>();
+  const ordered = [...records].sort((a, b) => a.at - b.at);
+  for (const record of ordered) {
     if (record.kind !== 'usage') {
       continue;
     }
@@ -91,15 +100,26 @@ export function buildUsageHistory(
       if (used === undefined || !Number.isFinite(used)) {
         continue;
       }
-      const at = window.sampledAt ?? record.capturedAt ?? record.at;
+      const label = sanitizeInlineText(window.label, LABEL_MAX_LENGTH);
+      const key = `${record.provider}\n${label}`;
+      let at: number;
+      if (window.sampledAt !== undefined) {
+        at = window.sampledAt;
+      } else {
+        const memoKey = `${record.windowId}\n${key}`;
+        const previous = lastUnsampled.get(memoKey);
+        lastUnsampled.set(memoKey, used);
+        if (previous === used) {
+          continue;
+        }
+        at = record.at;
+      }
       if (at < since || at > now) {
         continue;
       }
       if (window.resetsAt !== undefined && at >= window.resetsAt) {
         continue;
       }
-      const label = sanitizeInlineText(window.label, LABEL_MAX_LENGTH);
-      const key = `${record.provider}\n${label}`;
       let draft = drafts.get(key);
       if (draft === undefined) {
         draft = { provider: record.provider, label, windowMs: undefined, samples: [] };

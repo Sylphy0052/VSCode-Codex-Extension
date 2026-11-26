@@ -155,6 +155,48 @@ describe('buildUsageHistory', () => {
     expect(series?.segments).toEqual([[{ at: sampled, usedPercent: 20 }]]);
   });
 
+  it('計測時刻の無い窓は、全部の枠の最古の受け取り時刻（capturedAt）でなく値が変わった記録の時刻を使う', () => {
+    // `capturedAt`は前日に届いた別の枠の時刻のまま。使うと全部の点が前日の1時刻へ寄る
+    const captured = at(25, 8);
+    const session = (used: number): WorkHistoryUsageWindow => ({
+      label: 'セッション',
+      usedPercent: used,
+      limited: false,
+    });
+    const records: WorkHistoryRecord[] = [
+      usage(at(26, 9), [session(10)], { provider: 'claude', capturedAt: captured }),
+      usage(at(26, 10), [session(20)], { provider: 'claude', capturedAt: captured }),
+      usage(at(26, 11), [session(30)], { provider: 'claude', capturedAt: captured }),
+    ];
+    const [series] = buildUsageHistory(records, NOW, 2).series;
+    expect(series?.segments).toEqual([
+      [
+        { at: at(26, 9), usedPercent: 10 },
+        { at: at(26, 10), usedPercent: 20 },
+        { at: at(26, 11), usedPercent: 30 },
+      ],
+    ]);
+    expect(series?.daily).toEqual([0, 20]);
+  });
+
+  it('計測時刻の無い窓で、別のウィンドウが古い値を書き直しても区切らず二重に数えない', () => {
+    const session = (used: number): WorkHistoryUsageWindow => ({
+      label: 'セッション',
+      usedPercent: used,
+      limited: false,
+    });
+    const records: WorkHistoryRecord[] = [
+      usage(at(26, 1), [session(20)], { provider: 'claude', windowId: 'b' }),
+      usage(at(26, 2), [session(40)], { provider: 'claude', windowId: 'a' }),
+      // `b`はほかの枠が変わっただけで、古い20%を新しい時刻で書き直す
+      usage(at(26, 3), [session(20)], { provider: 'claude', windowId: 'b' }),
+      usage(at(26, 4), [session(45)], { provider: 'claude', windowId: 'a' }),
+    ];
+    const [series] = buildUsageHistory(records, NOW, 1).series;
+    expect(series?.segments.map((s) => s.map((p) => p.usedPercent))).toEqual([[20, 40, 45]]);
+    expect(series?.daily).toEqual([25]);
+  });
+
   it('リセット時刻を過ぎてから残った値・期間外・使用率の無い窓は捨てる', () => {
     const records: WorkHistoryRecord[] = [
       usage(at(26, 9), [weekly(50, at(26, 8))]),
