@@ -169,6 +169,15 @@ button:focus-visible, .row:focus-visible { outline: 2px solid var(--vscode-focus
 .session-row.status-stalled { --status: var(--vscode-charts-red); }
 .session-row.status-stalled::before { background: repeating-linear-gradient(180deg, var(--status) 0 4px, transparent 4px 7px); }
 .session-row.attention::before { width: 5px; }
+/* 返事待ち（Issue 2171）。長い待ちは色に加えて帯と枠を破線にする。未読は丸付きのバッジと太い帯 */
+.session-row.status-replyWait { --status: var(--vscode-charts-green, var(--vscode-charts-blue)); }
+.session-row.status-replyWaitLong { --status: var(--vscode-charts-red); }
+.session-row.status-replyWaitLong::before { background: repeating-linear-gradient(180deg, var(--status) 0 4px, transparent 4px 7px); }
+.session-row.unread::before { width: 5px; }
+.session-row.unread .row-title { font-weight: 700; }
+.pill.replyWait { --pill: var(--vscode-charts-green, var(--vscode-charts-blue)); }
+.pill.replyWaitLong { --pill: var(--vscode-charts-red); border-style: dashed; }
+.badge.unread { display: inline-block; margin-right: 4px; padding: 0 5px; border-radius: 9px; font-size: 11px; line-height: 15px; color: var(--vscode-foreground); background: color-mix(in srgb, var(--vscode-charts-blue) 28%, transparent); border: 1px solid var(--vscode-charts-blue); }
 .row-facts { grid-column: 2 / 4; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); font-size: 11px; font-variant-numeric: tabular-nums; }
 .grid .row-facts { grid-column: 1 / 3; }
 .row-sub .badge { margin-left: 6px; }
@@ -184,7 +193,7 @@ button:focus-visible, .row:focus-visible { outline: 2px solid var(--vscode-focus
 /* カード（グリッド）。帯は左端、カードの枠は状態の色を薄く混ぜる */
 .grid .session-row { gap: 4px 8px; padding: 8px 10px 8px 12px; background: var(--vscode-editorWidget-background, transparent); border-color: color-mix(in srgb, var(--status) 45%, var(--vscode-panel-border)); }
 .grid .session-row.status-idle { border-color: var(--vscode-panel-border); }
-.grid .session-row.status-stalled { border-style: dashed; }
+.grid .session-row.status-stalled, .grid .session-row.status-replyWaitLong { border-style: dashed; }
 .grid .session-row .row-out { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 /* 上のカードの背景より後ろに置き、ホバーと選択の背景を一覧表示と同じく出す */
 .grid .session-row:hover { background: var(--vscode-list-hoverBackground); }
@@ -210,6 +219,7 @@ button:focus-visible, .row:focus-visible { outline: 2px solid var(--vscode-focus
 .mc.compact .pane-title { padding-top: 4px; padding-bottom: 4px; }
 .mc.compact .group-title { padding-top: 2px; padding-bottom: 2px; }
 /* ハイコントラストでは塗りを消して枠と模様で示す */
+body.vscode-high-contrast .badge.unread, body.vscode-high-contrast-light .badge.unread { background: transparent; border-color: var(--vscode-contrastBorder, var(--vscode-charts-blue)); }
 body.vscode-high-contrast .badge.attention, body.vscode-high-contrast-light .badge.attention { background: transparent; border-color: var(--vscode-contrastBorder, var(--vscode-charts-yellow)); }
 body.vscode-high-contrast .grid .session-row, body.vscode-high-contrast-light .grid .session-row { background: transparent; border-color: var(--vscode-contrastBorder, var(--vscode-panel-border)); }
 body.vscode-high-contrast .run-progress, body.vscode-high-contrast-light .run-progress { background: transparent; outline: 1px solid var(--vscode-contrastBorder, var(--vscode-panel-border)); }

@@ -182,6 +182,8 @@ export function parseAction(message: Record<string, unknown>): SessionControlAct
       return { kind: 'clear' };
     case 'handoff':
       return { kind: 'handoff' };
+    case 'markRead':
+      return { kind: 'markRead' };
     case 'rewindPreview':
     case 'rewind': {
       const messageId = parseTurnId(message.messageId);
@@ -360,6 +362,7 @@ export function toSessionControlAction(
     case 'unpin':
     case 'clear':
     case 'handoff':
+    case 'markRead':
       return parseAction({ action: request.kind });
     case 'rewindPreview':
     case 'rewind':

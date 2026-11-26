@@ -49,8 +49,11 @@ import {
   formatElapsed,
   groupSessionsByRepo,
   cardStatus,
+  cardStatusLabel,
+  DEFAULT_REPLY_WAIT_MS,
   formatCost,
   formatTokens,
+  isUnreadReply,
   needsAttention,
   stalledSince,
   KEY_HELP,
@@ -1722,6 +1725,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                           session={session}
                           now={now}
                           stallMs={snapshot.stallMs}
+                          replyWaitMs={snapshot.replyWaitMs ?? DEFAULT_REPLY_WAIT_MS}
                           selected={selected === sessionRowId(session)}
                           marked={marks.has(session.key)}
                           onSelect={() => setSelected(sessionRowId(session))}
@@ -1765,6 +1769,7 @@ export function App(props: { bridge: Bridge }): JSX.Element {
                 onToast={setToast}
                 now={now}
                 stallMs={snapshot.stallMs}
+                replyWaitMs={snapshot.replyWaitMs ?? DEFAULT_REPLY_WAIT_MS}
                 onSend={(text, attachments) => sendTo(selectedSession, text, attachments)}
                 composerKeys={composerKeys}
                 pending={(snapshot.pending ?? []).filter(
@@ -2003,25 +2008,47 @@ function PendingRow(props: {
   );
 }
 
-/** 状態のピル。実行中で出力が止まっていれば「停滞」にする（Issue #2137の5）。 */
-function ActivityPill(props: { session: McSession; now: number; stallMs: number }): JSX.Element {
-  const { session, now, stallMs } = props;
-  const status = cardStatus(session, now, stallMs);
+/** ピルのhoverの説明。 */
+const PILL_TITLES: Partial<Record<McCardStatus, string>> = {
+  stalled: '実行中ですが、出力が止まっています',
+  replyWait: 'ターンが終わり、あなたの返事を待っています',
+  replyWaitLong: 'あなたの返事を長く待っています',
+};
+
+/**
+ * 状態のピル。実行中で出力が止まっていれば「停滞」（Issue #2137の5）、待機中の通常チャットは
+ * 「返事待ち」（Issue #2171）にする。
+ */
+function ActivityPill(props: {
+  session: McSession;
+  now: number;
+  stallMs: number;
+  replyWaitMs: number;
+}): JSX.Element {
+  const { session, now, stallMs, replyWaitMs } = props;
+  const status = cardStatus(session, now, stallMs, replyWaitMs);
   const since = stalledSince(session);
-  const label = status === 'stalled' ? '停滞' : ACTIVITY_LABELS[session.activity];
+  const label = cardStatusLabel(status);
   // 状態が変わると作り直して、ピルの出現のアニメーションで変化（完了など）を知らせる
   return (
-    <span
-      key={status}
-      class={`pill ${status}`}
-      title={status === 'stalled' ? '実行中ですが、出力が止まっています' : undefined}
-    >
+    <span key={status} class={`pill ${status}`} title={PILL_TITLES[status]}>
       <StatusIcon status={status} label={label} decorative />
       {status === 'stalled' && since !== undefined
         ? `${label} ${formatElapsed(now - since)}`
-        : label}
+        : status === 'replyWaitLong'
+          ? `${label} ${formatElapsed(now - session.activitySince)}`
+          : label}
     </span>
   );
+}
+
+/** 未読の印（Issue #2171）。返事待ちのうち、ターンの終わりをまだ人が見ていないもの。 */
+function UnreadBadge(props: { session: McSession }): JSX.Element | null {
+  return isUnreadReply(props.session) ? (
+    <span class="badge unread" title="ターンが終わってから、まだ表示していません">
+      ● 未読
+    </span>
+  ) : null;
 }
 
 /** カードの補足（model・トークン・費用）。取れたものだけを並べる。 */
@@ -2074,13 +2101,14 @@ function SessionRow(props: {
   session: McSession;
   now: number;
   stallMs: number;
+  replyWaitMs: number;
   selected: boolean;
   /** 複数選択（`x`）に入っているか。 */
   marked: boolean;
   onSelect: () => void;
 }): JSX.Element {
   const { session } = props;
-  const status: McCardStatus = cardStatus(session, props.now, props.stallMs);
+  const status: McCardStatus = cardStatus(session, props.now, props.stallMs, props.replyWaitMs);
   const attention = needsAttention(session);
   const facts = sessionFacts(session);
   const classes = [
@@ -2088,6 +2116,7 @@ function SessionRow(props: {
     'session-row',
     `status-${status}`,
     attention ? 'attention' : '',
+    isUnreadReply(session) ? 'unread' : '',
     props.selected ? 'selected' : '',
     props.marked ? 'marked' : '',
   ]
@@ -2112,7 +2141,13 @@ function SessionRow(props: {
       )}
       <span class="row-title">{session.title}</span>
       <span class="row-meta">
-        <ActivityPill session={session} now={props.now} stallMs={props.stallMs} />{' '}
+        <UnreadBadge session={session} />
+        <ActivityPill
+          session={session}
+          now={props.now}
+          stallMs={props.stallMs}
+          replyWaitMs={props.replyWaitMs}
+        />{' '}
         {formatElapsed(props.now - session.activitySince)}
       </span>
       {facts.length === 0 ? null : <span class="row-facts">{facts.join(' · ')}</span>}
@@ -2286,6 +2321,7 @@ function SessionDetail(props: {
   onToast: (message: string) => void;
   now: number;
   stallMs: number;
+  replyWaitMs: number;
   pending: readonly McPendingItem[];
   /** 会話（Issue #2157）。宛先ごとの取り寄せは`App`が持つ。 */
   conversation: JSX.Element;
@@ -2304,7 +2340,12 @@ function SessionDetail(props: {
         <ProviderIcon provider={session.provider} /> {session.title}
       </h2>
       <p class="notice" title={session.cwdFull}>
-        <ActivityPill session={session} now={props.now} stallMs={props.stallMs} />{' '}
+        <ActivityPill
+          session={session}
+          now={props.now}
+          stallMs={props.stallMs}
+          replyWaitMs={props.replyWaitMs}
+        />{' '}
         {formatElapsed(props.now - session.activitySince)} · {session.cwdLabel} ·{' '}
         {session.isCurrentWindow ? 'このウィンドウ' : '別ウィンドウ'}
       </p>

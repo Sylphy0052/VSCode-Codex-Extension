@@ -209,6 +209,16 @@ export interface BaseChatPanel {
    */
   handoffKeptUserMessages?: number | undefined;
   /**
+   * 前回`fireStateChanged`で見た活動状態（Issue #2171）。ターンの終わり（idle以外→idle）を
+   * 見分けて未読の印を立てるのに使う。まだ見ていなければ`undefined`。
+   */
+  lastSeenActivity?: SessionActivityState | undefined;
+  /**
+   * 返事待ちの未読（Issue #2171）。ターンが終わったときにタブが見えていなければ立て、
+   * タブを表示したとき・Mission Controlの詳細ペインで表示したとき（`markRead`）に下げる。
+   */
+  replyUnread?: boolean | undefined;
+  /**
    * 自動引き継ぎで初回プロンプトを送り終えた引き継ぎ元の印（Issue #1790）。印が無ければ`undefined`。
    *
    * 引き継いだ後も、引き継ぎ元はバックグラウンド処理の完了通知などで自分からターンを始める
@@ -375,6 +385,11 @@ export type SessionControlAction =
    */
   | { kind: 'pin' }
   | { kind: 'unpin' }
+  /**
+   * 返事待ちの未読を既読にする（Issue #2171）。Mission Controlが詳細ペインでその会話を
+   * 表示したときに送る。会話を持つウィンドウで下げ、共有ファイル経由で全ウィンドウへ伝わる。
+   */
+  | { kind: 'markRead' }
   /** 会話を捨てて同じフォルダで新しい会話を始める（`/clear`相当）。 */
   | { kind: 'clear' }
   /** 新しいセッションへの引き継ぎを始める（コマンドの「引き継ぎ」と同じ手動の契機）。 */
@@ -814,6 +829,10 @@ export interface ManagedChatSession {
    * Attention Indexが「引き継いだはずのタブが残っている」項目を作るのに使う。
    */
   handoffKept: OldTabKeptReason | undefined;
+  /** オーケストレータ配下の子セッションか（Issue #2171。返事待ちに出さない）。 */
+  taskManaged?: boolean | undefined;
+  /** 返事待ちのまま、まだ人が見ていないか（Issue #2171）。 */
+  replyUnread?: boolean | undefined;
 }
 
 /**
@@ -986,14 +1005,49 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
         activity: this.activityStateOf(entry),
         loop: { running: entry.loop.running, paused: entry.loop.isPaused },
         handoffKept: entry.handoffKept,
+        taskManaged: entry.taskManaged,
+        replyUnread: entry.replyUnread === true,
       });
     }
     return sessions;
   }
 
+  /**
+   * 返事待ちの未読を下げる（Issue #2171）。Mission Controlの詳細ペインで表示したときに
+   * `markRead`の操作から、タブを表示したときに`attachPanel`から呼ぶ。変わったら一覧を数え直させる。
+   */
+  protected markReplyRead(entry: TPanel): void {
+    if (entry.replyUnread !== true) {
+      return;
+    }
+    entry.replyUnread = false;
+    this.panelsChanged.fire();
+  }
+
+  /**
+   * ターンの終わり（idle以外→idle）を見て、返事待ちの未読を立てる（Issue #2171）。
+   * タブが見えていれば人が見ているので立てない。次のターンが始まったら下げる（返事待ちでなくなる）。
+   * オーケストレータ配下と引き継ぎ元として残ったタブは返事待ちに出さないので立てない。
+   */
+  private trackReplyUnread(entry: TPanel): void {
+    const activity = this.activityStateOf(entry);
+    const previous = entry.lastSeenActivity;
+    entry.lastSeenActivity = activity;
+    if (activity !== 'idle') {
+      entry.replyUnread = false;
+      return;
+    }
+    if (previous === undefined || previous === 'idle') {
+      return;
+    }
+    entry.replyUnread =
+      !entry.taskManaged && entry.handoffKept === undefined && entry.panel?.visible !== true;
+  }
+
   /** サブクラスの`postState`から呼ぶ。webviewへ送るのと同じ内容を進捗画面へも配る。 */
   protected fireStateChanged(entry: TPanel, state: ChatState): void {
     this.clearHandoffKeptIfReused(entry, state);
+    this.trackReplyUnread(entry);
     // お気に入り（Issue #1366）はスレッドIDが未確定の間`null`（メニュー非表示）、
     // 確定したタイミングで実値を送りたいので、下の早期returnより前に置く
     this.postFavorite(entry);
@@ -1360,6 +1414,8 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
     const onViewState = panel.onDidChangeViewState(() => {
       if (panel.visible) {
         entry.lastKnownViewColumn = panel.viewColumn;
+        // タブを表示したら返事待ちを既読にする（Issue #2171）
+        this.markReplyRead(entry);
       }
       if (panel.active) {
         this.active = entry;
@@ -1760,6 +1816,9 @@ export abstract class BaseChatViewManager<TPanel extends BaseChatPanel>
       case 'unpin':
         // 履歴の印は会話に属さない。`extension.ts`が要求元のウィンドウで済ませる
         return { ok: false, error: 'ピン留めは会話への操作として扱えません' };
+      case 'markRead':
+        this.markReplyRead(entry);
+        return { ok: true };
       case 'rename':
       case 'fork':
       case 'clear':

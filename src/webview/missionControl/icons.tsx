@@ -71,6 +71,13 @@ const STATUS_PATHS: Record<McCardStatus, JSX.Element[]> = {
   handoffPending: [<path key="a" d="M2.5 8h10M9.5 4.5 13 8l-3.5 3.5" />],
   // 中抜きの丸（待機）
   idle: [<circle key="a" cx="8" cy="8" r="4" />],
+  // 吹き出し（返事待ち。Issue #2171）
+  replyWait: [<path key="a" d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" />],
+  // 吹き出しと感嘆符（返事待ちが長い）
+  replyWaitLong: [
+    <path key="a" d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" />,
+    <path key="b" d="M8 5.2v2.4M8 9.2v.1" />,
+  ],
 };
 
 /** `decorative`は隣に同じ文言があるとき（ピルの中など）。読み上げを重ねないよう隠す。 */
